@@ -1,0 +1,213 @@
+#!/bin/bash
+
+# Description:
+#   rsd is a generic command loader from the command line
+#
+#   for commands, actually, are bash functions.
+#   the idea is the group classes of commands (or tasks) into modules
+#   and let rsd call it to have a unty experience
+#
+# Exit codes:
+#   0 - SUCCESS
+#   1 - Not bash 4
+#   2 - Bad usage
+#   3 - Command not found
+#   5 - No rsd.lib
+#   6 - Missing system files (maybe not installed)
+#   7 - Mismatch information
+#   8 - To be done in the future
+#   10 - Command failure (unknown reason)
+
+RSD_VERSION='0.2.0'
+VERSION=$RSD_VERSION
+
+RSD_DEBUG=0
+DEBUG=$RSD_DEBUG
+
+# preserves arguments
+RSD_ORIGINAL_ARGS="$0 $@"
+
+# if a function returns error, this is the reason
+# TODO: write a better API to handle errors
+RSD_ERROR_MSG=""
+
+# base path to libraries
+RSD_BASE=""
+
+RSD=$(basename $0)
+
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  echo "BASH >= 4 required.  Got $BASH_VESION"
+  exit 1
+fi
+
+shopt -s extglob
+
+declare -A RSD_ARGS=( ["subargs"]="" ["command"]="")
+# paramenters arguments
+# 0 => No argument
+# 1 => One argument
+# unknown defaults to 1
+declare -A RSD_ARGS_PARAM=( ["debug"]=1 ["d"]=1 ["version"]=0 )
+
+
+function rsd::version_gt() {
+  test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1";
+}
+
+function rsd::usage() {
+  echo "$RSD v$RSD_VERSION"
+  echo "Usage:"
+  echo -e "\t$RSD <command> [OPTIONS]"
+  echo -e "\tCommands:"
+
+  exit 2
+}
+
+function rsd::debug() {
+  local msg=$1
+  shift
+  local level=1
+
+  if (($#>0));then
+    level=$1
+  fi
+  if (( $RSD_DEBUG >= $level )); then
+    echo "$level:$msg"
+  fi
+}
+
+#same as rsd::debug, but the level comes first, for convenience
+function rsd::debug2() {
+  local level=$1
+  shift
+
+  if (( $RSD_DEBUG >= $level )); then
+    echo "$level:" $@
+  fi
+}
+
+#Finds a file in the path
+function rsd::check_binary() {
+  local file=$1
+  local path
+  local IFS=":"
+
+  for path in $PATH; do
+    if [[ -f "$path/$file" ]]; then
+      return 0
+    fi
+  done
+
+  RSD_ERROR_MSG="Command $file not in PATH."
+  return 1
+}
+
+function rsd::check_binaries() {
+  local file
+  local path
+  local IFS=":"
+
+  for file in $*;  do
+    if ! rsd::check_binary $file; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+function rsd::check_binaries_or_fail() {
+  if ! rsd::check_binaries $@; then
+	echo $RSD_ERROR_MSG
+	exit 3
+  fi
+  return 0
+}
+
+
+function rsd::parse_args() {
+  local arg
+  local count=0
+
+  rsd::debug2 8 "rsd::parse_args: Total: $#, Arguments:" $@
+  rsd::debug2 8 "rsd::parse_args: RSD_ARGS subargs: " ${RSD_ARGS["subargs"]}
+
+  RSD_ARGS["subargs"]=
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --*)
+        arg=${1:2}
+        if rsd::key_exists $arg in RSD_ARGS_PARAM; then
+          if [[ "${RSD_ARGS_PARAM[$arg]}" == "0" ]]; then
+            RSD_ARGS[${arg,,}]=1
+          else
+            RSD_ARGS[${arg,,}]=$2
+            shift
+          fi
+        else
+          RSD_ARGS[${arg,,}]=$2
+          shift
+        fi
+        ;;
+      -*)
+        arg=${1:1}
+        if rsd::key_exists $arg in RSD_ARGS_PARAM; then
+          if [[ "${RSD_ARGS_PARAM[$arg]}" == "0" ]]; then
+            RSD_ARGS[${arg,,}]=1
+          else
+            RSD_ARGS[${arg,,}]=$2
+            shift
+          fi
+        else
+          RSD_ARGS[${arg,,}]=$2
+          shift
+        fi
+        ;;
+      *)
+        if ((count == 1)); then
+          RSD_ARGS["subargs"]=$*
+          shift
+          break
+        fi
+        RSD_ARGS["command"]=$1
+
+        ((count++))
+        ;;
+    esac
+    shift
+  done
+}
+
+function rsd::key_exists() {
+  if [[ "$2" != in ]]; then
+    echo "Incorrect usage."
+    echo "Correct usage: rsd::key_exists {key} in {array}"
+    return 1
+  fi
+  eval '[ ${'$3'[$1]+muahaha} ]'
+}
+
+# __main__
+# FIXME: as a recursive command calling, this is worked outside a function (for now at least)
+
+rsd::parse_args $*
+
+# import rsd::debug level
+if   [[ ${RSD_ARGS["debug"]} ]]; then
+	RSD_DEBUG=${RSD_ARGS["debug"]}
+elif [[ ${RSD_ARGS[d]} ]]    ; then
+	RSD_DEBUG=${RSD_ARGS[d]}
+fi
+rsd::debug "Debug set to $RSD_DEBUG" 2
+rsd::debug2 9 "Arguments parsed (values): keys -> (${RSD_ARGS[@]}): " ${!RSD_ARGS[@]}
+rsd::debug "Original call was $RSD_ORIGINAL_ARGS" 7
+
+# version
+if [[ ${RSD_ARGS[version]} ]]; then
+  echo $RSD_VERSION
+  exit 0
+fi
+
+# FIXME: for now
+exit 0
