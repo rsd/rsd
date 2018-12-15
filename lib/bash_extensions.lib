@@ -1,0 +1,27 @@
+#!/bin/bash
+
+BASH_EXTENSIONS_VERSION='0.2.1'
+
+# functions to help bash as a language
+# prefixed with bash::
+
+function bash::is_function() {
+    local func=$1
+
+    if [[ $(type -t $func) ]] && [[ $(type -t $func) = function ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Test if key exist in array:
+# if ! bash::key_exists key in array; then echo "No such array element"; fi
+function bash::key_exists(){
+    if [[ "$2" != "in" ]]; then
+        echo "Incorrect usage of bash::key_exists."
+        echo "Correct usage: bash::key_exists {key} in {array}"
+        exit 11
+    fi
+    eval '[ ${'$3'[$1]+muahaha} ]'
+}
