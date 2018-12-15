@@ -14,9 +14,11 @@
 #
 # rsd options:
 #   --debug LEVEL | -d LEVEL
-#     set the debug level
+#       set the debug level
 #   --lib-dir PATH | -l PATH
-#     use PATH as libdir
+#       use PATH as libdir
+#   --no-local | -nl
+#       do not switch to a local rsd copy
 #
 # Exit codes:
 #   0 - SUCCESS
@@ -66,7 +68,8 @@ declare -A RSD_ARGS=( ["subargs"]="" ["command"]="" )
 # 0 => No argument
 # 1 => One argument
 # unknown defaults to 1
-declare -A RSD_ARGS_PARAM=( ["debug"]=1 ["d"]=1 ["version"]=0 ["check-version"]=0 ["lib-dir"]=1 ["l"]=1 ["install"]=1 )
+declare -A RSD_ARGS_PARAM=( ["debug"]=1 ["d"]=1 ["version"]=0 ["check-version"]=0 ["lib-dir"]=1 ["l"]=1\
+                            ["install"]=1 ["no-local"]=0 ["nl"]=0 )
 
 function rsd::version_gt() {
     test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1";
@@ -303,6 +306,23 @@ fi
 rsd::debug "Debug set to $RSD_DEBUG" 2
 rsd::debug2 9 "Arguments parsed (values): keys -> (${RSD_ARGS[@]}): " ${!RSD_ARGS[@]}
 rsd::debug "Original call was $RSD_ORIGINAL_ARGS" 7
+
+# swith to a local copy if any (local == pwd)
+if [[ ! ${RSD_ARGS[no-local]} || ! ${RSD_ARGS[nl]} ]]; then
+    if [[ "$RSD_RUN_DIR" != "$RSD_LOCAL_DIR" ]]; then
+        RSD_LOCAL_RSD="$RSD_LOCAL_DIR/$RSD"
+        if [[ -x  "$RSD_LOCAL_RSD" ]]; then
+            #get version
+            RSD_LOCAL_VERSION=$( $RSD_LOCAL_RSD --version)
+            if rsd::version_gt $RSD_LOCAL_VERSION $VERSION; then
+                echo "Switching to local version (-nl to avoid)."
+                $RSD_LOCAL_RSD $@
+                exit 0
+            fi
+        fi
+    fi
+fi
+
 
 if ! rsd::get_base; then
     echo "Abort! Could not find libdir.  Maybe it need to be installed --install (TODO)."
