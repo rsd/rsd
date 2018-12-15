@@ -351,7 +351,7 @@ fi
 
 if [[ -z "${RSD_ARGS[command]}" ]]; then
     echo "Abort! No COMMAND specified."
-    usage
+    rsd::usage
 fi
 RSD_COMMAND=${RSD_ARGS[command]}
 
