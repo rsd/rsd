@@ -36,6 +36,7 @@ RSD_DEBUG=0
 DEBUG=$RSD_DEBUG
 
 # The latest version of this file in the repository url
+RSD_GITHUB_REPO="https://github.com/rsd/rsd.git"
 RSD_LATEST_RSD_REPO="https://raw.githubusercontent.com/rsd/rsd/master/rsd"
 
 # preserves arguments
@@ -62,7 +63,7 @@ declare -A RSD_ARGS=( ["subargs"]="" ["command"]="" )
 # 0 => No argument
 # 1 => One argument
 # unknown defaults to 1
-declare -A RSD_ARGS_PARAM=( ["debug"]=1 ["d"]=1 ["version"]=0 ["check-version"]=0 ["lib-dir"]=1 ["l"]=1 )
+declare -A RSD_ARGS_PARAM=( ["debug"]=1 ["d"]=1 ["version"]=0 ["check-version"]=0 ["lib-dir"]=1 ["l"]=1 ["install"]=1 )
 
 function rsd::version_gt() {
     test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1";
@@ -279,7 +280,6 @@ function rsd::test_libdir() {
 # FIXME: as a recursive command calling, this is worked outside a function (for now at least)
 
 RSD_ORIGINAL_ARGS="$0 $@"
-
 rsd::parse_args $*
 
 # import rsd::debug level
@@ -313,8 +313,19 @@ if [[ ${RSD_ARGS[check-version]} ]]; then
         echo $RSD_ERROR_MSG
         exit 0
     fi
-
 fi
+
+# downloads and install
+# TODO: What to do with the running rsd?
+# check version
+if [[ ${RSD_ARGS[install]} ]]; then
+    rsd::check_binaries_or_fail git
+    echo "Installing latest rsd from repository"
+    git clone --depth 1 $RSD_GITHUB_REPO ${RSD_ARGS[install]}
+fi
+
+
+
 
 # FIXME: for now
 exit 0
