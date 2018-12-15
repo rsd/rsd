@@ -1,11 +1,21 @@
 #!/bin/bash
 
+# rsd [rsd options] COMMAND [command options]
+# rsd [rsd options] --version
+# rsd [rsd options] --check-version
+#
 # Description:
 #   rsd is a generic command loader from the command line
 #
 #   for commands, actually, are bash functions.
 #   the idea is the group classes of commands (or tasks) into modules
 #   and let rsd call it to have a unty experience
+#
+# rsd options:
+#   --debug LEVEL | -d LEVEL
+#     set the debug level
+#   --lib-dir PATH | -l PATH
+#     use PATH as libdir
 #
 # Exit codes:
 #   0 - SUCCESS
@@ -52,8 +62,7 @@ declare -A RSD_ARGS=( ["subargs"]="" ["command"]="" )
 # 0 => No argument
 # 1 => One argument
 # unknown defaults to 1
-declare -A RSD_ARGS_PARAM=( ["debug"]=1 ["d"]=1 ["version"]=0 ["check-version"]=0 )
-
+declare -A RSD_ARGS_PARAM=( ["debug"]=1 ["d"]=1 ["version"]=0 ["check-version"]=0 ["lib-dir"]=1 ["l"]=1 )
 
 function rsd::version_gt() {
     test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1";
@@ -128,7 +137,8 @@ function rsd::check_binaries_or_fail() {
     return 0
 }
 
-
+# for debug, it has to be done in the script, command line does not work so soon
+# TODO: make an exception if the argument does not exist
 function rsd::parse_args() {
     local arg
     local count=0
@@ -181,6 +191,13 @@ function rsd::parse_args() {
         esac
         shift
     done
+
+    local key
+    for key in ${!RSD_ARGS[@]}; do
+        rsd::debug2 8 "parse_agrs: arguments: $key: ${RSD_ARGS[$key]}"
+    done
+
+    return 0
 }
 
 function rsd::key_exists() {
@@ -212,8 +229,56 @@ function rsd::check_repository_version() {
     return 0
 }
 
+# locates where our library is.
+# the search order is:
+#   - argument to the command line,
+#   - config, (TODO)
+#   - current path,
+#   - rsd is a symlink to the library,
+#   - in user's home (TODO) and
+#   - system wide install (TODO)
+function rsd::get_base() {
+    rsd::check_binaries_or_fail which readlink dirname pwd
+
+    # arguments
+    if   [[ ${RSD_ARGS["lib-dir"]} ]]; then
+        RSD_BASE=${RSD_ARGS[lib-dir]}
+        rsd::test_libdir
+        return $?
+    elif [[ ${RSD_ARGS[l]} ]]; then
+        RSD_BASE=${RSD_ARGS[l]}
+        rsd::test_libdir
+        return $?
+    fi
+
+    # current path
+    RSD_BASE=$(pwd)
+    if rsd::test_libdir; then
+        return 0
+    fi
+
+    # symlink
+    RSD_BASE=$(dirname $(readlink -f $0))
+    if rsd::test_libdir; then
+        return 0
+    fi
+
+    return 1
+}
+
+# FIXME
+function rsd::test_libdir() {
+    if [[ -f $RSD_BASE/lib/rsd.lib ]]; then
+        return 0
+    fi
+    return 1
+}
+
+
 # __main__
 # FIXME: as a recursive command calling, this is worked outside a function (for now at least)
+
+RSD_ORIGINAL_ARGS="$0 $@"
 
 rsd::parse_args $*
 
@@ -226,6 +291,12 @@ fi
 rsd::debug "Debug set to $RSD_DEBUG" 2
 rsd::debug2 9 "Arguments parsed (values): keys -> (${RSD_ARGS[@]}): " ${!RSD_ARGS[@]}
 rsd::debug "Original call was $RSD_ORIGINAL_ARGS" 7
+
+if ! rsd::get_base; then
+    echo "Could not find libdir.  Maybe it need to be installed --install (TODO)."
+    exit 5
+fi
+
 
 # version
 if [[ ${RSD_ARGS[version]} ]]; then
