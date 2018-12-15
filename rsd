@@ -27,6 +27,7 @@
 #   6 - Missing system files (maybe not installed)
 #   7 - Mismatch information
 #   8 - To be done in the future
+#   9 - Missing command line argument
 #   10 - Command failure (unknown reason)
 
 RSD_VERSION='0.2.1'
@@ -157,6 +158,10 @@ function rsd::parse_args() {
                 if [[ "${RSD_ARGS_PARAM[$arg]}" == "0" ]]; then
                     RSD_ARGS[${arg,,}]=1
                 else
+                    if [[ -z $2 ]]; then
+                        echo "Missing argumento to $arg."
+                        exit
+                    fi
                     RSD_ARGS[${arg,,}]=$2
                     shift
                 fi
@@ -171,6 +176,10 @@ function rsd::parse_args() {
                 if [[ "${RSD_ARGS_PARAM[$arg]}" == "0" ]]; then
                     RSD_ARGS[${arg,,}]=1
                 else
+                    if [[ -z $2 ]]; then
+                        echo "Missing argumento to $arg."
+                        exit
+                    fi
                     RSD_ARGS[${arg,,}]=$2
                     shift
                 fi
