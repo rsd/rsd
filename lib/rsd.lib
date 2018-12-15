@@ -1,0 +1,43 @@
+#!/bin/bash
+
+# main support library to RSD
+
+RSD_RSDLIB_VERSION='0.2.0'
+
+
+# Checks if there are the minimun required arguments or call usage
+function rsd::arguments_or_usage() {
+    local total=$1
+    shift
+
+    debug2 10 "rsd_arguments_or_usage: total arguments: $total, Arguments:" $@
+    if [[ "$#" -lt "$total" ]]; then
+        rsd::usage
+    fi
+    return 0
+}
+
+function rsd::check_command() {
+    local command
+    for command in $1 $1.sh $1.bash $1.cmd $1.rsd; do
+        if [[ -f $RSD_BASE/command/$command ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# this outputs the source line to be executed
+# it does not execut directly, as this needs to be outsie of a function
+function rsd::load_command_file() {
+    rsd::arguments_or_usage 1 $@
+    local command_with_path
+    local command=$1
+
+    if command_with_path=$(rsd::check_command $command); then
+        debug "Command $command is invalid" 2
+        return 1
+    fi
+    echo source \"$command_with_path\"
+    return 0
+}
