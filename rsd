@@ -3,6 +3,7 @@
 # rsd [rsd options] COMMAND [command options]
 # rsd [rsd options] --version
 # rsd [rsd options] --check-version
+# rsd [rsd options] --install PATH
 #
 # Description:
 #   rsd is a generic command loader from the command line
@@ -160,7 +161,7 @@ function rsd::parse_args() {
                 else
                     if [[ -z $2 ]]; then
                         echo "Missing argumento to $arg."
-                        exit
+                        exit 9
                     fi
                     RSD_ARGS[${arg,,}]=$2
                     shift
@@ -178,7 +179,7 @@ function rsd::parse_args() {
                 else
                     if [[ -z $2 ]]; then
                         echo "Missing argumento to $arg."
-                        exit
+                        exit 9
                     fi
                     RSD_ARGS[${arg,,}]=$2
                     shift
