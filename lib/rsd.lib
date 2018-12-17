@@ -10,7 +10,7 @@ function rsd::arguments_or_usage() {
     local total=$1
     shift
 
-    debug2 10 "rsd_arguments_or_usage: total arguments: $total, Arguments:" $@
+    rsd::debug2 10 "rsd_arguments_or_usage: total arguments: $total, Arguments:" $@
     if [[ "$#" -lt "$total" ]]; then
         rsd::usage
     fi
@@ -37,7 +37,7 @@ function rsd::load_command_file() {
     local command=$1
 
     if command_with_path=$(rsd::check_command $command); then
-        debug "Command $command is invalid" 2
+        rsd::debug "Command $command is invalid" 2
         return 1
     fi
     echo source \"$command_with_path\"
