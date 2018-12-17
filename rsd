@@ -52,6 +52,7 @@ RSD_ORIGINAL_ARGS="$0 $@"
 RSD_ERROR_MSG=""
 
 # base path to libraries
+# TODO: make it a search path
 RSD_BASE=""
 
 RSD=$(basename $0)

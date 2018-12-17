@@ -5,7 +5,7 @@
 RSD_RSDLIB_VERSION='0.2.0'
 
 
-# Checks if there are the minimun required arguments or call usage
+# checks if there are the minimun required arguments or call usage
 function rsd::arguments_or_usage() {
     local total=$1
     shift
@@ -17,10 +17,12 @@ function rsd::arguments_or_usage() {
     return 0
 }
 
+# locates the command and, if exists, outputs it to STDOUT.
 function rsd::check_command() {
     local command
     for command in $1 $1.sh $1.bash $1.cmd $1.rsd; do
-        if [[ -f $RSD_BASE/command/$command ]]; then
+        if [[ -f "$RSD_BASE/command/$command" ]]; then
+            echo "$RSD_BASE/command/$command"
             return 0
         fi
     done
