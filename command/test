@@ -1,6 +1,29 @@
 #!/bin/bash
 
-RSD_TEST_VERSION='0.2.0'
+RSD_TEST_VERSION='0.2.1'
 
 
-echo "Test command file loaded"
+function srsd::test::test() {
+    echo "Inside Test comannd function."
+    echo "Still have these arguments to process:" $@
+}
+
+function rsd::test::action::test() {
+    echo Teste: $@
+    rsd::debug "Debug no level"
+    rsd::debug "Debug level 1 " 1
+    rsd::debug "Debug level 2 " 2
+    rsd::debug "Debug level 3 " 3
+    rsd::debug "Debug level 4 " 4
+}
+
+
+function rsd::test::action::test_argument() {
+    echo "Full Arguments before: "$@
+    rsd::arguments_or_usage 1 $@
+    echo "Full Arguments after: "$@
+}
+
+
+echo "Test command file loaded."
+echo "Got these arguments:" $@

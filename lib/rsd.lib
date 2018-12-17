@@ -71,3 +71,64 @@ function rsd::load_command_file() {
     echo source \"$command_with_path\"
     return 0
 }
+
+
+# execute command if any
+# looks for the first ocorruence of rsd::<command>::<command> (preferred),
+# rsd::<command>, <command> or even main.
+function rsd::command() {
+    rsd::arguments_or_usage 1 $@
+    local command=$1
+    local real_command
+
+    for real_command in rsd::$command::$command rsd::$command $command main; do
+        if bash::is_function $real_command; then
+            rsd::debug "Calling $real_command with arguments: ${RSD_ARGS[subargs]}" 5
+            $real_command ${RSD_ARGS[subargs]}
+            exit 0
+        else
+            rsd::generic_command $command
+        fi
+    done
+}
+
+# make an action call
+# if no action is given, repeat the command name as an action
+function rsd::generic_command() {
+    rsd::arguments_or_usage 1 $@
+    local command=$1
+
+    rsd::parse_args ${RSD_ARGS[subargs]}
+    rsd::generic_action $command ${RSD_ARGS[command]}
+}
+
+# call a generic action in command
+# pass the subargs in the RSD_ARGS hash
+function rsd::generic_action() {
+    rsd::arguments_or_usage 2 $@
+    local command=$1
+    local action=$2
+    echo Action $2
+    local action_function
+
+    for action_function in rsd::${command}::action::${action} \
+        rsd::${command}::${action} rsd::${action} ${command}::${action} $action
+    do
+        # we need a /g modifier (5 depth)
+        action_function=${action_function//-/_}
+        action_function=${action_function//-/_}
+        action_function=${action_function//-/_}
+        action_function=${action_function//-/_}
+        action_function=${action_function//-/_}
+
+        if bash::is_function $action_function; then
+            rsd::debug "function for action $RSD_ACTION is $action_function" 8
+            $action_function ${RSD_ARGS[subargs]}
+            exit 0
+        fi
+    done
+
+    echo "Action $action for command $command does not exist."
+    rsd::usage
+}
+

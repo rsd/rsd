@@ -382,7 +382,14 @@ if (($?)); then
     echo "Command $RSD_COMMAND not found"
     rsd::usage
 fi
-eval $_rsd_source
+# sourcing the command, any argument left is passed to
+eval $_rsd_source ${RSD_ARGS[subargs]}
+
+# execute the command function and pass the rest of the arguments
+# if there is a command function arguments are given and let it takes control
+rsd::command $RSD_COMMAND
+
+
 
 # FIXME: for now
 exit 0
