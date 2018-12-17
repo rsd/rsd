@@ -1,0 +1,6 @@
+#!/bin/bash
+
+RSD_TEST_VERSION='0.2.0'
+
+
+echo "Test command file loaded"
