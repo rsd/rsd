@@ -3,7 +3,7 @@
 RSD_TEST_VERSION='0.2.1'
 
 
-function srsd::test::test() {
+function rsd::test::test() {
     echo "Inside Test comannd function."
     echo "Still have these arguments to process:" $@
 }
