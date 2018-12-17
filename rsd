@@ -377,12 +377,12 @@ fi
 RSD_COMMAND=${RSD_ARGS[command]}
 
 # import the calling command script
-eval $(rsd::load_command_file  $RSD_COMMAND)
-if [[ "$?" != "0" ]]; then
-	echo "Command $RSD_COMMAND not found"
-	rsd::usage
+_rsd_source=$(rsd::load_command_file $RSD_COMMAND)
+if (($?)); then
+    echo "Command $RSD_COMMAND not found"
+    rsd::usage
 fi
-
+eval $_rsd_source
 
 # FIXME: for now
 exit 0

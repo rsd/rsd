@@ -10,17 +10,43 @@ function rsd::arguments_or_usage() {
     local total=$1
     shift
 
-    rsd::debug2 10 "rsd_arguments_or_usage: total arguments: $total, Arguments:" $@
+    rsd::debug2 20 "rsd_arguments_or_usage: total arguments: $total, Arguments:" $@
     if [[ "$#" -lt "$total" ]]; then
         rsd::usage
     fi
     return 0
 }
 
+# same as rsd::debug, but to STDERR
+function rsd::warn() {
+    local msg=$1
+    shift
+    local level=1
+
+    if (($#>0));then
+        level=$1
+    fi
+    if (( $RSD_DEBUG >= $level )); then
+        echo "$level:$msg" >&2
+    fi
+}
+
+# same as rsd::debug2, but to STDERR
+function rsd::warn2() {
+    local level=$1
+    shift
+
+    if (( $RSD_DEBUG >= $level )); then
+        echo "$level:" $@ >&2
+    fi
+}
+
 # locates the command and, if exists, outputs it to STDOUT.
 function rsd::check_command() {
     local command
+
     for command in $1 $1.sh $1.bash $1.cmd $1.rsd; do
+        rsd::warn2 10 "Looking for '$1' in $command"
         if [[ -f "$RSD_BASE/command/$command" ]]; then
             echo "$RSD_BASE/command/$command"
             return 0
@@ -36,8 +62,10 @@ function rsd::load_command_file() {
     local command_with_path
     local command=$1
 
-    if command_with_path=$(rsd::check_command $command); then
-        rsd::debug "Command $command is invalid" 2
+    command_with_path=$(rsd::check_command $command)
+
+    if (($?)); then
+        rsd::warn "Command $command is invalid" 2
         return 1
     fi
     echo source \"$command_with_path\"
