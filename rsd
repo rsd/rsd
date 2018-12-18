@@ -34,7 +34,7 @@
 #   10 - Command failure (unknown reason)
 #   11 - Internal Failure
 
-RSD_VERSION='0.2.1'
+RSD_VERSION='0.2.2'
 VERSION=$RSD_VERSION
 
 RSD_DEBUG=0
@@ -69,21 +69,38 @@ declare -A RSD_ARGS=( ["subargs"]="" ["command"]="" )
 # 0 => No argument
 # 1 => One argument
 # unknown defaults to 1
-declare -A RSD_ARGS_PARAM=( ["debug"]=1 ["d"]=1 ["version"]=0 ["check-version"]=0 ["lib-dir"]=1 ["l"]=1\
-                            ["install"]=1 ["no-local"]=0 ["nl"]=0 )
+declare -A RSD_ARGS_PARAM=( ["debug"]=1 ["d"]=1 ["version"]=0 ["check-version"]=0 \
+                            ["lib-dir"]=1 ["l"]=1 ["install"]=1 ["no-local"]=0 \
+                            ["nl"]=0 ["usage"]=0 ["help"]=0 ["h"]=0 )
 
 function rsd::version_gt() {
     test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1";
 }
 
 function rsd::usage() {
+    local command
+
     echo "$RSD v$RSD_VERSION"
     echo "Usage:"
-    echo -e "\t$RSD <command> [OPTIONS]"
-    echo -e "\tCommands:"
-
+    if [[ -z "$RSD_COMMAND" ]]; then
+        echo -e "\t$RSD [RSD OPTIONS] <command> "
+        if bash::is_function rsd::list_all_commands; then
+            echo -e "\tCommands:"
+            for command in $(rsd::list_all_commands); do
+                echo -e "\t\t$command"
+            done
+        fi
+    else
+        if bash::is_function rsd::list_all_actions; then
+            echo -e "\t$RSD [RSD OPTIONS] $RSD_COMMAND <action> [COMMAND OPTIONS]"
+            echo -e "\tActions for $RSD_COMMAND:"
+            rsd::list_all_actions $RSD_COMMAND
+        else
+            echo -e "\t$RSD [RSD OPTIONS] <command> "
+        fi
+    fi
     exit 2
-    }
+}
 
 function rsd::debug() {
     local msg=$1
@@ -251,7 +268,7 @@ function rsd::check_repository_version() {
 #   - argument to the command line,
 #   - config, (TODO)
 #   - current path,
-#   - rsd is a symlink to the library,
+#   - rsd is a symlink from the library (or use from the first argument),
 #   - in user's home (TODO) and
 #   - system wide install (TODO)
 function rsd::get_base() {
@@ -371,7 +388,6 @@ fi
 
 
 if [[ -z "${RSD_ARGS[command]}" ]]; then
-    echo "Abort! No COMMAND specified."
     rsd::usage
 fi
 RSD_COMMAND=${RSD_ARGS[command]}
@@ -384,6 +400,10 @@ if (($?)); then
 fi
 # sourcing the command, any argument left is passed to
 eval $_rsd_source ${RSD_ARGS[subargs]}
+
+if [[ ${RSD_ARGS[usage]} || ${RSD_ARGS[help]} || ${RSD_ARGS[h]} ]]; then
+    rsd::usage
+fi
 
 # execute the command function and pass the rest of the arguments
 # if there is a command function arguments are given and let it takes control
