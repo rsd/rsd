@@ -401,6 +401,7 @@ fi
 # sourcing the command, any argument left is passed to
 eval $_rsd_source ${RSD_ARGS[subargs]}
 
+# help and usage
 if [[ ${RSD_ARGS[usage]} || ${RSD_ARGS[help]} || ${RSD_ARGS[h]} ]]; then
     rsd::usage
 fi
