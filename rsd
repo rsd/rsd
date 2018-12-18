@@ -19,6 +19,10 @@
 #       use PATH as libdir
 #   --no-local | -nl
 #       do not switch to a local rsd copy
+#   --completion
+#       support for bash completion.
+#       in completion mode, no command or action is actually executed.
+#       no command file should exec in global space.
 #
 # Exit codes:
 #   0 - SUCCESS
@@ -34,7 +38,7 @@
 #   10 - Command failure (unknown reason)
 #   11 - Internal Failure
 
-RSD_VERSION='0.2.2'
+RSD_VERSION='0.2.4'
 VERSION=$RSD_VERSION
 
 RSD_DEBUG=0
@@ -56,9 +60,11 @@ RSD_ERROR_MSG=""
 RSD_BASE=""
 
 RSD=$(basename $0)
+RSD_RUN_DIR=$(readlink -f $(dirname $0))
+RSD_LOCAL_DIR=$(pwd)
 
 if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
-    echo "Abort! BASH >= 4 required.  Got $BASH_VESION"
+    echo "Abort! BASH >= 4 required.  Got $BASH_VESION" >&2
     exit 1
 fi
 
@@ -71,7 +77,8 @@ declare -A RSD_ARGS=( ["subargs"]="" ["command"]="" )
 # unknown defaults to 1
 declare -A RSD_ARGS_PARAM=( ["debug"]=1 ["d"]=1 ["version"]=0 ["check-version"]=0 \
                             ["lib-dir"]=1 ["l"]=1 ["install"]=1 ["no-local"]=0 \
-                            ["nl"]=0 ["usage"]=0 ["help"]=0 ["h"]=0 )
+                            ["nl"]=0 ["usage"]=0 ["help"]=0 ["h"]=0 \
+                            ["rsdlib"]=0 ["completion"]=0 )
 
 function rsd::version_gt() {
     test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1";
@@ -125,6 +132,30 @@ function rsd::debug2() {
     fi
 }
 
+# same as rsd::debug, but to STDERR
+function rsd::warn() {
+    local msg=$1
+    shift
+    local level=1
+
+    if (($#>0));then
+        level=$1
+    fi
+    if (( $RSD_DEBUG >= $level )); then
+        echo "$level:$msg" >&2
+    fi
+}
+
+# same as rsd::debug2, but to STDERR
+function rsd::warn2() {
+    local level=$1
+    shift
+
+    if (( $RSD_DEBUG >= $level )); then
+        echo "$level:" $@ >&2
+    fi
+}
+
 #Finds a file in the path
 function rsd::check_binary() {
     local file=$1
@@ -156,7 +187,7 @@ function rsd::check_binaries() {
 
 function rsd::check_binaries_or_fail() {
     if ! rsd::check_binaries $@; then
-        echo $RSD_ERROR_MSG
+        rsd::warn $RSD_ERROR_MSG
         exit 3
     fi
     return 0
@@ -182,7 +213,7 @@ function rsd::parse_args() {
                     RSD_ARGS[${arg,,}]=1
                 else
                     if [[ -z $2 ]]; then
-                        echo "Abort! Missing argumento to $arg."
+                        rsd::warn "Abort! Missing argumento to $arg."
                         exit 9
                     fi
                     RSD_ARGS[${arg,,}]=$2
@@ -200,7 +231,7 @@ function rsd::parse_args() {
                     RSD_ARGS[${arg,,}]=1
                 else
                     if [[ -z $2 ]]; then
-                        echo "Abort! Missing argumento to $arg."
+                        rsd::warn "Abort! Missing argumento to $arg."
                         exit 9
                     fi
                     RSD_ARGS[${arg,,}]=$2
@@ -236,8 +267,8 @@ function rsd::parse_args() {
 # from bash_extensions.lib
 function bash::key_exists(){
     if [[ "$2" != "in" ]]; then
-        echo "Abort! Incorrect usage of bash::key_exists."
-        echo "Correct usage: bash::key_exists {key} in {array}"
+        rsd::warn "Abort! Incorrect usage of bash::key_exists."
+        rsd::warn "Correct usage: bash::key_exists {key} in {array}"
         exit 11
     fi
     eval '[ ${'$3'[$1]+muahaha} ]'
@@ -326,14 +357,17 @@ rsd::debug2 9 "Arguments parsed (values): keys -> (${RSD_ARGS[@]}): " ${!RSD_ARG
 rsd::debug "Original call was $RSD_ORIGINAL_ARGS" 7
 
 # swith to a local copy if any (local == pwd)
-if [[ ! ${RSD_ARGS[no-local]} || ! ${RSD_ARGS[nl]} ]]; then
+if ! [[ ${RSD_ARGS[no-local]} || ${RSD_ARGS[nl]} ]]; then
+    rsd::debug2 20 "RUN DIR: $RSD_RUN_DIR, LOCAL DIR: $RSD_LOCAL_DIR"
     if [[ "$RSD_RUN_DIR" != "$RSD_LOCAL_DIR" ]]; then
         RSD_LOCAL_RSD="$RSD_LOCAL_DIR/$RSD"
         if [[ -x  "$RSD_LOCAL_RSD" ]]; then
             #get version
             RSD_LOCAL_VERSION=$( $RSD_LOCAL_RSD --version)
             if rsd::version_gt $RSD_LOCAL_VERSION $VERSION; then
-                echo "Switching to local version (-nl to avoid)."
+                if [[ -z ${RSD_ARGS[completion]} ]]; then
+                    rsd::warn "Switching to local version (-nl to avoid)."
+                fi
                 $RSD_LOCAL_RSD $@
                 exit 0
             fi
@@ -341,26 +375,30 @@ if [[ ! ${RSD_ARGS[no-local]} || ! ${RSD_ARGS[nl]} ]]; then
     fi
 fi
 
-
 if ! rsd::get_base; then
-    echo "Abort! Could not find libdir.  Maybe it need to be installed --install (TODO)."
+    rsd::warn "Abort! Could not find libdir.  Maybe it need to be installed --install (TODO)."
     exit 5
 fi
 
+# library to be loaded from outside (e.g. completion)
+if   [ -n "${RSD_ARGS[rsdlib]}" ]; then
+    rsd::warn $RSD_BASE/lib/rsd.lib
+    exit 0
+fi
 
 # version
 if [[ ${RSD_ARGS[version]} ]]; then
-    echo $RSD_VERSION
+    rsd::warn $RSD_VERSION
     exit 0
 fi
 
 # check version
 if [[ ${RSD_ARGS[check-version]} ]]; then
     if ! rsd::check_repository_version; then
-        echo $RSD_ERROR_MSG
+        rsd::warn $RSD_ERROR_MSG
         exit 4
     else
-        echo $RSD_ERROR_MSG
+        rsd::warn $RSD_ERROR_MSG
         exit 0
     fi
 fi
@@ -382,24 +420,32 @@ source "$RSD_BASE/lib/rsd.lib"
 if [[ -f "$RSD_BASE/lib/bash_extensions.lib" ]]; then
     source "$RSD_BASE/lib/bash_extensions.lib"
 else
-    echo "Abort! Missing bash extensions library."
+    rsd::warn "Abort! Missing bash extensions library."
     exit 5
 fi
 
 
-if [[ -z "${RSD_ARGS[command]}" ]]; then
-    rsd::usage
-fi
-RSD_COMMAND=${RSD_ARGS[command]}
 
-# import the calling command script
-_rsd_source=$(rsd::load_command_file $RSD_COMMAND)
-if (($?)); then
-    echo "Command $RSD_COMMAND not found"
-    rsd::usage
+if [[ -z "${RSD_ARGS[command]}" ]]; then
+    if ! [[ ${RSD_ARGS[completion]} ]]; then
+        rsd::usage
+    fi
 fi
-# sourcing the command, any argument left is passed to
-eval $_rsd_source ${RSD_ARGS[subargs]}
+
+if [[ "${RSD_ARGS[command]}" ]]; then
+    RSD_COMMAND=${RSD_ARGS[command]}
+
+    # import the calling command script
+    _rsd_source=$(rsd::load_command_file $RSD_COMMAND)
+    if (($?)); then
+        rsd::warn "Command $RSD_COMMAND not found"
+        rsd::usage
+    fi
+
+    # sourcing the command, any argument left is passed to
+    eval $_rsd_source ${RSD_ARGS[subargs]}
+fi
+
 
 # help and usage
 if [[ ${RSD_ARGS[usage]} || ${RSD_ARGS[help]} || ${RSD_ARGS[h]} ]]; then
@@ -408,7 +454,11 @@ fi
 
 # execute the command function and pass the rest of the arguments
 # if there is a command function arguments are given and let it takes control
-rsd::command $RSD_COMMAND
+if [[ ${RSD_ARGS[command]} ]]; then
+    if ! [[ ${RSD_ARGS[completion]} ]]; then
+        rsd::command $RSD_COMMAND
+    fi
+fi
 
 
 

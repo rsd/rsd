@@ -4,7 +4,6 @@
 
 RSD_RSDLIB_VERSION='0.2.0'
 
-
 # checks if there are the minimun required arguments or call usage
 function rsd::arguments_or_usage() {
     local total=$1
@@ -15,30 +14,6 @@ function rsd::arguments_or_usage() {
         rsd::usage
     fi
     return 0
-}
-
-# same as rsd::debug, but to STDERR
-function rsd::warn() {
-    local msg=$1
-    shift
-    local level=1
-
-    if (($#>0));then
-        level=$1
-    fi
-    if (( $RSD_DEBUG >= $level )); then
-        echo "$level:$msg" >&2
-    fi
-}
-
-# same as rsd::debug2, but to STDERR
-function rsd::warn2() {
-    local level=$1
-    shift
-
-    if (( $RSD_DEBUG >= $level )); then
-        echo "$level:" $@ >&2
-    fi
 }
 
 # locates the command and, if exists, outputs it to STDOUT.
@@ -248,6 +223,30 @@ function rsd::debug2() {
 
     if (( $RSD_DEBUG >= $level )); then
         echo "$level:" $@
+    fi
+}
+
+# same as rsd::debug, but to STDERR
+function rsd::warn() {
+    local msg=$1
+    shift
+    local level=1
+
+    if (($#>0));then
+        level=$1
+    fi
+    if (( $RSD_DEBUG >= $level )); then
+        echo "$level:$msg" >&2
+    fi
+}
+
+# same as rsd::debug2, but to STDERR
+function rsd::warn2() {
+    local level=$1
+    shift
+
+    if (( $RSD_DEBUG >= $level )); then
+        echo "$level:" $@ >&2
     fi
 }
 
