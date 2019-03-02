@@ -372,6 +372,15 @@ if ! [[ ${RSD_ARGS[no-local]} || ${RSD_ARGS[nl]} ]]; then
     fi
 fi
 
+# downloads and install
+# check version
+if [[ ${RSD_ARGS[install]} ]]; then
+    rsd::check_binaries_or_fail git
+    echo "Installing latest rsd from repository."
+    git clone --depth 1 $RSD_GITHUB_REPO ${RSD_ARGS[install]}
+    exit $?
+fi
+
 # Expands libdir search paths
 if bash::key_exists lib-dir in RSD_ARGS; then
 	IFS=',' read -r -a RSD_LIBDIR <<< "${RSD_ARGS["lib-dir"]}"
@@ -415,15 +424,6 @@ if [[ ${RSD_ARGS[check-version]} ]]; then
         rsd::warn $RSD_ERROR_MSG
         exit 0
     fi
-fi
-
-# downloads and install
-# TODO: What to do with the running rsd?
-# check version
-if [[ ${RSD_ARGS[install]} ]]; then
-    rsd::check_binaries_or_fail git
-    echo "Installing latest rsd from repository."
-    git clone --depth 1 $RSD_GITHUB_REPO ${RSD_ARGS[install]}
 fi
 
 # load our main library
