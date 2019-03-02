@@ -2,7 +2,7 @@
 
 # main support library to RSD
 
-RSD_RSDLIB_VERSION='0.2.0'
+RSD_RSDLIB_VERSION='0.2.1'
 
 # checks if there are the minimun required arguments or call usage
 function rsd::arguments_or_usage() {
@@ -22,8 +22,8 @@ function rsd::check_command() {
 
     for command in $1 $1.sh $1.bash $1.cmd $1.rsd; do
         rsd::warn2 10 "Looking for '$1' in $command"
-        if [[ -f "$RSD_BASE/command/$command" ]]; then
-            echo "$RSD_BASE/command/$command"
+        if rsd::check_libdir_file command/$command; then
+            echo $(rsd::get_libdir_file command/$command)
             return 0
         fi
     done
@@ -106,12 +106,23 @@ function rsd::generic_action() {
 }
 
 function rsd::list_all_commands() {
-    local command
-    for command in $RSD_BASE/command/*
-    do
-        command=$(basename $command)
-        echo $command
-    done
+	local command
+	local command_dir
+	declare -A command_list
+
+	for command_dir in $(rsd::get_all_libdir_file command)
+	do
+		for command in $command_dir/*
+		do
+			command_list[$(basename $command)]=1
+		done
+	done
+
+	for command in "${!command_list[@]}"
+	do
+		echo $command
+	done
+	return 0
 }
 
 function rsd::list_all_actions() {
@@ -378,63 +389,84 @@ function rsd::check_repository_version() {
     return 0
 }
 
-# locates where our library is.
-# the search order is:
-#   - argument to the command line,
-#   - config, (TODO)
-#   - current path,
-#   - rsd is a symlink from the library (or use from the first argument),
-#   - in user's home (TODO) and
-#   - system wide install (TODO)
-function rsd::get_base() {
-    rsd::check_binaries_or_fail which readlink dirname pwd
-    local library=$0
+# Search all LIBDIRs for a file and return it on STDOUT
+# Returns the first match
+# Search order:
+# - Each command line argument,
+# - Each config option (TODO),
+# - Current path,
+# - rsd installation dir (if it is a symlink),
+# - bash source base,
+# - in user's home (TODO) and
+# - system wide install (TODO)
+function rsd::get_libdir_file() {
+	rsd::check_binaries_or_fail pwd
+	file=$1
+	print=${2:-1}
+	local libdir
 
-    if [[ "$1" ]]; then
-        library=$1
-    fi
+	#check cache first
+	if [[ -n "${RSD_LIB_CACHE[$file]}" ]]; then
+		if ((print)); then
+			echo ${RSD_LIB_CACHE[$file]}
+		fi
+		return 0
+	fi
 
-    # arguments
-    if   [[ ${RSD_ARGS["lib-dir"]} ]]; then
-        RSD_BASE=${RSD_ARGS[lib-dir]}
-        rsd::test_libdir
-        return $?
-    elif [[ ${RSD_ARGS[l]} ]]; then
-        RSD_BASE=${RSD_ARGS[l]}
-        rsd::test_libdir
-        return $?
-    fi
-
-    # current path
-    RSD_BASE=$(pwd)
-    if rsd::test_libdir; then
-        return 0
-    fi
-
-    # symlink
-    RSD_BASE=$(dirname $(readlink -f $library))
-    if rsd::test_libdir; then
-        return 0
-    fi
-
-    return 1
+	for libdir in "${RSD_LIBDIR[@]}" $(pwd) $(dirname $(readlink -f $0)) $(dirname ${BASH_SOURCE[@]}); do
+		if [[ -e "$libdir/$file" ]]; then
+			RSD_LIB_CACHE[$file]="$libdir/$file"
+			if ((print)); then
+				echo "$libdir/$file"
+			fi
+			return 0
+		fi
+	done
+	return 1
 }
 
-# FIXME
-function rsd::test_libdir() {
-    if [[ -f $RSD_BASE/lib/rsd.lib ]]; then
-        return 0
-    fi
-    return 1
+# Same as rsd::get_libdir_file, but returns all occurrences
+function rsd::get_all_libdir_file() {
+	rsd::check_binaries_or_fail pwd
+	file=$1
+# 	print=${2:-1}
+	local libdir
+
+	#check cache first
+# 	if [[ -n "${RSD_LIB_CACHE[$file]}" ]]; then
+# 		if ((print)); then
+# 			echo ${RSD_LIB_CACHE[$file]}
+# 		fi
+# 		return 0
+# 	fi
+
+	for libdir in "${RSD_LIBDIR[@]}" $(pwd) $(dirname $(readlink -f $0)) $(dirname ${BASH_SOURCE[@]}); do
+		if [[ -e "$libdir/$file" ]]; then
+# 			RSD_LIB_CACHE[$file]="$libdir/$file"
+# 			if ((print)); then
+				echo "$libdir/$file"
+# 			fi
+		fi
+	done
+	return 0
 }
+
+
+#just check if a file exists in LIBDIR
+function rsd::check_libdir_file() {
+	rsd::get_libdir_file $1 0
+	return $?
+}
+
 
 #-----------------------------------------------------
 # End of shared functions
 #-----------------------------------------------------
 
-# in case called outside the cli
-if [[ -z "$RSD_BASE" ]]; then
-    rsd::get_base $(dirname ${BASH_SOURCE[@]})
-    source "$RSD_BASE/lib/bash_extensions.lib"
+if rsd::check_libdir_file lib/bash_extensions.lib; then
+    source $(rsd::get_libdir_file lib/bash_extensions.lib)
+else
+    rsd::warn "Abort! Missing bash extensions library."
+    exit 5
 fi
 RSD_LIB=1

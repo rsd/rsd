@@ -38,7 +38,7 @@
 #   10 - Command failure (unknown reason)
 #   11 - Internal Failure
 
-RSD_VERSION='0.2.4'
+RSD_VERSION='0.2.5'
 VERSION=$RSD_VERSION
 
 RSD_DEBUG=0
@@ -56,8 +56,9 @@ RSD_ORIGINAL_ARGS="$0 $@"
 RSD_ERROR_MSG=""
 
 # base path to libraries
-# TODO: make it a search path
-RSD_BASE=""
+RSD_LIBDIR=()
+RSD_LIBDIR_temp=()
+declare -A RSD_LIB_CACHE
 
 RSD=$(basename $0)
 RSD_RUN_DIR=$(readlink -f $(dirname $0))
@@ -265,7 +266,7 @@ function rsd::parse_args() {
 }
 
 # from bash_extensions.lib
-function bash::key_exists(){
+function bash::key_exists() {
     if [[ "$2" != "in" ]]; then
         rsd::warn "Abort! Incorrect usage of bash::key_exists."
         rsd::warn "Correct usage: bash::key_exists {key} in {array}"
@@ -294,51 +295,47 @@ function rsd::check_repository_version() {
     return 0
 }
 
-# locates where our library is.
-# the search order is:
-#   - argument to the command line,
-#   - config, (TODO)
-#   - current path,
-#   - rsd is a symlink from the library (or use from the first argument),
-#   - in user's home (TODO) and
-#   - system wide install (TODO)
-function rsd::get_base() {
-    rsd::check_binaries_or_fail which readlink dirname pwd
+# Search all LIBDIRs for a file and return it on STDOUT
+# Returns the first match
+# Search order:
+# - Each command line argument,
+# - Each config option (TODO),
+# - Current path,
+# - rsd installation dir (if it is a symlink),
+# - bash source base,
+# - in user's home (TODO) and
+# - system wide install (TODO)
+function rsd::get_libdir_file() {
+	rsd::check_binaries_or_fail pwd
+	file=$1
+	print=${2:-1}
+	local libdir
 
-    # arguments
-    if   [[ ${RSD_ARGS["lib-dir"]} ]]; then
-        RSD_BASE=${RSD_ARGS[lib-dir]}
-        rsd::test_libdir
-        return $?
-    elif [[ ${RSD_ARGS[l]} ]]; then
-        RSD_BASE=${RSD_ARGS[l]}
-        rsd::test_libdir
-        return $?
-    fi
+	#check cache first
+	if [[ -n "${RSD_LIB_CACHE[$file]}" ]]; then
+		if ((print)); then
+			echo ${RSD_LIB_CACHE[$file]}
+		fi
+		return 0
+	fi
 
-    # current path
-    RSD_BASE=$(pwd)
-    if rsd::test_libdir; then
-        return 0
-    fi
-
-    # symlink
-    RSD_BASE=$(dirname $(readlink -f $0))
-    if rsd::test_libdir; then
-        return 0
-    fi
-
-    return 1
+	for libdir in "${RSD_LIBDIR[@]}" $(pwd) $(dirname $(readlink -f $0)) $(dirname ${BASH_SOURCE[@]}); do
+		if [[ -e "$libdir/$file" ]]; then
+			RSD_LIB_CACHE[$file]="$libdir/$file"
+			if ((print)); then
+				echo "$libdir/$file"
+			fi
+			return 0
+		fi
+	done
+	return 1
 }
 
-# FIXME
-function rsd::test_libdir() {
-    if [[ -f $RSD_BASE/lib/rsd.lib ]]; then
-        return 0
-    fi
-    return 1
+#just check if a file exists in LIBDIR
+function rsd::check_libdir_file() {
+	rsd::get_libdir_file $1 0
+	return $?
 }
-
 
 # __main__
 # FIXME: as a recursive command calling, this is worked outside a function (for now at least)
@@ -375,14 +372,31 @@ if ! [[ ${RSD_ARGS[no-local]} || ${RSD_ARGS[nl]} ]]; then
     fi
 fi
 
-if ! rsd::get_base; then
+# Expands libdir search paths
+if bash::key_exists lib-dir in RSD_ARGS; then
+	IFS=',' read -r -a RSD_LIBDIR <<< "${RSD_ARGS["lib-dir"]}"
+fi
+if bash::key_exists l in RSD_ARGS; then
+	IFS=',' read -r -a RSD_LIBDIR_temp <<< "${RSD_ARGS["l"]}"
+	RSD_LIBDIR=("${RSD_LIBDIR[@]}" "${RSD_LIBDIR_temp[@]}")
+fi
+if bash::key_exists libdir in RSD_ARGS; then
+	IFS=',' read -r -a RSD_LIBDIR_temp <<< "${RSD_ARGS["libdir"]}"
+	RSD_LIBDIR=("${RSD_LIBDIR[@]}" "${RSD_LIBDIR_temp[@]}")
+fi
+if bash::key_exists lib in RSD_ARGS; then
+	IFS=',' read -r -a RSD_LIBDIR_temp <<< "${RSD_ARGS["lib"]}"
+	RSD_LIBDIR=("${RSD_LIBDIR[@]}" "${RSD_LIBDIR_temp[@]}")
+fi
+
+if ! rsd::check_libdir_file lib/rsd.lib; then
     rsd::warn "Abort! Could not find libdir.  Maybe it need to be installed --install (TODO)."
     exit 5
 fi
 
 # library to be loaded from outside (e.g. completion)
-if   [ -n "${RSD_ARGS[rsdlib]}" ]; then
-    rsd::warn $RSD_BASE/lib/rsd.lib
+if [[ -n "${RSD_ARGS[rsdlib]}" ]]; then
+    echo $(rsd::get_libdir_file lib/rsd.lib)
     exit 0
 fi
 
@@ -415,10 +429,10 @@ fi
 # load our main library
 # after this point there is a need to the full installation
 #Now load our defaults
-source "$RSD_BASE/lib/rsd.lib"
+source $(rsd::get_libdir_file lib/rsd.lib)
 
-if [[ -f "$RSD_BASE/lib/bash_extensions.lib" ]]; then
-    source "$RSD_BASE/lib/bash_extensions.lib"
+if rsd::check_libdir_file lib/bash_extensions.lib; then
+    source $(rsd::get_libdir_file lib/bash_extensions.lib)
 else
     rsd::warn "Abort! Missing bash extensions library."
     exit 5
