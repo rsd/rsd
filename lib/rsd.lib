@@ -458,15 +458,38 @@ function rsd::check_libdir_file() {
 	return $?
 }
 
+# Checks for a library in the search path
+# Returns the string to source it
+# Or a warning to STDERR (depending of the DEBUG level)
+# An optional argument to the message level can be issued.
+function rsd::source_lib() {
+	local file=$1
+	local level=${2:-0}
+
+	if rsd::check_libdir_file "$file"; then
+		echo source $(rsd::get_libdir_file "$file")
+	else
+		echo rsd::warn2 $level "Cannot load library $file!"
+		return 1
+	fi
+
+	return 0
+}
 
 #-----------------------------------------------------
 # End of shared functions
 #-----------------------------------------------------
 
-if rsd::check_libdir_file lib/bash_extensions.lib; then
-	source $(rsd::get_libdir_file lib/bash_extensions.lib)
+# Explicit check when cannot continue without sourcing
+if RSD_LIBRARY_LOAD=$(rsd::source_lib lib/bash_extensions.lib); then
+	$RSD_LIBRARY_LOAD
 else
-	rsd::warn "Abort! Missing bash extensions library."
+	$RSD_LIBRARY_LOAD
 	exit 5
 fi
+
+# Let it get away with a warning
+$(rsd::source_lib lib/config.lib)
+
+
 RSD_LIB=1
