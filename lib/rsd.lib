@@ -6,45 +6,45 @@ RSD_RSDLIB_VERSION='0.2.1'
 
 # checks if there are the minimun required arguments or call usage
 function rsd::arguments_or_usage() {
-    local total=$1
-    shift
+	local total=$1
+	shift
 
-    rsd::debug2 20 "rsd_arguments_or_usage: total arguments: $total, Arguments:" $@
-    if [[ "$#" -lt "$total" ]]; then
-        rsd::usage
-    fi
-    return 0
+	rsd::debug2 20 "rsd_arguments_or_usage: total arguments: $total, Arguments:" $@
+	if [[ "$#" -lt "$total" ]]; then
+		rsd::usage
+	fi
+	return 0
 }
 
 # locates the command and, if exists, outputs it to STDOUT.
 function rsd::check_command() {
-    local command
+	local command
 
-    for command in $1 $1.sh $1.bash $1.cmd $1.rsd; do
-        rsd::warn2 10 "Looking for '$1' in $command"
-        if rsd::check_libdir_file command/$command; then
-            echo $(rsd::get_libdir_file command/$command)
-            return 0
-        fi
-    done
-    return 1
+	for command in $1 $1.sh $1.bash $1.cmd $1.rsd; do
+		rsd::warn2 10 "Looking for '$1' in $command"
+		if rsd::check_libdir_file command/$command; then
+		echo $(rsd::get_libdir_file command/$command)
+		return 0
+		fi
+	done
+	return 1
 }
 
 # this outputs the source line to be executed
 # it does not execut directly, as this needs to be outsie of a function
 function rsd::load_command_file() {
-    rsd::arguments_or_usage 1 $@
-    local command_with_path
-    local command=$1
+	rsd::arguments_or_usage 1 $@
+	local command_with_path
+	local command=$1
 
-    command_with_path=$(rsd::check_command $command)
+	command_with_path=$(rsd::check_command $command)
 
-    if (($?)); then
-        rsd::warn "Command $command is invalid" 2
-        return 1
-    fi
-    echo source \"$command_with_path\"
-    return 0
+	if (($?)); then
+		rsd::warn "Command $command is invalid" 2
+		return 1
+	fi
+	echo source \"$command_with_path\"
+	return 0
 }
 
 
@@ -52,57 +52,57 @@ function rsd::load_command_file() {
 # looks for the first ocorruence of rsd::<command>::<command> (preferred),
 # rsd::<command>, <command> or even main.
 function rsd::command() {
-    rsd::arguments_or_usage 1 $@
-    local command=$1
-    local real_command
+	rsd::arguments_or_usage 1 $@
+	local command=$1
+	local real_command
 
-    for real_command in rsd::$command::$command rsd::$command $command main; do
-        if bash::is_function $real_command; then
-            rsd::debug "Calling $real_command with arguments: ${RSD_ARGS[subargs]}" 5
-            $real_command ${RSD_ARGS[subargs]}
-            exit 0
-        else
-            rsd::generic_command $command
-        fi
-    done
+	for real_command in rsd::$command::$command rsd::$command $command main; do
+		if bash::is_function $real_command; then
+		rsd::debug "Calling $real_command with arguments: ${RSD_ARGS[subargs]}" 5
+		$real_command ${RSD_ARGS[subargs]}
+		exit 0
+		else
+		rsd::generic_command $command
+		fi
+	done
 }
 
 # make an action call
 # if no action is given, repeat the command name as an action
 function rsd::generic_command() {
-    rsd::arguments_or_usage 1 $@
-    local command=$1
+	rsd::arguments_or_usage 1 $@
+	local command=$1
 
-    rsd::parse_args ${RSD_ARGS[subargs]}
-    rsd::generic_action $command ${RSD_ARGS[command]}
+	rsd::parse_args ${RSD_ARGS[subargs]}
+	rsd::generic_action $command ${RSD_ARGS[command]}
 }
 
 # call a generic action in command
 # pass the subargs in the RSD_ARGS hash
 function rsd::generic_action() {
-    rsd::arguments_or_usage 2 $@
-    local command=$1
-    local action=$2
-    echo Action $2
-    local action_function
+	rsd::arguments_or_usage 2 $@
+	local command=$1
+	local action=$2
+	echo Action $2
+	local action_function
 
-    for action_function in rsd::${command}::action::${action} \
-        rsd::${command}::${action} rsd::${action} ${command}::${action} $action
-    do
-        # we need a /g modifier
-        for i in {1..5}; do
-            action_function=${action_function//-/_}
-        done
+	for action_function in rsd::${command}::action::${action} \
+		rsd::${command}::${action} rsd::${action} ${command}::${action} $action
+	do
+		# we need a /g modifier
+		for i in {1..5}; do
+		action_function=${action_function//-/_}
+		done
 
-        if bash::is_function $action_function; then
-            rsd::debug "function for action $RSD_ACTION is $action_function" 8
-            $action_function ${RSD_ARGS[subargs]}
-            exit 0
-        fi
-    done
+		if bash::is_function $action_function; then
+		rsd::debug "function for action $RSD_ACTION is $action_function" 8
+		$action_function ${RSD_ARGS[subargs]}
+		exit 0
+		fi
+	done
 
-    echo "Action $action for command $command does not exist."
-    rsd::usage
+	echo "Action $action for command $command does not exist."
+	rsd::usage
 }
 
 function rsd::list_all_commands() {
@@ -126,8 +126,8 @@ function rsd::list_all_commands() {
 }
 
 function rsd::list_all_actions() {
-    rsd::arguments_or_usage 1 $@
-    rsd::list_all_actions_bare 1 $1
+	rsd::arguments_or_usage 1 $@
+	rsd::list_all_actions_bare 1 $1
 }
 
 # list all actions (rsd::<command>::<action>)
@@ -135,50 +135,50 @@ function rsd::list_all_actions() {
 # 0 - No help
 # 1 - With help
 function rsd::list_all_actions_bare() {
-    rsd::arguments_or_usage 2 $@
-    local mode=$1
-    local command=$2
-    local sub help i real_sub
+	rsd::arguments_or_usage 2 $@
+	local mode=$1
+	local command=$2
+	local sub help i real_sub
 
-    for sub in $(rsd::list_functions "rsd::${command}::action::"); do
-        rsd::debug "action function is $sub" 8
-        real_sub=$sub
-        # we need a /g modifier
-        for i in {1..5}; do
-            sub=${sub/_/-}
-        done
+	for sub in $(rsd::list_functions "rsd::${command}::action::"); do
+		rsd::debug "action function is $sub" 8
+		real_sub=$sub
+		# we need a /g modifier
+		for i in {1..5}; do
+		sub=${sub/_/-}
+		done
 
-        echo -e -n "\t\t$sub "
-        if ((mode)); then
-            help="rsd::${command}::help::${real_sub}"
-            rsd::debug "help function is $help" 8
-            if bash::is_function $help; then
-                rsd::debug "Calling help function for $help" 7
-                $help
-                continue
-            else
-                echo
-            fi
-        else
-            echo
-        fi
-    done
+		echo -e -n "\t\t$sub "
+		if ((mode)); then
+		help="rsd::${command}::help::${real_sub}"
+		rsd::debug "help function is $help" 8
+		if bash::is_function $help; then
+			rsd::debug "Calling help function for $help" 7
+			$help
+			continue
+		else
+			echo
+		fi
+		else
+		echo
+		fi
+	done
 }
 
 # list all function by prefix
 # prefix is stripped
 function rsd::list_functions() {
-    rsd::arguments_or_usage 1 $@
-    local prefix=$1
-    local func
-    local IFS=$'\n'
+	rsd::arguments_or_usage 1 $@
+	local prefix=$1
+	local func
+	local IFS=$'\n'
 
-    for func in $(declare -F); do
-        func=${func#declare -f }
-        [[ "$func" =~ ^$prefix ]] || continue
-        func=${func#$prefix}
-        echo $func
-    done
+	for func in $(declare -F); do
+		func=${func#declare -f }
+		[[ "$func" =~ ^$prefix ]] || continue
+		func=${func#$prefix}
+		echo $func
+	done
 }
 
 
@@ -186,207 +186,207 @@ function rsd::list_functions() {
 # Functions that are on rsd too
 #--------------------------------------------------
 function rsd::version_gt() {
-    test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1";
+	test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1";
 }
 
 function rsd::usage() {
-    local command
+	local command
 
-    echo "$RSD v$RSD_VERSION"
-    echo "Usage:"
-    if [[ -z "$RSD_COMMAND" ]]; then
-        echo -e "\t$RSD [RSD OPTIONS] <command> "
-        if bash::is_function rsd::list_all_commands; then
-            echo -e "\tCommands:"
-            for command in $(rsd::list_all_commands); do
-                echo -e "\t\t$command"
-            done
-        fi
-    else
-        if bash::is_function rsd::list_all_actions; then
-            echo -e "\t$RSD [RSD OPTIONS] $RSD_COMMAND <action> [COMMAND OPTIONS]"
-            echo -e "\tActions for $RSD_COMMAND:"
-            rsd::list_all_actions $RSD_COMMAND
-        else
-            echo -e "\t$RSD [RSD OPTIONS] <command> "
-        fi
-    fi
-    exit 2
+	echo "$RSD v$RSD_VERSION"
+	echo "Usage:"
+	if [[ -z "$RSD_COMMAND" ]]; then
+		echo -e "\t$RSD [RSD OPTIONS] <command> "
+		if bash::is_function rsd::list_all_commands; then
+		echo -e "\tCommands:"
+		for command in $(rsd::list_all_commands); do
+			echo -e "\t\t$command"
+		done
+		fi
+	else
+		if bash::is_function rsd::list_all_actions; then
+		echo -e "\t$RSD [RSD OPTIONS] $RSD_COMMAND <action> [COMMAND OPTIONS]"
+		echo -e "\tActions for $RSD_COMMAND:"
+		rsd::list_all_actions $RSD_COMMAND
+		else
+		echo -e "\t$RSD [RSD OPTIONS] <command> "
+		fi
+	fi
+	exit 2
 }
 
 function rsd::debug() {
-    local msg=$1
-    shift
-    local level=1
+	local msg=$1
+	shift
+	local level=1
 
-    if (($#>0));then
-        level=$1
-    fi
-    if (( $RSD_DEBUG >= $level )); then
-        echo "$level:$msg"
-    fi
+	if (($#>0));then
+		level=$1
+	fi
+	if (( $RSD_DEBUG >= $level )); then
+		echo "$level:$msg"
+	fi
 }
 
 #same as rsd::debug, but the level comes first, for convenience
 function rsd::debug2() {
-    local level=$1
-    shift
+	local level=$1
+	shift
 
-    if (( $RSD_DEBUG >= $level )); then
-        echo "$level:" $@
-    fi
+	if (( $RSD_DEBUG >= $level )); then
+		echo "$level:" $@
+	fi
 }
 
 # same as rsd::debug, but to STDERR
 function rsd::warn() {
-    local msg=$1
-    shift
-    local level=1
+	local msg=$1
+	shift
+	local level=1
 
-    if (($#>0));then
-        level=$1
-    fi
-    if (( $RSD_DEBUG >= $level )); then
-        echo "$level:$msg" >&2
-    fi
+	if (($#>0));then
+		level=$1
+	fi
+	if (( $RSD_DEBUG >= $level )); then
+		echo "$level:$msg" >&2
+	fi
 }
 
 # same as rsd::debug2, but to STDERR
 function rsd::warn2() {
-    local level=$1
-    shift
+	local level=$1
+	shift
 
-    if (( $RSD_DEBUG >= $level )); then
-        echo "$level:" $@ >&2
-    fi
+	if (( $RSD_DEBUG >= $level )); then
+		echo "$level:" $@ >&2
+	fi
 }
 
 #Finds a file in the path
 function rsd::check_binary() {
-    local file=$1
-    local path
-    local IFS=":"
+	local file=$1
+	local path
+	local IFS=":"
 
-    for path in $PATH; do
-        if [[ -f "$path/$file" ]]; then
-            return 0
-        fi
-    done
+	for path in $PATH; do
+		if [[ -f "$path/$file" ]]; then
+		return 0
+		fi
+	done
 
-    RSD_ERROR_MSG="Command $file not in PATH."
-    return 1
+	RSD_ERROR_MSG="Command $file not in PATH."
+	return 1
 }
 
 function rsd::check_binaries() {
-    local file
-    local path
-    local IFS=":"
+	local file
+	local path
+	local IFS=":"
 
-    for file in $*;  do
-        if ! rsd::check_binary $file; then
-            return 1
-        fi
-    done
-    return 0
+	for file in $*;  do
+		if ! rsd::check_binary $file; then
+		return 1
+		fi
+	done
+	return 0
 }
 
 function rsd::check_binaries_or_fail() {
-    if ! rsd::check_binaries $@; then
-        echo $RSD_ERROR_MSG
-        exit 3
-    fi
-    return 0
+	if ! rsd::check_binaries $@; then
+		echo $RSD_ERROR_MSG
+		exit 3
+	fi
+	return 0
 }
 
 # for debug, it has to be done in the script, command line does not work so soon
 # TODO: make an exception if the argument does not exist
 function rsd::parse_args() {
-    local arg
-    local count=0
+	local arg
+	local count=0
 
-    rsd::debug2 8 "rsd::parse_args: Total: $#, Arguments:" $@
-    rsd::debug2 8 "rsd::parse_args: RSD_ARGS subargs: " ${RSD_ARGS["subargs"]}
+	rsd::debug2 8 "rsd::parse_args: Total: $#, Arguments:" $@
+	rsd::debug2 8 "rsd::parse_args: RSD_ARGS subargs: " ${RSD_ARGS["subargs"]}
 
-    RSD_ARGS["subargs"]=
+	RSD_ARGS["subargs"]=
 
-    while [ $# -gt 0 ]; do
-        case "$1" in
-        --*)
-            arg=${1:2}
-            if bash::key_exists $arg in RSD_ARGS_PARAM; then
-                if [[ "${RSD_ARGS_PARAM[$arg]}" == "0" ]]; then
-                    RSD_ARGS[${arg,,}]=1
-                else
-                    if [[ -z $2 ]]; then
-                        echo "Abort! Missing argumento to $arg."
-                        exit 9
-                    fi
-                    RSD_ARGS[${arg,,}]=$2
-                    shift
-                fi
-            else
-                RSD_ARGS[${arg,,}]=$2
-                shift
-            fi
-            ;;
-        -*)
-            arg=${1:1}
-            if bash::key_exists $arg in RSD_ARGS_PARAM; then
-                if [[ "${RSD_ARGS_PARAM[$arg]}" == "0" ]]; then
-                    RSD_ARGS[${arg,,}]=1
-                else
-                    if [[ -z $2 ]]; then
-                        echo "Abort! Missing argumento to $arg."
-                        exit 9
-                    fi
-                    RSD_ARGS[${arg,,}]=$2
-                    shift
-                fi
-            else
-                RSD_ARGS[${arg,,}]=$2
-                shift
-            fi
-            ;;
-        *)
-            if ((count == 1)); then
-                RSD_ARGS["subargs"]=$*
-                shift
-                break
-            fi
-            RSD_ARGS["command"]=$1
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--*)
+		arg=${1:2}
+		if bash::key_exists $arg in RSD_ARGS_PARAM; then
+			if [[ "${RSD_ARGS_PARAM[$arg]}" == "0" ]]; then
+			RSD_ARGS[${arg,,}]=1
+			else
+			if [[ -z $2 ]]; then
+				echo "Abort! Missing argumento to $arg."
+				exit 9
+			fi
+			RSD_ARGS[${arg,,}]=$2
+			shift
+			fi
+		else
+			RSD_ARGS[${arg,,}]=$2
+			shift
+		fi
+		;;
+		-*)
+		arg=${1:1}
+		if bash::key_exists $arg in RSD_ARGS_PARAM; then
+			if [[ "${RSD_ARGS_PARAM[$arg]}" == "0" ]]; then
+			RSD_ARGS[${arg,,}]=1
+			else
+			if [[ -z $2 ]]; then
+				echo "Abort! Missing argumento to $arg."
+				exit 9
+			fi
+			RSD_ARGS[${arg,,}]=$2
+			shift
+			fi
+		else
+			RSD_ARGS[${arg,,}]=$2
+			shift
+		fi
+		;;
+		*)
+		if ((count == 1)); then
+			RSD_ARGS["subargs"]=$*
+			shift
+			break
+		fi
+		RSD_ARGS["command"]=$1
 
-            ((count++))
-            ;;
-        esac
-        shift
-    done
+		((count++))
+		;;
+		esac
+		shift
+	done
 
-    local key
-    for key in ${!RSD_ARGS[@]}; do
-        rsd::debug2 8 "parse_agrs: arguments: $key: ${RSD_ARGS[$key]}"
-    done
+	local key
+	for key in ${!RSD_ARGS[@]}; do
+		rsd::debug2 8 "parse_agrs: arguments: $key: ${RSD_ARGS[$key]}"
+	done
 
-    return 0
+	return 0
 }
 
 # check the latest version in the repository
 function rsd::check_repository_version() {
-    local repo_version
-    rsd::check_binaries_or_fail wget grep head
+	local repo_version
+	rsd::check_binaries_or_fail wget grep head
 
-    repo_version=$(wget -q -O - $RSD_LATEST_RSD_REPO | grep ^RSD_VERSION= \
-                  | head -n 1 | sed -e "s/.*=['\"]\(.*\)['\"]/\1/")
+	repo_version=$(wget -q -O - $RSD_LATEST_RSD_REPO | grep ^RSD_VERSION= \
+			| head -n 1 | sed -e "s/.*=['\"]\(.*\)['\"]/\1/")
 
-    if rsd::version_gt $repo_version $RSD_VERSION; then
-        RSD_ERROR_MSG="There is a newes version in the repository: $repo_version.  Our version: $RSD_VERSION."
-        return 1
-    elif [[ $repo_version == $RSD_VERSION ]]; then
-        RSD_ERROR_MSG="You are using the latest version: $RSD_VERSION."
-    else
-        RSD_ERROR_MSG="Your version: $RSD_VERSION is newer that the one in the repository: $repo_version."
-    fi
+	if rsd::version_gt $repo_version $RSD_VERSION; then
+		RSD_ERROR_MSG="There is a newes version in the repository: $repo_version.  Our version: $RSD_VERSION."
+		return 1
+	elif [[ $repo_version == $RSD_VERSION ]]; then
+		RSD_ERROR_MSG="You are using the latest version: $RSD_VERSION."
+	else
+		RSD_ERROR_MSG="Your version: $RSD_VERSION is newer that the one in the repository: $repo_version."
+	fi
 
-    return 0
+	return 0
 }
 
 # Search all LIBDIRs for a file and return it on STDOUT
@@ -464,9 +464,9 @@ function rsd::check_libdir_file() {
 #-----------------------------------------------------
 
 if rsd::check_libdir_file lib/bash_extensions.lib; then
-    source $(rsd::get_libdir_file lib/bash_extensions.lib)
+	source $(rsd::get_libdir_file lib/bash_extensions.lib)
 else
-    rsd::warn "Abort! Missing bash extensions library."
-    exit 5
+	rsd::warn "Abort! Missing bash extensions library."
+	exit 5
 fi
 RSD_LIB=1
