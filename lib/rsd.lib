@@ -399,6 +399,8 @@ function rsd::check_repository_version() {
 # - bash source base,
 # - in user's home (TODO) and
 # - system wide install (TODO)
+#FIXME: escape spaces in the string
+RSD_LIBRARY_SEARCH_PATH="${RSD_LIBDIR[@]} $(pwd) $(dirname $(readlink -f $0)) $(dirname ${BASH_SOURCE[@]})"
 function rsd::get_libdir_file() {
 	rsd::check_binaries_or_fail pwd
 	file=$1
@@ -413,7 +415,7 @@ function rsd::get_libdir_file() {
 		return 0
 	fi
 
-	for libdir in "${RSD_LIBDIR[@]}" $(pwd) $(dirname $(readlink -f $0)) $(dirname ${BASH_SOURCE[@]}); do
+	for libdir in $RSD_LIBRARY_SEARCH_PATH; do
 		if [[ -e "$libdir/$file" ]]; then
 			RSD_LIB_CACHE[$file]="$libdir/$file"
 			if ((print)); then
