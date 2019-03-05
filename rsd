@@ -13,16 +13,24 @@
 #   and let rsd call it to have a unty experience
 #
 # rsd options:
+#   --usage | --help | -h
+#       Display help usage.
+#   --version
+#       Return the RSD version.
+#   --check-version
+#       Compares the local version to the one in the repository.
+#   --install PATH
+#       Install RSD in the provided PATH
 #   --debug LEVEL | -d LEVEL
-#       set the debug level
-#   --lib-dir PATH | -l PATH
-#       use PATH as libdir
+#       Sets the debug level
+#   --lib-dir PATHs | -l PATHs | --libdir PATHs | --lib PATHs
+#       Coma separated paths to search for libraries.
 #   --no-local | -nl
-#       do not switch to a local rsd copy
+#       Do not switch to a local rsd copy on the same directory.
 #   --completion
-#       support for bash completion.
-#       in completion mode, no command or action is actually executed.
-#       no command file should exec in global space.
+#       Support for bash completion.
+#       In completion mode, no command or action is actually executed.
+#       No command file should exec in global space.
 #
 # Exit codes:
 #   0 - SUCCESS
@@ -79,7 +87,9 @@ declare -A RSD_ARGS=( ["subargs"]="" ["command"]="" )
 declare -A RSD_ARGS_PARAM=( ["debug"]=1 ["d"]=1 ["version"]=0 ["check-version"]=0 \
 			["lib-dir"]=1 ["l"]=1 ["install"]=1 ["no-local"]=0 \
 			["nl"]=0 ["usage"]=0 ["help"]=0 ["h"]=0 \
-			["rsdlib"]=0 ["completion"]=0 )
+			["rsdlib"]=0 ["completion"]=0 \
+			["usage"]=0 ["help"]=0 ["h"]=0 \
+			)
 
 function rsd::version_gt() {
 	test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1";
@@ -90,8 +100,31 @@ function rsd::usage() {
 
 	echo "$RSD v$RSD_VERSION"
 	echo "Usage:"
+echo c:$RSD_COMMAND
 	if [[ -z "$RSD_COMMAND" ]]; then
-		echo -e "\t$RSD [RSD OPTIONS] <command> "
+		echo -e "\t$RSD [RSD OPTIONS] COMMAND [command options]"
+		echo -e "\t$RSD [RSD OPTIONS] --version"
+		echo -e "\t$RSD [RSD OPTIONS] --check-version"
+		echo -e "\t$RSD [RSD OPTIONS] --install PATH"
+		echo
+		echo -e "\tRSD OPTIONS:"
+		echo -e "\t\t--usage | --help | -h"
+		echo -e "\t\t\tDisplay help usage."
+		echo -e "\t\t--version"
+		echo -e "\t\t\tReturn the RSD version."
+		echo -e "\t\t--check-version"
+		echo -e "\t\t\tCompares the local version to the one in the repository."
+		echo -e "\t\t--install PATH"
+		echo -e "\t\t\tInstall RSD in the provided PATH"
+		echo -e "\t\t--debug LEVEL | -d LEVEL"
+		echo -e "\t\t\tSets the debug level"
+		echo -e "\t\t--lib-dir PATHs | -l PATHs | --libdir PATHs | --lib PATHs"
+		echo -e "\t\t\tComa separated paths to search for libraries."
+		echo -e "\t\t--no-local | -nl"
+		echo -e "\t\t\tDo not switch to a local rsd copy on the same directory."
+		echo -e "\t\t--completion"
+		echo -e "\t\t\tSupport for bash completion."
+
 		if bash::is_function rsd::list_all_commands; then
 		echo -e "\tCommands:"
 		for command in $(rsd::list_all_commands); do
@@ -284,7 +317,7 @@ function rsd::check_repository_version() {
 			| head -n 1 | sed -e "s/.*=['\"]\(.*\)['\"]/\1/")
 
 	if rsd::version_gt $repo_version $RSD_VERSION; then
-		RSD_ERROR_MSG="There is a newes version in the repository: $repo_version.  Our version: $RSD_VERSION."
+		RSD_ERROR_MSG="There is a newer version in the repository: $repo_version.  Our version: $RSD_VERSION."
 		return 1
 	elif [[ $repo_version == $RSD_VERSION ]]; then
 		RSD_ERROR_MSG="You are using the latest version: $RSD_VERSION."
@@ -411,7 +444,7 @@ fi
 
 # version
 if [[ ${RSD_ARGS[version]} ]]; then
-	rsd::warn $RSD_VERSION
+	echo $RSD_VERSION
 	exit 0
 fi
 
