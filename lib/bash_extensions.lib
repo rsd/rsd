@@ -17,11 +17,18 @@ function bash::is_function() {
 
 # Test if key exist in array:
 # if ! bash::key_exists key in array; then echo "No such array element"; fi
-function bash::key_exists(){
+function bash::key_exists() {
 	if [[ "$2" != "in" ]]; then
 		echo "Abort! Incorrect usage of bash::key_exists."
 		echo "Correct usage: bash::key_exists {key} in {array}"
 		exit 11
 	fi
 	eval '[ ${'$3'[$1]+muahaha} ]'
+}
+
+# Revert words in a string
+function bash::reverse() {
+	for (( i = ${#*}; i > 0; i-- )) {
+		echo ${!i}
+	}
 }
