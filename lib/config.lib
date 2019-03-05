@@ -1,0 +1,34 @@
+#!/bin/bash
+
+# configuration related stuff for RSD
+
+RSD_CONFIGLIB_VERSION='0.2.1'
+
+
+# Searchs for all occurences of a file
+# Every one is loaded.
+# The same file can be loaded multiple times.
+# The config is a bash script anyways
+# TODO: Migrate to ini and merge multiple inis
+RSD_CONFIGLIB_SEARCH_PATH="$HOME/.rsd/ $HOME/.config/rsd/ /etc/rsd/ /usr/local/etc/rsd/ $RSD_LIBRARY_SEARCH_PATH"
+function rsd::config::get_file() {
+	local command=${1:-rsd}
+	local found=1
+
+	for path in $(bash::reverse $RSD_CONFIGLIB_SEARCH_PATH)
+	do
+		rsd::warn2 10 rsd::config::get_file: Searching in $path
+		if [[ -f "$path/$command.conf" ]]; then
+			echo source "$path/$command.conf"
+			found=0
+		fi
+
+		if [[ -f "$path/config/$command.conf" ]]; then
+			echo source "$path/config/$command.conf"
+			found=0
+		fi
+	done
+	return $found
+}
+
+$(rsd::config::get_file)
