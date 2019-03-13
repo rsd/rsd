@@ -2,6 +2,8 @@
 
 # main support library to RSD
 
+# _prefix rsd::
+
 RSD_RSDLIB_VERSION='0.2.1'
 
 RSD_LIBRARY_SEARCH_PATH="${RSD_LIBDIR[@]} $(pwd) $(dirname $(readlink -f $0)) $(dirname ${BASH_SOURCE[@]})"
@@ -204,6 +206,21 @@ function rsd::list_functions() {
 	done
 }
 
+# list all RSD Options
+function rsd::list_all_options() {
+	local option
+
+	for option in "${!RSD_ARGS_PARAM[@]}"
+	do
+		if [[ "${#option}" == "1" ]]
+		then
+			echo "-$option"
+		else
+			echo "--$option"
+		fi
+	done
+	return 0
+}
 
 #--------------------------------------------------
 # Functions that are on rsd too
@@ -220,18 +237,18 @@ function rsd::usage_() {
 	if [[ -z "$RSD_COMMAND" ]]; then
 		echo -e "\t$RSD [RSD OPTIONS] <command> "
 		if bash::is_function rsd::list_all_commands; then
-		echo -e "\tCommands:"
-		for command in $(rsd::list_all_commands); do
-			echo -e "\t\t$command"
-		done
+			echo -e "\tCommands:"
+			for command in $(rsd::list_all_commands); do
+				echo -e "\t\t$command"
+			done
 		fi
 	else
 		if bash::is_function rsd::list_all_actions; then
-		echo -e "\t$RSD [RSD OPTIONS] $RSD_COMMAND <action> [COMMAND OPTIONS]"
-		echo -e "\tActions for $RSD_COMMAND:"
-		rsd::list_all_actions $RSD_COMMAND
+			echo -e "\t$RSD [RSD OPTIONS] $RSD_COMMAND <action> [COMMAND OPTIONS]"
+			echo -e "\tActions for $RSD_COMMAND:"
+			rsd::list_all_actions $RSD_COMMAND
 		else
-		echo -e "\t$RSD [RSD OPTIONS] <command> "
+			echo -e "\t$RSD [RSD OPTIONS] <command> "
 		fi
 	fi
 	exit 2
@@ -521,6 +538,5 @@ fi
 
 # Let it get away with a warning
 $(rsd::source_lib lib/config.lib)
-
 
 RSD_LIB=1
