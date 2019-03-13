@@ -4,6 +4,10 @@
 
 RSD_RSDLIB_VERSION='0.2.1'
 
+RSD_LIBRARY_SEARCH_PATH="${RSD_LIBDIR[@]} $(pwd) $(dirname $(readlink -f $0)) $(dirname ${BASH_SOURCE[@]})"
+
+# used globals
+RSD_LIBRARY_LOAD=
 
 declare -A RSD_ARGS_PARAM=( ["debug"]=1 ["d"]=1 ["version"]=0 ["check-version"]=0 \
 			["lib-dir"]=1 ["l"]=1 ["install"]=1 ["no-local"]=0 \
@@ -435,19 +439,25 @@ function rsd::check_repository_version() {
 # - in user's home (TODO) and
 # - system wide install (TODO)
 #FIXME: escape spaces in the string
-RSD_LIBRARY_SEARCH_PATH="${RSD_LIBDIR[@]} $(pwd) $(dirname $(readlink -f $0)) $(dirname ${BASH_SOURCE[@]})"
 function rsd::get_libdir_file() {
 	rsd::check_binaries_or_fail pwd
-	file=$1
-	print=${2:-1}
+	local file=$1
+	local print=${2:-1}
 	local libdir
 
 	#check cache first
-	if [[ -n "${RSD_LIB_CACHE[$file]}" ]]; then
-		if ((print)); then
-			echo ${RSD_LIB_CACHE[$file]}
+	# make sure cache exists
+	if [[ -v RSD_LIB_CACHE[@] ]]; then
+		if [[ -n "${RSD_LIB_CACHE[$file]}" ]]; then
+			if ((print)); then
+				echo ${RSD_LIB_CACHE[$file]}
+			fi
+			return 0
 		fi
-		return 0
+	else
+		# The most probsble case to be here is
+		# that the library have being called externally not by rsd (e.g. bash completion)
+		declare -A RSD_LIB_CACHE
 	fi
 
 	for libdir in $RSD_LIBRARY_SEARCH_PATH; do
@@ -465,24 +475,12 @@ function rsd::get_libdir_file() {
 # Same as rsd::get_libdir_file, but returns all occurrences
 function rsd::get_all_libdir_file() {
 	rsd::check_binaries_or_fail pwd
-	file=$1
-# 	print=${2:-1}
+	local file=$1
 	local libdir
 
-	#check cache first
-# 	if [[ -n "${RSD_LIB_CACHE[$file]}" ]]; then
-# 		if ((print)); then
-# 			echo ${RSD_LIB_CACHE[$file]}
-# 		fi
-# 		return 0
-# 	fi
-
-	for libdir in "${RSD_LIBDIR[@]}" $(pwd) $(dirname $(readlink -f $0)) $(dirname ${BASH_SOURCE[@]}); do
+	for libdir in $RSD_LIBRARY_SEARCH_PATH; do
 		if [[ -e "$libdir/$file" ]]; then
-# 			RSD_LIB_CACHE[$file]="$libdir/$file"
-# 			if ((print)); then
-				echo "$libdir/$file"
-# 			fi
+			echo "$libdir/$file"
 		fi
 	done
 	return 0

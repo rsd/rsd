@@ -59,6 +59,8 @@ RSD_LATEST_RSD_REPO="https://raw.githubusercontent.com/rsd/rsd/master/rsd"
 # preserves arguments
 RSD_ORIGINAL_ARGS="$0 $@"
 
+RSD_LIBRARY_SEARCH_PATH="${RSD_LIBDIR[@]} $(pwd) $(dirname $(readlink -f $0)) $(dirname ${BASH_SOURCE[@]})"
+
 # if a function returns error, this is the reason
 # TODO: write a better API to handle errors
 RSD_ERROR_MSG=""
@@ -354,19 +356,22 @@ function rsd::check_repository_version() {
 # - system wide install (TODO)
 function rsd::get_libdir_file() {
 	rsd::check_binaries_or_fail pwd
-	file=$1
-	print=${2:-1}
+	local file=$1
+	local print=${2:-1}
 	local libdir
 
 	#check cache first
-	if [[ -n "${RSD_LIB_CACHE[$file]}" ]]; then
-		if ((print)); then
-			echo ${RSD_LIB_CACHE[$file]}
+	# make sure cache exists
+	if [[ -v RSD_LIB_CACHE[@] ]]; then
+		if [[ -n "${RSD_LIB_CACHE[$file]}" ]]; then
+			if ((print)); then
+				echo ${RSD_LIB_CACHE[$file]}
+			fi
+			return 0
 		fi
-		return 0
 	fi
 
-	for libdir in "${RSD_LIBDIR[@]}" $(pwd) $(dirname $(readlink -f $0)) $(dirname ${BASH_SOURCE[@]}); do
+	for libdir in $RSD_LIBRARY_SEARCH_PATH; do
 		if [[ -e "$libdir/$file" ]]; then
 			RSD_LIB_CACHE[$file]="$libdir/$file"
 			if ((print)); then
