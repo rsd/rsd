@@ -104,9 +104,9 @@ function rsd::usage() {
 
 	echo "$RSD v$RSD_VERSION"
 	echo "Usage:"
-echo c:$RSD_COMMAND
+
 	if [[ -z "$RSD_COMMAND" ]]; then
-		echo -e "\t$RSD [RSD OPTIONS] COMMAND [command options]"
+		echo -e "\t$RSD [RSD OPTIONS] COMMAND [command options] [ACTION] [action options]"
 		echo -e "\t$RSD [RSD OPTIONS] --version"
 		echo -e "\t$RSD [RSD OPTIONS] --check-version"
 		echo -e "\t$RSD [RSD OPTIONS] --install PATH"
@@ -133,6 +133,11 @@ echo c:$RSD_COMMAND
 		echo -e "\tCommands:"
 		for command in $(rsd::list_all_commands); do
 			echo -e "\t\t$command"
+			#load right here
+			$(rsd::source_lib command/$command)
+			if bash::is_function rsd::command::$command::help; then
+				echo -e "\t\t\t$(rsd::command::$command::help)"
+			fi
 		done
 		fi
 	else

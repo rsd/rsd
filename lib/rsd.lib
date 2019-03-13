@@ -167,27 +167,23 @@ function rsd::list_all_actions_bare() {
 	local command=$2
 	local sub help i real_sub
 
-	for sub in $(rsd::list_functions "rsd::${command}::action::"); do
+	for sub in $(rsd::list_functions "rsd::command::$command::action::"); do
 		rsd::debug "action function is $sub" 8
 		real_sub=$sub
-		# we need a /g modifier
-		for i in {1..5}; do
-		sub=${sub/_/-}
-		done
 
 		echo -e -n "\t\t$sub "
 		if ((mode)); then
-		help="rsd::${command}::help::${real_sub}"
-		rsd::debug "help function is $help" 8
-		if bash::is_function $help; then
-			rsd::debug "Calling help function for $help" 7
-			$help
-			continue
+			help="rsd::${command}::help::${real_sub}"
+			rsd::debug "help function is $help" 8
+			if bash::is_function $help; then
+				rsd::debug "Calling help function for $help" 7
+				$help
+				continue
+			else
+				echo
+			fi
 		else
 			echo
-		fi
-		else
-		echo
 		fi
 	done
 }
