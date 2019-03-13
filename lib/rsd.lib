@@ -56,38 +56,54 @@ function rsd::load_command_file() {
 }
 
 
-# execute command if any
-# looks for the first ocorruence of rsd::<command>::<command> (preferred),
-# rsd::<command>, <command> or even main.
+# Search for command
+# Look for a specific function to act as a command.
+# Search order:
+# -rsd::<command>::<command>
+# -rsd::<command>
+# -main
+function rsd::search_command() {
+	rsd::arguments_or_usage 1 $@
+	local command=$1
+	local real_command
+
+	for real_command in 	rsd::command::$command::$command \
+				rsd::command::$command::command \
+				rsd::command::$command \
+				rsd::$command \
+				$command \
+				main
+	do
+		if bash::is_function $real_command; then
+			echo $real_command
+			return 0
+		fi
+	done
+	return 1
+}
+
+
+# Command or Action execution
 function rsd::command() {
 	rsd::arguments_or_usage 1 $@
 	local command=$1
 	local real_command
 
-	for real_command in rsd::$command::$command rsd::$command $command main; do
-		if bash::is_function $real_command; then
+	if real_command=$(rsd::search_command $command); then
 		rsd::debug "Calling $real_command with arguments: ${RSD_ARGS[subargs]}" 5
 		$real_command ${RSD_ARGS[subargs]}
 		exit 0
-		else
-		rsd::generic_command $command
-		fi
-	done
-}
-
-# make an action call
-# if no action is given, repeat the command name as an action
-function rsd::generic_command() {
-	rsd::arguments_or_usage 1 $@
-	local command=$1
-
+	else
 		rsd::parse_args RSD_COMMAND_${command^^}_ARGS_PARAM RSD_COMMAND_ARGS ${RSD_ARGS[subargs]}
 		if [[ ! -z ${RSD_COMMAND_ARGS[command]} ]]; then
 			rsd::generic_action $command ${RSD_COMMAND_ARGS[command]}
 		else
 			rsd::usage
 		fi
+	fi
+	return
 }
+
 
 # call a generic action in command
 # pass the subargs in the RSD_ARGS hash
@@ -95,21 +111,16 @@ function rsd::generic_action() {
 	rsd::arguments_or_usage 2 $@
 	local command=$1
 	local action=$2
-	echo Action $2
 	local action_function
 
-	for action_function in rsd::${command}::action::${action} \
-		rsd::${command}::${action} rsd::${action} ${command}::${action} $action
+	for action_function in 	rsd::command::${command}::action::${action} \
+				rsd::command::${command}::${action} \
+				rsd::${action} ${command}::${action}
 	do
-		# we need a /g modifier
-		for i in {1..5}; do
-		action_function=${action_function//-/_}
-		done
-
 		if bash::is_function $action_function; then
-		rsd::debug "function for action $RSD_ACTION is $action_function" 8
-		$action_function ${RSD_ARGS[subargs]}
-		exit 0
+			rsd::debug "function for action $RSD_ACTION is $action_function" 8
+			$action_function ${RSD_COMMAND_ARGS[subargs]}
+			exit 0
 		fi
 	done
 

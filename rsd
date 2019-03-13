@@ -36,7 +36,7 @@
 #   0 - SUCCESS
 #   1 - Not bash 4
 #   2 - Bad usage
-#   3 - Command not found
+#   3 - Program not found
 #   4 - There is a new version in the repository
 #   5 - Missing
 #   6 - Missing system files (maybe not installed)
@@ -71,6 +71,9 @@ declare -A RSD_LIB_CACHE
 RSD=$(basename $0)
 RSD_RUN_DIR=$(readlink -f $(dirname $0))
 RSD_LOCAL_DIR=$(pwd)
+
+RSD_COMMAND=
+RSD_ACTION=
 
 if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
 	echo "Abort! BASH >= 4 required.  Got $BASH_VESION" >&2
@@ -494,14 +497,18 @@ if [[ "${RSD_ARGS[command]}" ]]; then
 	RSD_COMMAND=${RSD_ARGS[command]}
 
 	# import the calling command script
-	_rsd_source=$(rsd::load_command_file $RSD_COMMAND)
-	if (($?)); then
-		rsd::warn "Command $RSD_COMMAND not found"
+	if ! _rsd_source=$(rsd::load_command_file $RSD_COMMAND); then
+		rsd::warn "Command $RSD_COMMAND not found" 0
+		RSD_COMMAND=
 		rsd::usage
 	fi
 
 	# sourcing the command, any argument left is passed to
 	eval $_rsd_source ${RSD_ARGS[subargs]}
+
+	rsd::command $RSD_COMMAND
+
+	exit 0
 fi
 
 
