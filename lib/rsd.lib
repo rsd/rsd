@@ -4,6 +4,14 @@
 
 RSD_RSDLIB_VERSION='0.2.1'
 
+
+declare -A RSD_ARGS_PARAM=( ["debug"]=1 ["d"]=1 ["version"]=0 ["check-version"]=0 \
+			["lib-dir"]=1 ["l"]=1 ["install"]=1 ["no-local"]=0 \
+			["nl"]=0 ["usage"]=0 ["help"]=0 ["h"]=0 \
+			["rsdlib"]=0 ["completion"]=0 \
+			["usage"]=0 ["help"]=0 ["h"]=0 \
+			)
+
 # checks if there are the minimun required arguments or call usage
 function rsd::arguments_or_usage() {
 	local total=$1
@@ -73,8 +81,12 @@ function rsd::generic_command() {
 	rsd::arguments_or_usage 1 $@
 	local command=$1
 
-	rsd::parse_args ${RSD_ARGS[subargs]}
-	rsd::generic_action $command ${RSD_ARGS[command]}
+		rsd::parse_args RSD_COMMAND_${command^^}_ARGS_PARAM RSD_COMMAND_ARGS ${RSD_ARGS[subargs]}
+		if [[ ! -z ${RSD_COMMAND_ARGS[command]} ]]; then
+			rsd::generic_action $command ${RSD_COMMAND_ARGS[command]}
+		else
+			rsd::usage
+		fi
 }
 
 # call a generic action in command
@@ -298,74 +310,86 @@ function rsd::check_binaries_or_fail() {
 	return 0
 }
 
-# for debug, it has to be done in the script, command line does not work so soon
-# TODO: make an exception if the argument does not exist
+# Parse command line arguments
+# - First argument is the name of the Associative Array with the configuration
+# - The second argument is the name of the Associative Array to be used as a return
+#   it will be created globally
 function rsd::parse_args() {
-	local arg
+	local config=$1
+	shift
+	local param=$1
+	shift
+	local tempConfig tempParam arg 
 	local count=0
+	
+	eval "unset $param"
+	eval "declare  -gA $param"
 
 	rsd::debug2 8 "rsd::parse_args: Total: $#, Arguments:" $@
-	rsd::debug2 8 "rsd::parse_args: RSD_ARGS subargs: " ${RSD_ARGS["subargs"]}
-
-	RSD_ARGS["subargs"]=
 
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--*)
-		arg=${1:2}
-		if bash::key_exists $arg in RSD_ARGS_PARAM; then
-			if [[ "${RSD_ARGS_PARAM[$arg]}" == "0" ]]; then
-			RSD_ARGS[${arg,,}]=1
+			arg=${1:2}
+			tempConfig=$config[$arg]
+			tempParam=$param[${arg,,}]
+			
+			# Note: can't use a variable variable in assignment as 
+			#       ${!tempParam}=$2
+			#       so we use eval
+
+			if bash::key_exists $arg in RSD_ARGS_PARAM; then
+				if [[ "${!tempConfig}" == "0" ]]; then
+					eval "$tempParam=1"
+				else
+					if [[ -z $2 ]]; then
+						rsd::warn "Abort! Missing argumento to $arg."
+						exit 9
+					fi	
+						eval "$tempParam=$2"
+					shift
+				fi
 			else
-			if [[ -z $2 ]]; then
-				echo "Abort! Missing argumento to $arg."
-				exit 9
+				eval "$tempParam=$2"
+				shift
 			fi
-			RSD_ARGS[${arg,,}]=$2
-			shift
-			fi
-		else
-			RSD_ARGS[${arg,,}]=$2
-			shift
-		fi
+
 		;;
 		-*)
-		arg=${1:1}
-		if bash::key_exists $arg in RSD_ARGS_PARAM; then
-			if [[ "${RSD_ARGS_PARAM[$arg]}" == "0" ]]; then
-			RSD_ARGS[${arg,,}]=1
+			arg=${1:1}
+			tempConfig=$config[$arg]
+			tempParam=$param[${arg,,}]
+			if bash::key_exists $arg in RSD_ARGS_PARAM; then
+				if [[ "${!tempConfig}" == "0" ]]; then
+					eval "$tempParam=1"
+				else
+					if [[ -z $2 ]]; then
+						rsd::warn "Abort! Missing argumento to $arg."
+						exit 9
+					fi
+					eval "$tempParam=$2"
+					shift
+				fi
 			else
-			if [[ -z $2 ]]; then
-				echo "Abort! Missing argumento to $arg."
-				exit 9
+				eval "$tempParam=$2"
+				shift
 			fi
-			RSD_ARGS[${arg,,}]=$2
-			shift
-			fi
-		else
-			RSD_ARGS[${arg,,}]=$2
-			shift
-		fi
 		;;
 		*)
-		if ((count == 1)); then
-			RSD_ARGS["subargs"]=$*
-			shift
-			break
-		fi
-		RSD_ARGS["command"]=$1
+			if ((count == 1)); then
+				tempParam=$param[subargs]
+				eval "$tempParam=\$*"
+				shift
+				break
+			fi
+			tempParam=$param[command]
+			eval "$tempParam=$1"
 
-		((count++))
+			((count++))
 		;;
 		esac
 		shift
 	done
-
-	local key
-	for key in ${!RSD_ARGS[@]}; do
-		rsd::debug2 8 "parse_agrs: arguments: $key: ${RSD_ARGS[$key]}"
-	done
-
 	return 0
 }
 
