@@ -1,0 +1,79 @@
+# Companion utility for bash_completion script
+# or any completion
+
+RSD_COMMAND_COMPLETION_VERSION="0.1"
+
+
+# List all rsd options
+function rsd::command::completion::action::list-rsd-options() {
+	rsd::list_all_options
+}
+
+function rsd::command::completion::action::list-commands() {
+	rsd::list_all_commands
+}
+
+function rsd::command::completion::action::list-command-options() {
+	rsd::arguments_or_usage 1 $@
+	local command=$1
+	local _rsd_source
+	
+	if ! _rsd_source=$(rsd::load_command_file $command); then
+ 		rsd::warn "Command $command not found" 1
+		exit 10
+	fi
+	
+	eval $_rsd_source
+	
+	rsd::list_command_options $command
+}
+
+function rsd::command::completion::action::list-command-actions() {
+	rsd::arguments_or_usage 1 $@
+	local command=$1
+	local _rsd_source
+	
+	if ! _rsd_source=$(rsd::load_command_file $command); then
+		rsd::warn "Command $command not found" 1
+		exit 10
+	fi
+	
+	eval $_rsd_source
+	
+	rsd::list_all_actions_bare 0 $command
+}
+
+function rsd::command::completion::action::check-rsd-option-has-value() {
+	rsd::arguments_or_usage 1 $@
+	local option=$1
+
+	if [[ ${RSD_ARGS_PARAM[$option]} == "1" ]]; then
+		exit 0
+	fi
+	exit 1
+}
+
+function rsd::command::completion::action::check-command-option-has-value() {
+	rsd::arguments_or_usage 2 $@
+	local command=$1
+	local option=$2
+	local _rsd_source _option
+	local options="RSD_COMMAND_${command^^}_ARGS_PARAM"
+	
+	if [[ -z ${!options} ]]; then
+		declare -n _option=$options
+	else
+		exit 1
+	fi
+	
+	if ! _rsd_source=$(rsd::load_command_file $command); then
+		rsd::warn "Command $command not found" 1
+		exit 10
+	fi	
+	eval $_rsd_source
+	
+	if [[ "${_option[$option]}" == "1" ]]; then
+		exit 0
+	fi
+	exit 1
+}

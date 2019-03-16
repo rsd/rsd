@@ -1,0 +1,95 @@
+# rsd completion
+# 0.3
+
+function _rsd_completion()
+{
+	local command opt word
+	local rsd="${COMP_WORDS[0]} -d 0"
+	local total_words=$COMP_CWORD
+	local current_word="${COMP_WORDS[COMP_CWORD]}"
+
+	# 1 - rsd
+	#     Can have: command or rsd option
+	# 2 - rsd option that needs argument
+	# 3 - command
+	#     Can have: action or command option
+	# 4 - command option that needs an argument
+	# 5 - action
+	local status=1
+	local count=0
+	for word in ${COMP_WORDS[*]}
+	do
+		((count++))
+
+		# RSD command
+		if [[ "$count" == "1" ]]; then
+			continue
+		fi
+
+		#skip anything after action
+		if [[ "$status" == "5" ]]; then
+			break
+		fi
+
+		if [[ "$status" == "2" ]]; then
+			status=1
+			continue
+		fi
+
+		if [[ "$status" == "4" ]]; then
+			status=3
+			continue
+		fi
+
+ 		if [[ "$status" == "1" ]] || [[ "$status" == "3" ]]; then
+ 			if [[ "$word" == -* ]]; then
+				opt=$word
+
+				if [[ "$opt" == --* ]]; then
+					opt=${opt:2}
+				else
+					opt=${opt:1}
+				fi
+				
+				if [[ -n "$opt" ]]; then
+					if [[ "$status" == "1" ]]; then
+						if $rsd completion check-rsd-option-has-value $opt; then
+							status=2
+						fi
+					elif [[ "$status" == "3" ]]; then
+						if $rsd completion check-command-option-has-value $command $opt; then
+							status=4
+						fi
+					fi
+				fi
+			else 	# it is a command 
+				# only if completed
+				if (("$total_words" >= "$count")); then
+					if [[ "$status" == "1" ]]; then
+						command=$word
+						status="3"
+					elif [[ "$status" == "3" ]]; then
+						status="5"
+					fi
+				fi
+ 			fi
+ 		fi		
+	done
+
+	case "$status" in
+	1)
+		COMPREPLY=( $(compgen -W "$($rsd completion list-rsd-options) $($rsd completion list-commands)" -- $current_word) )
+		return 0
+		;;
+	3)
+		COMPREPLY=( $(compgen -W "$($rsd completion list-command-actions $command) $($rsd completion list-command-options $command)" -- $current_word) )
+		return 0
+		;;
+	*)
+		return 0
+		;;
+	esac
+	return 0
+}
+
+complete -F _rsd_completion rsd
