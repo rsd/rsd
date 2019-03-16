@@ -206,7 +206,7 @@ function rsd::list_functions() {
 	done
 }
 
-# list all RSD Options
+# list all RSD options
 function rsd::list_all_options() {
 	local option
 
@@ -219,6 +219,28 @@ function rsd::list_all_options() {
 			echo "--$option"
 		fi
 	done
+	return 0
+}
+
+# list all command options
+function rsd::list_command_options() {
+	rsd::arguments_or_usage 1 $@
+	local command=$1
+	local options="RSD_COMMAND_${command^^}_ARGS_PARAM"
+	local option _option
+
+	if [[ -z ${!options} ]]; then
+		declare -n _option=$options
+		for option in "${!_option[@]}"
+		do
+			if [[ "${#option}" == "1" ]]
+			then
+				echo "-$option"
+			else
+				echo "--$option"
+			fi
+		done
+	fi
 	return 0
 }
 
