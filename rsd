@@ -593,7 +593,7 @@ if [[ ${RSD_ARGS[install]} ]]; then
                 exit 13
             fi
         else
-            RSD_INSTALLATION_STEP = 2
+            RSD_INSTALLATION_STEP=2
         fi
     fi
 
