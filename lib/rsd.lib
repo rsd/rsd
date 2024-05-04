@@ -1,4 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call `rsd` to use it."
+    exit 12
+fi
 
 # main support library to RSD
 
@@ -6,17 +12,8 @@
 
 RSD_RSDLIB_VERSION='0.2.1'
 
-RSD_LIBRARY_SEARCH_PATH="${RSD_LIBDIR[@]} $(pwd) $(dirname $(readlink -f $0)) $(dirname ${BASH_SOURCE[@]})"
-
 # used globals
 RSD_LIBRARY_LOAD=
-
-declare -A RSD_ARGS_PARAM=( ["debug"]=1 ["d"]=1 ["version"]=0 ["check-version"]=0 \
-			["lib-dir"]=1 ["l"]=1 ["install"]=1 ["no-local"]=0 \
-			["nl"]=0 ["usage"]=0 ["help"]=0 ["h"]=0 \
-			["rsdlib"]=0 ["completion"]=0 \
-			["usage"]=0 ["help"]=0 ["h"]=0 \
-			)
 
 # checks if there are the minimun required arguments or call usage
 function rsd::arguments_or_usage() {
@@ -244,9 +241,48 @@ function rsd::list_command_options() {
 	return 0
 }
 
+
+# Same as rsd::warn, but the level comes first, for convenience
+# Arguments:
+#   $1 - The debug level
+#   $* - The message(s) to be displayed
+function rsd::warn2() {
+	local level=$1
+	shift
+
+	if (( RSD_DEBUG >= level )); then
+		echo "$level:" "$@" >&2
+	fi
+}
+
+# Checks for a library in the search path
+# Returns the string to source it
+# Or a warning to STDERR (depending on the DEBUG level)
+# An optional argument to the message level can be issued.
+function rsd::source_lib() {
+	local file=$1
+	local level=${2:-0}
+
+	if rsd::check_libdir_file "$file"; then
+		echo source "$(rsd::get_libdir_file "$file")"
+	else
+		echo rsd::warn2 $level "Cannot load library $file!"
+		return 1
+	fi
+
+	return 0
+}
+
 #--------------------------------------------------
 # Functions that are on rsd too
 #--------------------------------------------------
+# Checks if a version is greater than another
+# Arguments:
+#   $1 - The version to compare
+#   $2 - The version to compare to
+# Returns:
+#   0 - if the first version is greater than the second
+#   1 - if the first version is less than the second
 function rsd::version_gt() {
 	test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1";
 }
@@ -276,6 +312,10 @@ function rsd::usage_() {
 	exit 2
 }
 
+# Debug to STDOUT
+# Arguments:
+#   $1 - The message to be displayed
+#   $2 - The debug level (default 1)
 function rsd::debug() {
 	local msg=$1
 	shift
@@ -284,22 +324,28 @@ function rsd::debug() {
 	if (($#>0));then
 		level=$1
 	fi
-	if (( $RSD_DEBUG >= $level )); then
-		echo "$level:$msg"
+	if (( RSD_DEBUG >= level )); then
+		echo "$level: $msg"
 	fi
 }
 
-#same as rsd::debug, but the level comes first, for convenience
+# Same as rsd::debug, but the level comes first, for convenience
+# Arguments:
+#   $1 - The debug level
+#   $* - The message(s) to be displayed
 function rsd::debug2() {
 	local level=$1
 	shift
 
-	if (( $RSD_DEBUG >= $level )); then
-		echo "$level:" $@
+	if (( RSD_DEBUG >= level )); then
+		echo "$level:" "$@"
 	fi
 }
 
-# same as rsd::debug, but to STDERR
+# outputs a warning message to the STDERR
+# Arguments:
+#   $1 - The message to be displayed
+#   $2 - The debug level (default 1)
 function rsd::warn() {
 	local msg=$1
 	shift
@@ -308,22 +354,14 @@ function rsd::warn() {
 	if (($#>0));then
 		level=$1
 	fi
-	if (( $RSD_DEBUG >= $level )); then
-		echo "$level:$msg" >&2
+	if (( RSD_DEBUG >= level )); then
+		echo "$level: $msg" >&2
 	fi
 }
 
-# same as rsd::debug2, but to STDERR
-function rsd::warn2() {
-	local level=$1
-	shift
-
-	if (( $RSD_DEBUG >= $level )); then
-		echo "$level:" $@ >&2
-	fi
-}
-
-#Finds a file in the path
+# Finds a bin file in the path
+# Arguments:
+#   $1 - The file to be found
 function rsd::check_binary() {
 	local file=$1
 	local path
@@ -339,22 +377,32 @@ function rsd::check_binary() {
 	return 1
 }
 
+# Checks a list of binaries files in the path
+# Arguments:
+#   $* - The list of files to be found
+# Returns:
+#   0 - if all files are found
+#   1 - if any file is not found
 function rsd::check_binaries() {
 	local file
 	local path
 	local IFS=":"
 
-	for file in $*;  do
-		if ! rsd::check_binary $file; then
+	for file in "$@";  do
+		if ! rsd::check_binary "$file"; then
 		return 1
 		fi
 	done
 	return 0
 }
 
+# Checks a list of binaries files in the path or aborts
+# Usefull if there is no point into continue in the absence of a binary
+# Arguments:
+#   $* - The list of files to be found
 function rsd::check_binaries_or_fail() {
-	if ! rsd::check_binaries $@; then
-		echo $RSD_ERROR_MSG
+	if ! rsd::check_binaries "$@"; then
+		rsd::warn "$RSD_ERROR_MSG"
 		exit 3
 	fi
 	return 0
@@ -443,7 +491,13 @@ function rsd::parse_args() {
 	return 0
 }
 
+
 # check the latest version in the repository
+# Requires:
+#  wget, grep, head
+# Returns:
+#  0 - if the local version is the same or newer
+#  1 - if the local version is older
 function rsd::check_repository_version() {
 	local repo_version
 	rsd::check_binaries_or_fail wget grep head
@@ -451,10 +505,10 @@ function rsd::check_repository_version() {
 	repo_version=$(wget -q -O - $RSD_LATEST_RSD_REPO | grep ^RSD_VERSION= \
 			| head -n 1 | sed -e "s/.*=['\"]\(.*\)['\"]/\1/")
 
-	if rsd::version_gt $repo_version $RSD_VERSION; then
-		RSD_ERROR_MSG="There is a newes version in the repository: $repo_version.  Our version: $RSD_VERSION."
+	if rsd::version_gt "$repo_version" "$RSD_VERSION"; then
+		RSD_ERROR_MSG="There is a newer version in the repository: $repo_version.  Our version: $RSD_VERSION."
 		return 1
-	elif [[ $repo_version == $RSD_VERSION ]]; then
+	elif [[ $repo_version == "$RSD_VERSION" ]]; then
 		RSD_ERROR_MSG="You are using the latest version: $RSD_VERSION."
 	else
 		RSD_ERROR_MSG="Your version: $RSD_VERSION is newer that the one in the repository: $repo_version."
@@ -473,7 +527,14 @@ function rsd::check_repository_version() {
 # - bash source base,
 # - in user's home (TODO) and
 # - system wide install (TODO)
-#FIXME: escape spaces in the string
+# Requires:
+#  pwd
+# Arguments:
+#   $1 - The file to be found
+#   $2 - If 1, print the file found
+# Returns:
+#  0 - if the file is found
+#  1 - if the file is not found
 function rsd::get_libdir_file() {
 	rsd::check_binaries_or_fail pwd
 	local file=$1
@@ -485,14 +546,10 @@ function rsd::get_libdir_file() {
 	if [[ -v RSD_LIB_CACHE[@] ]]; then
 		if [[ -n "${RSD_LIB_CACHE[$file]}" ]]; then
 			if ((print)); then
-				echo ${RSD_LIB_CACHE[$file]}
+				echo "${RSD_LIB_CACHE[$file]}"
 			fi
 			return 0
 		fi
-	else
-		# The most probsble case to be here is
-		# that the library have being called externally not by rsd (e.g. bash completion)
-		declare -A RSD_LIB_CACHE
 	fi
 
 	for libdir in $RSD_LIBRARY_SEARCH_PATH; do
@@ -507,43 +564,15 @@ function rsd::get_libdir_file() {
 	return 1
 }
 
-# Same as rsd::get_libdir_file, but returns all occurrences
-function rsd::get_all_libdir_file() {
-	rsd::check_binaries_or_fail pwd
-	local file=$1
-	local libdir
-
-	for libdir in $RSD_LIBRARY_SEARCH_PATH; do
-		if [[ -e "$libdir/$file" ]]; then
-			echo "$libdir/$file"
-		fi
-	done
-	return 0
-}
-
-
-#just check if a file exists in LIBDIR
+# just check if a file exists in LIBDIR
+# Arguments:
+#   $1 - The file to be found
+# Returns:
+#  0 - if the file is found
+#  1 - if the file is not found
 function rsd::check_libdir_file() {
-	rsd::get_libdir_file $1 0
+	rsd::get_libdir_file "$1" 0
 	return $?
-}
-
-# Checks for a library in the search path
-# Returns the string to source it
-# Or a warning to STDERR (depending on the DEBUG level)
-# An optional argument to the message level can be issued.
-function rsd::source_lib() {
-	local file=$1
-	local level=${2:-0}
-
-	if rsd::check_libdir_file "$file"; then
-		echo source "$(rsd::get_libdir_file "$file")"
-	else
-		echo rsd::warn2 $level "Cannot load library $file!"
-		return 1
-	fi
-
-	return 0
 }
 
 #-----------------------------------------------------

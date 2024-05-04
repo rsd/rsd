@@ -12,6 +12,7 @@ function rsd::command::completion::action::list-rsd-options() {
 }
 
 function rsd::command::completion::action::list-commands() {
+    rsd::debug "Listing all commands"
 	rsd::list_all_commands
 }
 

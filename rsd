@@ -12,7 +12,7 @@
 #   the idea is the group classes of commands (or tasks) into modules
 #   and let rsd call it to have an organized command line
 #
-# rsd options:
+# rsd options [need to be before a `command`]:
 #   --usage | --help | -h
 #       Display help usage.
 #   --version
@@ -45,6 +45,7 @@
 #   9 - Missing command line argument
 #   10 - Command failure (unknown reason)
 #   11 - Internal Failure
+#   12 - Try to run a library directly
 
 # Note: By default all name space used starts with a rsd:: prefix for functions or
 #       RSD_ for variables.  This is to avoid conflicts with other libraries.
@@ -54,6 +55,11 @@
 
 RSD_VERSION='1.9.0'
 VERSION=$RSD_VERSION
+RSD_ON=1
+
+# Initial Debug level.  It will be replaced by command line arguments later on.
+# Set to 1 to debug stages before command line argument has a chance to kick in
+RSD_DEBUG=01
 
 # Note: RSD will load the command file and call the command function as needed.
 #       Hoever the script needs to be self independent to download, install or upgrade itself as neeeded.
@@ -79,9 +85,9 @@ RSD_LOCAL_DIR=$(pwd)
 RSD_COMMAND=
 RSD_ACTION=
 
-# bash 4 required
-if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
-	echo "Abort! BASH >= 4 required.  Got $BASH_VESION" >&2
+# bash 4.3 required
+if [[ "${BASH_VERSINFO[0]}" -lt 4 ]] || [[ "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -lt 3 ]]; then
+	echo "Abort! BASH >= 4.3 required.  Got $BASH_VESION" >&2
 	exit 1
 fi
 
@@ -158,8 +164,10 @@ function rsd::usage() {
 		for command in $(rsd::list_all_commands); do
 			echo -e "\t\t$command"
 
-			# load right here
-			$(rsd::source_lib command/"$command")
+			# load right here (if there is a complete installation)
+			if bash::is_function rsd::source_lib; then
+    			$(rsd::source_lib command/"$command")
+            fi
 
 			if bash::is_function rsd::command::"$command"::help; then
 				echo -e "\t\t\t$(rsd::command::"$command"::help)"
@@ -190,7 +198,7 @@ function rsd::debug() {
 		level=$1
 	fi
 	if (( RSD_DEBUG >= level )); then
-		echo "$level:$msg"
+		echo "$level: $msg"
 	fi
 }
 
@@ -220,7 +228,7 @@ function rsd::warn() {
 		level=$1
 	fi
 	if (( RSD_DEBUG >= level )); then
-		echo "$level:$msg" >&2
+		echo "$level: $msg" >&2
 	fi
 }
 
@@ -287,87 +295,70 @@ function rsd::check_binaries_or_fail() {
 }
 
 # Parse command line arguments:
-# - First argument is the name of the Associative Array with the configuration.
-# - The second argument is the name of the Associative Array to be used as a return.
-#   it will be created globally.
-# - The rest of the arguments are the command line arguments.
 # Arguments:
 #   $1 - The name of the Associative Array with the configuration
 #   $2 - The name of the Associative Array to be used as a return
 #   $* - The command line arguments
+# Returns:
+#   Associative Array with the parsed arguments
+#   0 - if the arguments are parsed
 function rsd::parse_args() {
-	local config=$1
-	shift
-	local param=$1
-	shift
-	local tempConfig tempParam arg 
-	local count=0
-	
-	eval "unset $param"
-	eval "declare  -gA $param"
+	local config_name=$1
+	local param_name=$2
+	shift 2
 
-	rsd::debug2 8 "rsd::parse_args: Total: $#, Arguments:" $@
+    declare -n config="$config_name"
+    eval "declare -gA $param_name=()"
+
+	local arg
+	local count=0
+
+    if [[ "$RSD_DEBUG" ]]; then
+        rsd::debug2 1 "rsd::parse_args: Total: $#, Arguments:" $@
+    fi
 
 	while [ $# -gt 0 ]; do
 		case "$1" in
-		--*)
-			arg=${1:2}
-			tempConfig=${config[$arg]}
-			tempParam=${param[${arg,,}]}
-			
-			# Note: can't use a variable in variable in an assignment as
-			#       ${!tempParam}=$2
-			#       so, we use eval
+        --*|-*)
+            arg=${1#-}
+            arg=${arg#-}
+            arg=${arg,,}
 
-			if bash::key_exists "$arg" in RSD_ARGS_PARAM; then
-				if [[ "${!tempConfig}" == "0" ]]; then
-					eval "$tempParam=1"
-				else
-					if [[ -z $2 ]]; then
-						rsd::warn "Abort! Missing argumento to $arg."
-						exit 9
-					fi	
-						eval "$tempParam=$2"
-					shift
-				fi
-			else
-				eval "$tempParam=$2"
-				shift
-			fi
-
-		;;
-		-*)
-			arg=${1:1}
-			tempConfig=${config[$arg]}
-			tempParam=${param[${arg,,}]}
-			if bash::key_exists "$arg" in RSD_ARGS_PARAM; then
-				if [[ "${!tempConfig}" == "0" ]]; then
-					eval "$tempParam=1"
-				else
-					if [[ -z $2 ]]; then
-						rsd::warn "Abort! Missing argumento to $arg."
-						exit 9
-					fi
-					eval "$tempParam=$2"
-					shift
-				fi
-			else
-				eval "$tempParam=$2"
-				shift
-			fi
-		;;
+            if bash::key_exists "$arg" in config; then
+                if [[ "${config[$arg]}" -eq 1 ]]; then
+                    if [[ -z $2 ]]; then
+                        echo "Error: Missing argument for option $1." >&2
+                        exit 9
+                    else
+                        eval "$param_name[$arg]=\"$2\""
+                        shift
+                    fi
+                else
+                    eval "$param_name[$arg]=1"
+                fi
+            else
+                $ FIXME: For now
+                # Handling unrecognized options
+                echo "Error: Unrecognized option '$1'." >&2
+                exit 9
+                # Assign a non-existent flag so that COMMANDS can have it own flags
+                # TODO: Maybe just leave them as unprocessed arguments to later on be checked by the command
+#                eval "$tempParam=$2"
+#                shift
+            fi
+            ;;
 		*)
-			if ((count == 1)); then
-				tempParam=${param[subargs]}
-				eval "$tempParam=\$*"
-				shift
-				break
-			fi
-			tempParam=${param[command]}
-			eval "$tempParam=$1"
-
-			((count++))
-		;;
+            if [[ $count -eq 0 ]]; then
+                eval "$param_name[command]=\"$1\""
+            else
+                if [[ -z ${param[subargs]} ]]; then
+                    eval "$param_name[subargs]=\"$1\""
+                else
+                    eval "$param_name[subargs]+=\"$1\""
+                fi
+            fi
+            ((count++))
+            ;;
 		esac
 		shift
 	done
@@ -474,11 +465,10 @@ function rsd::check_libdir_file() {
 # FIXME: as a recursive command calling, this is worked outside a function (for now at least)
 
 # preserves arguments
-RSD_ORIGINAL_ARGS="$0" "${@}"
+RSD_ORIGINAL_ARGS=("$0" "${@}")
 
 rsd::parse_args RSD_ARGS_PARAM RSD_ARGS $*
 
-RSD_DEBUG=0
 # import rsd::debug level
 if   [[ ${RSD_ARGS[debug]} ]]; then
 	RSD_DEBUG=${RSD_ARGS[debug]}

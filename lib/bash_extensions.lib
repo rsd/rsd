@@ -1,6 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-BASH_EXTENSIONS_VERSION='0.2.1'
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call `rsd` to use it."
+    exit 12
+fi
+
+BASH_EXTENSIONS_VERSION='0.2.2'
 
 # functions to help bash as a language
 # prefixed with bash::
@@ -15,20 +21,65 @@ function bash::is_function() {
 	fi
 }
 
-# Test if key exist in array:
-# if ! bash::key_exists key in array; then echo "No such array element"; fi
+function bash::is_array() {
+    local var_name="$1"
+    declare -p "$var_name" &>/dev/null && [[ "$(declare -p "$var_name" 2>/dev/null)" =~ "declare -a" ]]
+}
+
+function bash::is_associative_array() {
+    local var_name="$1"
+    declare -p "$var_name" &>/dev/null && [[ "$(declare -p "$var_name" 2>/dev/null)" =~ "declare -A" ]]
+}
+
+
+
+# Checks if the key exists in an associative array
+# from bash_extensions.lib
+# Usage:
+#  bash::key_exists {key} in {array}
 function bash::key_exists() {
 	if [[ "$2" != "in" ]]; then
-		echo "Abort! Incorrect usage of bash::key_exists."
-		echo "Correct usage: bash::key_exists {key} in {array}"
+		rsd::warn "Abort! Incorrect usage of bash::key_exists."
+		rsd::warn "Correct usage: bash::key_exists {key} in {array}"
 		exit 11
 	fi
 	eval '[ ${'$3'[$1]+muahaha} ]'
 }
 
-# Revert words in a string
+
+
+# Revert words in a string to STDOUT
+# Arguments:
+#   $1: string to revert
+#   bash::reverse "one two three"
+# Usage:
 function bash::reverse() {
 	for (( i = ${#*}; i > 0; i-- )) {
 		echo ${!i}
 	}
+}
+
+# Dump all keys:value of an associative array to STDOUT
+# Arguments:
+#   $1: associative array
+# Usage:
+#   bash::dump_array my_array
+function bash::dump_associative_array() {
+    local array_name=$1
+    declare -n array_ref="$array_name"
+
+    if ! bash::is_associative_array "$array_name"; then
+        printf "Error: '%s' is not an associative array.\n" "$array_name" >&2
+        return 1
+    fi
+
+    if [[ ${#array_ref[@]} -eq 0 ]]; then
+        printf "Array '%s' is empty.\n" "$array_name"
+        return 0
+    fi
+
+    local key
+    for key in "${!array_ref[@]}"; do
+        printf "%s: %s\n" "$key" "${array_ref[$key]}"
+    done
 }

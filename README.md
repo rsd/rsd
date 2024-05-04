@@ -8,16 +8,21 @@ The idea is to be fast to write code, easy to reuse and share between scripts.
 
 ## Instalation
 
-```git clone https://github.com/rsd/rsd.git
+```
+git clone https://github.com/rsd/rsd.git
 ```
 
 ## Usage
 
-```rsd [rsd options] COMMAND [command options] [command arguments]
+```bash
+rsd [rsd options] COMMAND [command options] [command arguments]
+
 rsd [rsd options] --version
 rsd [rsd options] --check-version
 rsd [rsd options] --install PATH
 ```
+
+Note that any --option passed after the command will be passed to the command itself.
 
 ### RSD Options
 
@@ -37,8 +42,8 @@ rsd [rsd options] --install PATH
 		Do not switch to a local rsd copy on the same directory.
 	--completion
 		Support for bash completion.
-	In completion mode, no command or action is actually executed.
-	No command file should exec in global space.
+	    In completion mode, no command or action is actually executed.
+	    No command file should exec in global space.
 
 ## Contributing
 
