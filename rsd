@@ -67,7 +67,7 @@
 #       main idea is to have a clean environment for the commands to be loaded. So it is
 #       for external libraries to blindly check it.
 
-RSD_VERSION='1.9.2'
+RSD_VERSION='1.9.3'
 VERSION=$RSD_VERSION
 RSD_ON=1
 
@@ -603,7 +603,7 @@ if [[ ${RSD_ARGS[install]} ]]; then
         case "$RSD_ARGS[install]" in
         /usr/local|/usr/local/*)
             # Assuming that for /usr/local the user has write permission, we are in sudo
-            PREFIX = "/usr/local"
+            PREFIX="/usr/local"
             rsd::warn "Installing in $PREFIX"
             mkdir -p $PREFIX/share/rsd
             mkdir -p $PREFIX/etc/rsd
@@ -617,8 +617,8 @@ if [[ ${RSD_ARGS[install]} ]]; then
             cp "$TEMP_DIR/config/rsd.conf" $PREFIX/etc/rsd
             ;;
         $HOME|$HOME/*)
-            PREFIX = "$HOME/.local"
-            rsd::warn "Installing in $HOME"
+            PREFIX="$HOME/.local"
+            rsd::warn "Installing in $PREFIX"
             mkdir -p $PREFIX/rsd
             mkdir -p $PREFIX/bin
             mkdir -p $HOME/.config/rsd
