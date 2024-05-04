@@ -627,9 +627,9 @@ if [[ ${RSD_ARGS[install]} ]]; then
         *)
             rsd::warn "Installalling in custom directory: $RSD_ARGS[install]."
             cp -r "$TEMP_DIR" "$RSD_ARGS[install]"
-            chmod a+x "$RSD_ARGS[install]/rsd/rsd"
+            chmod +x "$RSD_ARGS[install]/rsd/rsd"
             ;;
-
+        esac
         exit 0
     fi
 fi
