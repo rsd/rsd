@@ -67,13 +67,19 @@
 #       main idea is to have a clean environment for the commands to be loaded. So it is
 #       for external libraries to blindly check it.
 
-RSD_VERSION='1.9.7'
+shopt -s extglob
+
+RSD_VERSION='1.9.8'
 VERSION=$RSD_VERSION
+
 RSD_ON=1
 
 # Initial Debug level.  It will be replaced by command line arguments later on.
 # Set to 1 to debug stages before command line argument has a chance to kick in
 RSD_DEBUG=0
+
+# Note: RSD will load the command file and call the command function as needed.
+#       Hoever the script needs to be self independent to download, install or upgrade itself as neeeded.
 
 # RSD_MODE: The mode of the instalation of the RSD.
 #           unknown: not sure yet
@@ -84,29 +90,25 @@ RSD_DEBUG=0
 #           devel: running from the developement tree
 #           not-installed: not installed yet
 RSD_MODE="unknown"
-
-# Note: RSD will load the command file and call the command function as needed.
-#       Hoever the script needs to be self independent to download, install or upgrade itself as neeeded.
-
 # The latest version of this file in the repository url
 RSD_GITHUB_REPO="https://github.com/rsd/rsd.git"
 RSD_GITHUB_REPO_BRANCH="2024"
+
 #RSD_LATEST_RSD_REPO="https://raw.githubusercontent.com/rsd/rsd/master/rsd"
 RSD_LATEST_RSD_REPO="https://raw.githubusercontent.com/rsd/rsd/2024/rsd"
 
 # if a function returns error, this is the reason
 # TODO: write a better API to handle errors
 RSD_ERROR_MSG=""
-
 # base path to libraries
 RSD_LIBDIR=()
 RSD_LIBDIR_temp=()
-declare -A RSD_LIB_CACHE
 
+declare -A RSD_LIB_CACHE
 RSD=$(basename "$0")
 RSD_RUN_DIR=$(readlink -f "$(dirname "$0")")
-RSD_LOCAL_DIR=$(pwd)
 
+RSD_LOCAL_DIR=$(pwd)
 # Commands and action being called
 RSD_COMMAND=
 RSD_ACTION=
@@ -116,8 +118,6 @@ if [[ "${BASH_VERSINFO[0]}" -lt 4 ]] || [[ "${BASH_VERSINFO[0]}" -eq 4 && "${BAS
 	echo "Abort! BASH >= 4.3 required.  Got $BASH_VESION" >&2
 	exit 1
 fi
-
-shopt -s extglob
 
 # paramenters arguments
 # 0 => No argument
@@ -143,6 +143,9 @@ declare -A RSD_ARGS_PARAM=(
     ["h"]=0
     ["check-mode"]=0
 )
+
+# Seatch paths
+declare -a RSD_LIBRARY_SEARCH_PATH
 
 # Checks if a version is greater than another
 # Arguments:
@@ -494,6 +497,107 @@ function rsd::find_mode() {
     fi
 }
 
+# Installs the RSD in the provided path or mode
+# Arguments:
+#   $1 - The path or mode to install
+function rsd::install() {
+    local install=$1
+	rsd::check_binaries_or_fail mktemp git mkdir cp chmod
+
+    if [[ $install == "local" || $install =~ ^/usr/local ]]; then
+        install="/usr/local"
+    elif [[ $install == "user" ]]; then
+        install="$HOME"
+    elif [[ $install == "distro" || $install =~ ^/usr/ ]]; then
+        rsd::warn "Instaltion in system directories is not supported.  Should be properly packed."
+        exit 16
+    else
+        mkdir -p "$install"
+        if [[ $? -ne 0 ]]; then
+            rsd::warn "Failed to create installation directory."
+            exit 13
+        fi
+    fi
+
+    if [[ ! -v RSD_INSTALLATION_STEP ]]; then
+
+        # Step 1: Create a secure temporary directory
+        TEMP_DIR=$(mktemp -d)
+        if [[ ! "$TEMP_DIR" ]]; then
+            rsd::warn "Failed to create temp directory."
+            exit 14
+        fi
+        rsd::warn "Created temporary directory $TEMP_DIR."
+
+        # Step 2: Clone the repository into the temporary directory
+        rsd::warn "Downloading into $TEMP_DIR."
+        git clone --quiet -b "$RSD_GITHUB_REPO_BRANCH" --depth 1 "$RSD_GITHUB_REPO" "$TEMP_DIR"
+        if [[ $? -ne 0 ]]; then
+            rsd::warn "Failed to clone repository."
+            rm -rf "$TEMP_DIR"
+            exit 15
+        fi
+
+        # Step 3: Check permission and sudo if needed
+        if [[ ! -w "$install" ]]; then
+            rsd::warn "Insufficient permissions to install to $install."
+            if [ $EUID != 0 ]; then
+                rsd::warn "Trying ro re-run with sudo."
+                RSD_INSTALLATION_STEP=2 exec sudo bash "$TEMP_DIR/rsd" "$@"
+            else
+                rsd::warn "Even as root, write permission is not available. Check permissions and ownership."
+                exit 13
+            fi
+        else
+            RSD_INSTALLATION_STEP=2
+        fi
+    fi
+
+    if [[ -v RSD_INSTALLATION_STEP && $RSD_INSTALLATION_STEP -eq 2 ]]; then
+        # Installation is different for each mode
+        case "$install" in
+        /usr/local|/usr/local/*)
+            # Assuming that for /usr/local the user has write permission, we are in sudo
+            PREFIX="/usr/local"
+            rsd::warn "Installing in $PREFIX"
+            mkdir -p $PREFIX/share/rsd
+            mkdir -p $PREFIX/etc/rsd
+            cp "$TEMP_DIR/rsd" $PREFIX/bin/
+            chmod +x $PREFIX/bin/rsd
+            cp -r "$TEMP_DIR/lib" $PREFIX/share/rsd
+            cp -r "$TEMP_DIR/command" $PREFIX/share/rsd
+            cp -r "$TEMP_DIR/data" $PREFIX/share/rsd
+            cp "$TEMP_DIR/LICENSE" $PREFIX/share/rsd
+            cp "$TEMP_DIR/README.md" $PREFIX/share/rsd
+            cp "$TEMP_DIR/config/rsd.conf" $PREFIX/etc/rsd
+            ;;
+        $HOME|$HOME/*)
+            PREFIX="$HOME/.local"
+            rsd::warn "Installing in $PREFIX"
+            mkdir -p $PREFIX/share/rsd
+            mkdir -p $PREFIX/bin
+            mkdir -p $HOME/.config/rsd
+            cp "$TEMP_DIR/rsd" $PREFIX/bin/
+            chmod +x $PREFIX/bin/rsd
+            cp -r "$TEMP_DIR/lib" $PREFIX/share/rsd
+            cp -r "$TEMP_DIR/command" $PREFIX/share/rsd
+            cp -r "$TEMP_DIR/data" $PREFIX/share/rsd
+            cp "$TEMP_DIR/LICENSE" $PREFIX/share/rsd
+            cp "$TEMP_DIR/README.md" $PREFIX/share/rsd
+            cp "$TEMP_DIR/config/rsd.conf" $HOME/.config/rsd
+            ;;
+        *)
+            echo Skipping for now $HOME vs $install.
+            exit 0
+            rsd::warn "Installalling in custom directory: $install."
+            cp -r "$TEMP_DIR/"* "$install"
+            chmod +x "$install/rsd"
+            ;;
+        esac
+        exit 0
+    fi
+}
+
 # __main__
 # FIXME: as a recursive command calling, this is worked outside a function (for now at least)
 
@@ -547,100 +651,7 @@ fi
 # downloads and install
 # check version
 if [[ ${RSD_ARGS[install]} ]]; then
-	rsd::check_binaries_or_fail mktemp git mkdir cp chmod
-
-    if [[ ${RSD_ARGS[install]} == "local" || ${RSD_ARGS[install]} =~ ^/usr/local ]]; then
-        RSD_ARGS[install]="/usr/local"
-    elif [[ ${RSD_ARGS[install]} == "user" ]]; then
-        RSD_ARGS[install]="$HOME"
-    elif [[ ${RSD_ARGS[install]} == "distro" || ${RSD_ARGS[install]} =~ ^/usr/ ]]; then
-        rsd::warn "Instaltion in system directories is not supported.  Should be properly packed."
-        exit 16
-    else
-        mkdir -p "${RSD_ARGS[install]}"
-        if [[ $? -ne 0 ]]; then
-            rsd::warn "Failed to create installation directory."
-            exit 13
-        fi
-    fi
-
-    if [[ ! -v RSD_INSTALLATION_STEP ]]; then
-
-        # Step 1: Create a secure temporary directory
-        TEMP_DIR=$(mktemp -d)
-        if [[ ! "$TEMP_DIR" ]]; then
-            rsd::warn "Failed to create temp directory."
-            exit 14
-        fi
-        rsd::warn "Created temporary directory $TEMP_DIR."
-
-        # Step 2: Clone the repository into the temporary directory
-        rsd::warn "Downloading into $TEMP_DIR."
-        git clone --quiet -b "$RSD_GITHUB_REPO_BRANCH" --depth 1 "$RSD_GITHUB_REPO" "$TEMP_DIR"
-        if [[ $? -ne 0 ]]; then
-            rsd::warn "Failed to clone repository."
-            rm -rf "$TEMP_DIR"
-            exit 15
-        fi
-
-        # Step 3: Check permission and sudo if needed
-        if [[ ! -w "${RSD_ARGS[install]}" ]]; then
-            rsd::warn "Insufficient permissions to install to ${RSD_ARGS[install]}."
-            if [ $EUID != 0 ]; then
-                rsd::warn "Trying ro re-run with sudo."
-                RSD_INSTALLATION_STEP=2 exec sudo bash "$TEMP_DIR/rsd" "$@"
-            else
-                rsd::warn "Even as root, write permission is not available. Check permissions and ownership."
-                exit 13
-            fi
-        else
-            RSD_INSTALLATION_STEP=2
-        fi
-    fi
-
-    if [[ -v RSD_INSTALLATION_STEP && $RSD_INSTALLATION_STEP -eq 2 ]]; then
-        # Installation is different for each mode
-        case "${RSD_ARGS[install]}" in
-        /usr/local|/usr/local/*)
-            # Assuming that for /usr/local the user has write permission, we are in sudo
-            PREFIX="/usr/local"
-            rsd::warn "Installing in $PREFIX"
-            mkdir -p $PREFIX/share/rsd
-            mkdir -p $PREFIX/etc/rsd
-            cp "$TEMP_DIR/rsd" $PREFIX/bin/
-            chmod +x $PREFIX/bin/rsd
-            cp -r "$TEMP_DIR/lib" $PREFIX/share/rsd
-            cp -r "$TEMP_DIR/command" $PREFIX/share/rsd
-            cp -r "$TEMP_DIR/data" $PREFIX/share/rsd
-            cp "$TEMP_DIR/LICENSE" $PREFIX/share/rsd
-            cp "$TEMP_DIR/README.md" $PREFIX/share/rsd
-            cp "$TEMP_DIR/config/rsd.conf" $PREFIX/etc/rsd
-            ;;
-        $HOME|$HOME/*)
-            PREFIX="$HOME/.local"
-            rsd::warn "Installing in $PREFIX"
-            mkdir -p $PREFIX/share/rsd
-            mkdir -p $PREFIX/bin
-            mkdir -p $HOME/.config/rsd
-            cp "$TEMP_DIR/rsd" $PREFIX/bin/
-            chmod +x $PREFIX/bin/rsd
-            cp -r "$TEMP_DIR/lib" $PREFIX/share/rsd
-            cp -r "$TEMP_DIR/command" $PREFIX/share/rsd
-            cp -r "$TEMP_DIR/data" $PREFIX/share/rsd
-            cp "$TEMP_DIR/LICENSE" $PREFIX/share/rsd
-            cp "$TEMP_DIR/README.md" $PREFIX/share/rsd
-            cp "$TEMP_DIR/config/rsd.conf" $HOME/.config/rsd
-            ;;
-        *)
-            echo Skipping for now $HOME vs ${RSD_ARGS[install]}.
-            exit 0
-            rsd::warn "Installalling in custom directory: ${RSD_ARGS[install]}."
-            cp -r "$TEMP_DIR/"* "${RSD_ARGS[install]}"
-            chmod +x "${RSD_ARGS[install]}/rsd"
-            ;;
-        esac
-        exit 0
-    fi
+    rsd::install ${RSD_ARGS[install]}
 fi
 
 # Expands libdir search paths
@@ -654,6 +665,41 @@ for key in "${keys[@]}"; do
         RSD_LIBDIR=("${RSD_LIBDIR[@]}" "${RSD_LIBDIR_temp[@]}")
     fi
 done
+
+# Commnd line arguments have precedence over the configuration file
+RSD_LIBRARY_SEARCH_PATH+=("${RSD_LIBDIR[@]}")
+
+# FIXME:  Here should come the ones from the config files
+
+# Dev comes first
+if [[ $RSD_MODE == "devel" ]]; then
+    RSD_LIBRARY_SEARCH_PATH+=("$RSD_RUN_DIR")
+fi
+
+# user stuff should have precedence over system stuff
+RSD_LIBRARY_SEARCH_PATH+=("$HOME/.local/share/rsd")
+
+# What is system now depends on the mode we are operating
+if [[ $RSD_MODE == "local" ]]; then
+    RSD_LIBRARY_SEARCH_PATH+=("/usr/local/share/rsd")
+elif [[ $RSD_MODE == "opt" ]]; then
+    #FIXME:  No opt installation yet
+    RSD_LIBRARY_SEARCH_PATH+=("/opt/rsd")
+elif [[ $RSD_MODE == "distro" ]]; then
+    RSD_LIBRARY_SEARCH_PATH+=("/usr/share/rsd")
+fi
+
+# Where RSD is
+RSD_LIBRARY_SEARCH_PATH+=("$RSD_RUN_DIR")
+# Add the current working directory
+RSD_LIBRARY_SEARCH_PATH+=("$(pwd)")
+
+# Add the directories containing all sourced scripts or parent scripts
+RSD_LIBRARY_SEARCH_PATH+=("$(dirname "${BASH_SOURCE[@]}")")
+
+# Print all paths in the array for debugging
+printf "Library Search Paths for $RSD_MODE:\n%s\n" "${RSD_LIBRARY_SEARCH_PATH[@]}"
+exit 0
 
 # Now that all lib paths are expanded, we can set the search path for libraries
 RSD_LIBRARY_SEARCH_PATH="${RSD_LIBDIR[*]} $(pwd) $(dirname "$(readlink -f "$0")") $(dirname "${BASH_SOURCE[*]}")"
