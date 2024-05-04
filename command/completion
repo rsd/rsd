@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 # Companion utility for bash_completion script
 # or any completion
 

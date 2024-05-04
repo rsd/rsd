@@ -5,7 +5,6 @@ RSD_COMMAND_TEST_VERSION='0.2.1'
 declare -A RSD_COMMAND_TEST_ARGS_PARAM=( ["teste"]=0 ["test"]=1 ["full"]=1 )
 
 
-
 function rsd::command::test::test2() {
 	echo "Inside Test comannd function."
 	echo "Still have these arguments to process:" $@

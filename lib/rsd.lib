@@ -530,14 +530,14 @@ function rsd::check_libdir_file() {
 
 # Checks for a library in the search path
 # Returns the string to source it
-# Or a warning to STDERR (depending of the DEBUG level)
+# Or a warning to STDERR (depending on the DEBUG level)
 # An optional argument to the message level can be issued.
 function rsd::source_lib() {
 	local file=$1
 	local level=${2:-0}
 
 	if rsd::check_libdir_file "$file"; then
-		echo source $(rsd::get_libdir_file "$file")
+		echo source "$(rsd::get_libdir_file "$file")"
 	else
 		echo rsd::warn2 $level "Cannot load library $file!"
 		return 1

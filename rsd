@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # rsd [rsd options] COMMAND [command options]
 # rsd [rsd options] --version
@@ -10,7 +10,7 @@
 #
 #   for commands, actually, are bash functions.
 #   the idea is the group classes of commands (or tasks) into modules
-#   and let rsd call it to have a unty experience
+#   and let rsd call it to have an organized command line
 #
 # rsd options:
 #   --usage | --help | -h
@@ -46,20 +46,21 @@
 #   10 - Command failure (unknown reason)
 #   11 - Internal Failure
 
-RSD_VERSION='0.2.5'
+# Note: By default all name space used starts with a rsd:: prefix for functions or
+#       RSD_ for variables.  This is to avoid conflicts with other libraries.
+#       There will be some basic settings like DEBUG, VERSION, etc.  However, the
+#       main idea is to have a clean environment for the commands to be loaded. So it is
+#       for external libraries to blindly check it.
+
+RSD_VERSION='1.9.0'
 VERSION=$RSD_VERSION
 
-RSD_DEBUG=0
-DEBUG=$RSD_DEBUG
+# Note: RSD will load the command file and call the command function as needed.
+#       Hoever the script needs to be self independent to download, install or upgrade itself as neeeded.
 
 # The latest version of this file in the repository url
 RSD_GITHUB_REPO="https://github.com/rsd/rsd.git"
 RSD_LATEST_RSD_REPO="https://raw.githubusercontent.com/rsd/rsd/master/rsd"
-
-# preserves arguments
-RSD_ORIGINAL_ARGS="$0 $@"
-
-RSD_LIBRARY_SEARCH_PATH="${RSD_LIBDIR[@]} $(pwd) $(dirname $(readlink -f $0)) $(dirname ${BASH_SOURCE[@]})"
 
 # if a function returns error, this is the reason
 # TODO: write a better API to handle errors
@@ -70,13 +71,15 @@ RSD_LIBDIR=()
 RSD_LIBDIR_temp=()
 declare -A RSD_LIB_CACHE
 
-RSD=$(basename $0)
-RSD_RUN_DIR=$(readlink -f $(dirname $0))
+RSD=$(basename "$0")
+RSD_RUN_DIR=$(readlink -f "$(dirname "$0")")
 RSD_LOCAL_DIR=$(pwd)
 
+# Commands and action being called
 RSD_COMMAND=
 RSD_ACTION=
 
+# bash 4 required
 if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
 	echo "Abort! BASH >= 4 required.  Got $BASH_VESION" >&2
 	exit 1
@@ -88,17 +91,38 @@ shopt -s extglob
 # 0 => No argument
 # 1 => One argument
 # unknown defaults to 1
-declare -A RSD_ARGS_PARAM=( ["debug"]=1 ["d"]=1 ["version"]=0 ["check-version"]=0 \
-			["lib-dir"]=1 ["l"]=1 ["install"]=1 ["no-local"]=0 \
-			["nl"]=0 ["usage"]=0 ["help"]=0 ["h"]=0 \
-			["rsdlib"]=0 ["completion"]=0 \
-			["usage"]=0 ["help"]=0 ["h"]=0 \
-			)
+declare -A RSD_ARGS_PARAM=(
+    ["debug"]=1
+    ["d"]=1
+    ["version"]=0
+    ["check-version"]=0
+    ["lib-dir"]=1
+    ["l"]=1
+    ["install"]=1
+    ["no-local"]=0
+    ["nl"]=0
+    ["usage"]=0
+    ["help"]=0
+    ["h"]=0
+    ["rsdlib"]=0
+    ["completion"]=0
+    ["usage"]=0
+    ["help"]=0
+    ["h"]=0
+)
 
+# Checks if a version is greater than another
+# Arguments:
+#   $1 - The version to compare
+#   $2 - The version to compare to
+# Returns:
+#   0 - if the first version is greater than the second
+#   1 - if the first version is less than the second
 function rsd::version_gt() {
 	test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1";
 }
 
+# Display the usage of the command
 function rsd::usage() {
 	local command
 
@@ -133,10 +157,12 @@ function rsd::usage() {
 		echo -e "\tCommands:"
 		for command in $(rsd::list_all_commands); do
 			echo -e "\t\t$command"
-			#load right here
-			$(rsd::source_lib command/$command)
-			if bash::is_function rsd::command::$command::help; then
-				echo -e "\t\t\t$(rsd::command::$command::help)"
+
+			# load right here
+			$(rsd::source_lib command/"$command")
+
+			if bash::is_function rsd::command::"$command"::help; then
+				echo -e "\t\t\t$(rsd::command::"$command"::help)"
 			fi
 		done
 		fi
@@ -144,14 +170,17 @@ function rsd::usage() {
 		if bash::is_function rsd::list_all_actions; then
 		echo -e "\t$RSD [RSD OPTIONS] $RSD_COMMAND <action> [COMMAND OPTIONS]"
 		echo -e "\tActions for $RSD_COMMAND:"
-		rsd::list_all_actions $RSD_COMMAND
+		rsd::list_all_actions "$RSD_COMMAND"
 		else
 		echo -e "\t$RSD [RSD OPTIONS] <command> "
 		fi
 	fi
-	exit 2
 }
 
+# Debug to STDOUT
+# Arguments:
+#   $1 - The message to be displayed
+#   $2 - The debug level (default 1)
 function rsd::debug() {
 	local msg=$1
 	shift
@@ -160,22 +189,28 @@ function rsd::debug() {
 	if (($#>0));then
 		level=$1
 	fi
-	if (( $RSD_DEBUG >= $level )); then
+	if (( RSD_DEBUG >= level )); then
 		echo "$level:$msg"
 	fi
 }
 
-#same as rsd::debug, but the level comes first, for convenience
+# Same as rsd::debug, but the level comes first, for convenience
+# Arguments:
+#   $1 - The debug level
+#   $* - The message(s) to be displayed
 function rsd::debug2() {
 	local level=$1
 	shift
 
-	if (( $RSD_DEBUG >= $level )); then
-		echo "$level:" $@
+	if (( RSD_DEBUG >= level )); then
+		echo "$level:" "$@"
 	fi
 }
 
-# same as rsd::debug, but to STDERR
+# outputs a warning message to the STDERR
+# Arguments:
+#   $1 - The message to be displayed
+#   $2 - The debug level (default 1)
 function rsd::warn() {
 	local msg=$1
 	shift
@@ -184,22 +219,27 @@ function rsd::warn() {
 	if (($#>0));then
 		level=$1
 	fi
-	if (( $RSD_DEBUG >= $level )); then
+	if (( RSD_DEBUG >= level )); then
 		echo "$level:$msg" >&2
 	fi
 }
 
-# same as rsd::debug2, but to STDERR
+# Same as rsd::warn, but the level comes first, for convenience
+# Arguments:
+#   $1 - The debug level
+#   $* - The message(s) to be displayed
 function rsd::warn2() {
 	local level=$1
 	shift
 
-	if (( $RSD_DEBUG >= $level )); then
-		echo "$level:" $@ >&2
+	if (( RSD_DEBUG >= level )); then
+		echo "$level:" "$@" >&2
 	fi
 }
 
-#Finds a file in the path
+# Finds a bin file in the path
+# Arguments:
+#   $1 - The file to be found
 function rsd::check_binary() {
 	local file=$1
 	local path
@@ -215,31 +255,46 @@ function rsd::check_binary() {
 	return 1
 }
 
+# Checks a list of binaries files in the path
+# Arguments:
+#   $* - The list of files to be found
+# Returns:
+#   0 - if all files are found
+#   1 - if any file is not found
 function rsd::check_binaries() {
 	local file
 	local path
 	local IFS=":"
 
-	for file in $*;  do
-		if ! rsd::check_binary $file; then
+	for file in "$@";  do
+		if ! rsd::check_binary "$file"; then
 		return 1
 		fi
 	done
 	return 0
 }
 
+# Checks a list of binaries files in the path or aborts
+# Usefull if there is no point into continue in the absence of a binary
+# Arguments:
+#   $* - The list of files to be found
 function rsd::check_binaries_or_fail() {
-	if ! rsd::check_binaries $@; then
-		rsd::warn $RSD_ERROR_MSG
+	if ! rsd::check_binaries "$@"; then
+		rsd::warn "$RSD_ERROR_MSG"
 		exit 3
 	fi
 	return 0
 }
 
-# Parse command line arguments
-# - First argument is the name of the Associative Array with the configuration
-# - The second argument is the name of the Associative Array to be used as a return
-#   it will be created globally
+# Parse command line arguments:
+# - First argument is the name of the Associative Array with the configuration.
+# - The second argument is the name of the Associative Array to be used as a return.
+#   it will be created globally.
+# - The rest of the arguments are the command line arguments.
+# Arguments:
+#   $1 - The name of the Associative Array with the configuration
+#   $2 - The name of the Associative Array to be used as a return
+#   $* - The command line arguments
 function rsd::parse_args() {
 	local config=$1
 	shift
@@ -257,14 +312,14 @@ function rsd::parse_args() {
 		case "$1" in
 		--*)
 			arg=${1:2}
-			tempConfig=$config[$arg]
-			tempParam=$param[${arg,,}]
+			tempConfig=${config[$arg]}
+			tempParam=${param[${arg,,}]}
 			
-			# Note: can't use a variable variable in assignment as 
+			# Note: can't use a variable in variable in an assignment as
 			#       ${!tempParam}=$2
-			#       so we use eval
+			#       so, we use eval
 
-			if bash::key_exists $arg in RSD_ARGS_PARAM; then
+			if bash::key_exists "$arg" in RSD_ARGS_PARAM; then
 				if [[ "${!tempConfig}" == "0" ]]; then
 					eval "$tempParam=1"
 				else
@@ -283,9 +338,9 @@ function rsd::parse_args() {
 		;;
 		-*)
 			arg=${1:1}
-			tempConfig=$config[$arg]
-			tempParam=$param[${arg,,}]
-			if bash::key_exists $arg in RSD_ARGS_PARAM; then
+			tempConfig=${config[$arg]}
+			tempParam=${param[${arg,,}]}
+			if bash::key_exists "$arg" in RSD_ARGS_PARAM; then
 				if [[ "${!tempConfig}" == "0" ]]; then
 					eval "$tempParam=1"
 				else
@@ -303,12 +358,12 @@ function rsd::parse_args() {
 		;;
 		*)
 			if ((count == 1)); then
-				tempParam=$param[subargs]
+				tempParam=${param[subargs]}
 				eval "$tempParam=\$*"
 				shift
 				break
 			fi
-			tempParam=$param[command]
+			tempParam=${param[command]}
 			eval "$tempParam=$1"
 
 			((count++))
@@ -319,7 +374,10 @@ function rsd::parse_args() {
 	return 0
 }
 
+# Checks if the key exists in an associative array
 # from bash_extensions.lib
+# Usage:
+#  bash::key_exists {key} in {array}
 function bash::key_exists() {
 	if [[ "$2" != "in" ]]; then
 		rsd::warn "Abort! Incorrect usage of bash::key_exists."
@@ -330,6 +388,11 @@ function bash::key_exists() {
 }
 
 # check the latest version in the repository
+# Requires:
+#  wget, grep, head
+# Returns:
+#  0 - if the local version is the same or newer
+#  1 - if the local version is older
 function rsd::check_repository_version() {
 	local repo_version
 	rsd::check_binaries_or_fail wget grep head
@@ -337,10 +400,10 @@ function rsd::check_repository_version() {
 	repo_version=$(wget -q -O - $RSD_LATEST_RSD_REPO | grep ^RSD_VERSION= \
 			| head -n 1 | sed -e "s/.*=['\"]\(.*\)['\"]/\1/")
 
-	if rsd::version_gt $repo_version $RSD_VERSION; then
+	if rsd::version_gt "$repo_version" "$RSD_VERSION"; then
 		RSD_ERROR_MSG="There is a newer version in the repository: $repo_version.  Our version: $RSD_VERSION."
 		return 1
-	elif [[ $repo_version == $RSD_VERSION ]]; then
+	elif [[ $repo_version == "$RSD_VERSION" ]]; then
 		RSD_ERROR_MSG="You are using the latest version: $RSD_VERSION."
 	else
 		RSD_ERROR_MSG="Your version: $RSD_VERSION is newer that the one in the repository: $repo_version."
@@ -359,6 +422,14 @@ function rsd::check_repository_version() {
 # - bash source base,
 # - in user's home (TODO) and
 # - system wide install (TODO)
+# Requires:
+#  pwd
+# Arguments:
+#   $1 - The file to be found
+#   $2 - If 1, print the file found
+# Returns:
+#  0 - if the file is found
+#  1 - if the file is not found
 function rsd::get_libdir_file() {
 	rsd::check_binaries_or_fail pwd
 	local file=$1
@@ -370,7 +441,7 @@ function rsd::get_libdir_file() {
 	if [[ -v RSD_LIB_CACHE[@] ]]; then
 		if [[ -n "${RSD_LIB_CACHE[$file]}" ]]; then
 			if ((print)); then
-				echo ${RSD_LIB_CACHE[$file]}
+				echo "${RSD_LIB_CACHE[$file]}"
 			fi
 			return 0
 		fi
@@ -388,24 +459,34 @@ function rsd::get_libdir_file() {
 	return 1
 }
 
-#just check if a file exists in LIBDIR
+# just check if a file exists in LIBDIR
+# Arguments:
+#   $1 - The file to be found
+# Returns:
+#  0 - if the file is found
+#  1 - if the file is not found
 function rsd::check_libdir_file() {
-	rsd::get_libdir_file $1 0
+	rsd::get_libdir_file "$1" 0
 	return $?
 }
 
 # __main__
 # FIXME: as a recursive command calling, this is worked outside a function (for now at least)
 
-RSD_ORIGINAL_ARGS="$0 $@"
+# preserves arguments
+RSD_ORIGINAL_ARGS="$0" "${@}"
+
 rsd::parse_args RSD_ARGS_PARAM RSD_ARGS $*
 
+RSD_DEBUG=0
 # import rsd::debug level
 if   [[ ${RSD_ARGS[debug]} ]]; then
 	RSD_DEBUG=${RSD_ARGS[debug]}
 elif [[ ${RSD_ARGS[d]} ]]    ; then
 	RSD_DEBUG=${RSD_ARGS[d]}
 fi
+DEBUG=$RSD_DEBUG
+
 rsd::debug "Debug set to $RSD_DEBUG" 2
 rsd::debug2 9 "Arguments parsed (values): keys -> (${RSD_ARGS[@]}): " ${!RSD_ARGS[@]}
 rsd::debug "Original call was $RSD_ORIGINAL_ARGS" 7
@@ -418,7 +499,7 @@ if ! [[ ${RSD_ARGS[no-local]} || ${RSD_ARGS[nl]} ]]; then
 		if [[ -x  "$RSD_LOCAL_RSD" ]]; then
 		#get version
 		RSD_LOCAL_VERSION=$( $RSD_LOCAL_RSD --version)
-		if rsd::version_gt $RSD_LOCAL_VERSION $VERSION; then
+		if rsd::version_gt "$RSD_LOCAL_VERSION" $VERSION; then
 			if [[ -z ${RSD_ARGS[completion]} ]]; then
 			rsd::warn "Switching to local version (-nl to avoid)."
 			fi
@@ -434,26 +515,25 @@ fi
 if [[ ${RSD_ARGS[install]} ]]; then
 	rsd::check_binaries_or_fail git
 	echo "Installing latest rsd from repository."
-	git clone --depth 1 $RSD_GITHUB_REPO ${RSD_ARGS[install]}
+	git clone --depth 1 $RSD_GITHUB_REPO "${RSD_ARGS[install]}"
 	exit $?
 fi
 
 # Expands libdir search paths
-if bash::key_exists lib-dir in RSD_ARGS; then
-	IFS=',' read -r -a RSD_LIBDIR <<< "${RSD_ARGS["lib-dir"]}"
-fi
-if bash::key_exists l in RSD_ARGS; then
-	IFS=',' read -r -a RSD_LIBDIR_temp <<< "${RSD_ARGS["l"]}"
-	RSD_LIBDIR=("${RSD_LIBDIR[@]}" "${RSD_LIBDIR_temp[@]}")
-fi
-if bash::key_exists libdir in RSD_ARGS; then
-	IFS=',' read -r -a RSD_LIBDIR_temp <<< "${RSD_ARGS["libdir"]}"
-	RSD_LIBDIR=("${RSD_LIBDIR[@]}" "${RSD_LIBDIR_temp[@]}")
-fi
-if bash::key_exists lib in RSD_ARGS; then
-	IFS=',' read -r -a RSD_LIBDIR_temp <<< "${RSD_ARGS["lib"]}"
-	RSD_LIBDIR=("${RSD_LIBDIR[@]}" "${RSD_LIBDIR_temp[@]}")
-fi
+
+# Define the keys to check
+keys=("lib-dir" "l" "libdir" "lib")
+
+# Iterate over the keys
+for key in "${keys[@]}"; do
+    if bash::key_exists "$key" in RSD_ARGS; then
+        IFS=',' read -r -a RSD_LIBDIR_temp <<< "${RSD_ARGS[$key]}"
+        RSD_LIBDIR=("${RSD_LIBDIR[@]}" "${RSD_LIBDIR_temp[@]}")
+    fi
+done
+
+# Now that all lib paths are expanded, we can set the search path for libraries
+RSD_LIBRARY_SEARCH_PATH="${RSD_LIBDIR[*]} $(pwd) $(dirname "$(readlink -f "$0")") $(dirname "${BASH_SOURCE[*]}")"
 
 if ! rsd::check_libdir_file lib/rsd.lib; then
 	rsd::warn "Abort! Could not find libdir.  Maybe it need to be installed --install (TODO)."
@@ -462,7 +542,7 @@ fi
 
 # library to be loaded from outside (e.g. completion)
 if [[ -n "${RSD_ARGS[rsdlib]}" ]]; then
-	echo $(rsd::get_libdir_file lib/rsd.lib)
+	echo "$(rsd::get_libdir_file lib/rsd.lib)"
 	exit 0
 fi
 
@@ -475,10 +555,10 @@ fi
 # check version
 if [[ ${RSD_ARGS[check-version]} ]]; then
 	if ! rsd::check_repository_version; then
-		rsd::warn $RSD_ERROR_MSG
+		rsd::warn "$RSD_ERROR_MSG"
 		exit 4
 	else
-		rsd::warn $RSD_ERROR_MSG
+		rsd::warn "$RSD_ERROR_MSG"
 		exit 0
 	fi
 fi
@@ -486,10 +566,10 @@ fi
 # load our main library
 # after this point there is a need to the full installation
 #Now load our defaults
-source $(rsd::get_libdir_file lib/rsd.lib)
+source "$(rsd::get_libdir_file lib/rsd.lib)"
 
 if rsd::check_libdir_file lib/bash_extensions.lib; then
-	source $(rsd::get_libdir_file lib/bash_extensions.lib)
+	source "$(rsd::get_libdir_file lib/bash_extensions.lib)"
 else
 	rsd::warn "Abort! Missing bash extensions library."
 	exit 5
@@ -500,6 +580,7 @@ fi
 if [[ -z "${RSD_ARGS[command]}" ]]; then
 	if ! [[ ${RSD_ARGS[completion]} ]]; then
 		rsd::usage
+		exit 2
 	fi
 fi
 
@@ -507,16 +588,17 @@ if [[ "${RSD_ARGS[command]}" ]]; then
 	RSD_COMMAND=${RSD_ARGS[command]}
 
 	# import the calling command script
-	if ! _rsd_source=$(rsd::load_command_file $RSD_COMMAND); then
+	if ! _rsd_source=$(rsd::load_command_file "$RSD_COMMAND"); then
 		rsd::warn "Command $RSD_COMMAND not found" 0
 		RSD_COMMAND=
 		rsd::usage
+		exit 2
 	fi
 
 	# sourcing the command, any argument left is passed to
-	eval $_rsd_source ${RSD_ARGS[subargs]}
+	eval "$_rsd_source" "${RSD_ARGS[subargs]}"
 
-	rsd::command $RSD_COMMAND
+	rsd::command "$RSD_COMMAND"
 
 	exit 0
 fi
@@ -525,6 +607,7 @@ fi
 # help and usage
 if [[ ${RSD_ARGS[usage]} || ${RSD_ARGS[help]} || ${RSD_ARGS[h]} ]]; then
 	rsd::usage
+	exit 0
 fi
 
 # execute the command function and pass the rest of the arguments
