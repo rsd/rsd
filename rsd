@@ -67,7 +67,7 @@
 #       main idea is to have a clean environment for the commands to be loaded. So it is
 #       for external libraries to blindly check it.
 
-RSD_VERSION='1.9.4'
+RSD_VERSION='1.9.5'
 VERSION=$RSD_VERSION
 RSD_ON=1
 
@@ -632,6 +632,8 @@ if [[ ${RSD_ARGS[install]} ]]; then
             cp "$TEMP_DIR/config/rsd.conf" $PREFIX/config/rsd
             ;;
         *)
+            echo Skipping for now $HOME vs ${RSD_ARGS[install]}.
+            exit 0
             rsd::warn "Installalling in custom directory: ${RSD_ARGS[install]}."
             cp -r "$TEMP_DIR/"* "${RSD_ARGS[install]}"
             chmod +x "${RSD_ARGS[install]}/rsd"
