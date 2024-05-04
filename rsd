@@ -555,6 +555,12 @@ if [[ ${RSD_ARGS[install]} ]]; then
     elif [[ ${RSD_ARGS[install]} == "distro" || ${RSD_ARGS[install]} =~ ^/usr/ ]]; then
         rsd::warn "Instaltion in system directories is not supported.  Should be properly packed."
         exit 16
+    else
+        mkdir -p "${RSD_ARGS[install]}"
+        if [[ $? -ne 0 ]]; then
+            rsd::warn "Failed to create installation directory."
+            exit 13
+        fi
     fi
 
     if [[ ! -v RSD_INSTALLATION_STEP ]]; then
