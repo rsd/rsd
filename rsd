@@ -576,7 +576,7 @@ if [[ ${RSD_ARGS[install]} ]]; then
 
         # Step 2: Clone the repository into the temporary directory
         rsd::warn "Downloading into $TEMP_DIR."
-        git clone --quite -b "$RSD_GITHUB_REPO_BRANCH" --depth 1 "$RSD_GITHUB_REPO" "$TEMP_DIR"
+        git clone --quiet -b "$RSD_GITHUB_REPO_BRANCH" --depth 1 "$RSD_GITHUB_REPO" "$TEMP_DIR"
         if [[ $? -ne 0 ]]; then
             rsd::warn "Failed to clone repository."
             rm -rf "$TEMP_DIR"
