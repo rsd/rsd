@@ -19,8 +19,9 @@
 #       Return the RSD version.
 #   --check-version
 #       Compares the local version to the one in the repository.
-#   --install PATH
-#       Install RSD in the provided PATH
+#   --install PATH | MODE
+#       Install RSD in the provided PATH or
+#       MODE: local or user
 #   --debug LEVEL | -d LEVEL
 #       Sets the debug level
 #   --lib-dir PATHs | -l PATHs | --libdir PATHs | --lib PATHs
@@ -31,6 +32,15 @@
 #       Support for bash completion.
 #       In completion mode, no command or action is actually executed.
 #       No command file should exec in global space.
+#   --check-mode
+#       Returns the mode of the installation of the RSD.
+#       unknown: not sure yet
+#       distro: installed in the system (e.g. /usr/bin)
+#       local: installed in the /usr/local directory
+#       user: installed in the user's home directory
+#       custom: installed in a custom directory with its own tree structure
+#       devel: running from the developement tree
+#       not-installed: not installed yet
 #
 # Exit codes:
 #   0 - SUCCESS
@@ -46,6 +56,10 @@
 #   10 - Command failure (unknown reason)
 #   11 - Internal Failure
 #   12 - Try to run a library directly
+#   13 - Installation failure - Insuficient permissions
+#   14 - Installation failure - Failed to create temp directory
+#   15 - Installation failure - Failed to clone repository
+#   16 - Installation failure - Installion in system directories is not supported
 
 # Note: By default all name space used starts with a rsd:: prefix for functions or
 #       RSD_ for variables.  This is to avoid conflicts with other libraries.
@@ -59,7 +73,17 @@ RSD_ON=1
 
 # Initial Debug level.  It will be replaced by command line arguments later on.
 # Set to 1 to debug stages before command line argument has a chance to kick in
-RSD_DEBUG=01
+RSD_DEBUG=0
+
+# RSD_MODE: The mode of the instalation of the RSD.
+#           unknown: not sure yet
+#           distro: installed in the system (e.g. /usr/bin)
+#           local: installed in the /usr/local directory
+#           user: installed in the user's home directory
+#           custom: installed in a custom directory with its own tree structure
+#           devel: running from the developement tree
+#           not-installed: not installed yet
+RSD_MODE="unknown"
 
 # Note: RSD will load the command file and call the command function as needed.
 #       Hoever the script needs to be self independent to download, install or upgrade itself as neeeded.
@@ -115,6 +139,7 @@ declare -A RSD_ARGS_PARAM=(
     ["usage"]=0
     ["help"]=0
     ["h"]=0
+    ["check-mode"]=0
 )
 
 # Checks if a version is greater than another
@@ -158,21 +183,32 @@ function rsd::usage() {
 		echo -e "\t\t\tDo not switch to a local rsd copy on the same directory."
 		echo -e "\t\t--completion"
 		echo -e "\t\t\tSupport for bash completion."
+		echo -e "\t\t--check-mode"
+        echo -e "\t\t\tReturns the mode of the installation of the RSD."
+        echo -e "\t\t\tunknown: not sure yet"
+        echo -e "\t\t\tdistro: installed in the system (e.g. /usr/bin)"
+        echo -e "\t\t\tlocal: installed in the /usr/local directory"
+        echo -e "\t\t\tuser: installed in the user's home directory"
+        echo -e "\t\t\tcustom: installed in a custom directory with its own tree structure"
+        echo -e "\t\t\tdevel: running from the developement tree"
+        echo -e "\t\t\tnot-installed: not installed yet"
 
 		if bash::is_function rsd::list_all_commands; then
-		echo -e "\tCommands:"
-		for command in $(rsd::list_all_commands); do
-			echo -e "\t\t$command"
+            echo -e "\tCommands:"
+            for command in $(rsd::list_all_commands); do
+                echo -e "\t\t$command"
 
-			# load right here (if there is a complete installation)
-			if bash::is_function rsd::source_lib; then
-    			$(rsd::source_lib command/"$command")
-            fi
+                # load right here (if there is a complete installation)
+                if bash::is_function rsd::source_lib; then
+                    $(rsd::source_lib command/"$command")
+                fi
 
-			if bash::is_function rsd::command::"$command"::help; then
-				echo -e "\t\t\t$(rsd::command::"$command"::help)"
-			fi
-		done
+                if bash::is_function rsd::command::"$command"::help; then
+                    echo -e "\t\t\t$(rsd::command::"$command"::help)"
+                fi
+            done
+        else
+            rsd::debug "rsd::list_all_commands not installed."
 		fi
 	else
 		if bash::is_function rsd::list_all_actions; then
@@ -198,7 +234,7 @@ function rsd::debug() {
 		level=$1
 	fi
 	if (( RSD_DEBUG >= level )); then
-		echo "$level: $msg"
+		echo "$level: $msg" >&2
 	fi
 }
 
@@ -211,38 +247,16 @@ function rsd::debug2() {
 	shift
 
 	if (( RSD_DEBUG >= level )); then
-		echo "$level:" "$@"
+		echo "$level:" "$@" >&2
 	fi
 }
 
 # outputs a warning message to the STDERR
 # Arguments:
 #   $1 - The message to be displayed
-#   $2 - The debug level (default 1)
 function rsd::warn() {
 	local msg=$1
-	shift
-	local level=1
-
-	if (($#>0));then
-		level=$1
-	fi
-	if (( RSD_DEBUG >= level )); then
-		echo "$level: $msg" >&2
-	fi
-}
-
-# Same as rsd::warn, but the level comes first, for convenience
-# Arguments:
-#   $1 - The debug level
-#   $* - The message(s) to be displayed
-function rsd::warn2() {
-	local level=$1
-	shift
-
-	if (( RSD_DEBUG >= level )); then
-		echo "$level:" "$@" >&2
-	fi
+    echo "Warning: $msg" >&2
 }
 
 # Finds a bin file in the path
@@ -461,12 +475,29 @@ function rsd::check_libdir_file() {
 	return $?
 }
 
+#finds the working mode for RSD
+function rsd::find_mode() {
+    if [[ -d "$RSD_RUN_DIR/.git" ]]; then
+        RSD_MODE="devel"
+    elif [[ "$RSD_RUN_DIR" == "/usr/local/bin" ]]; then
+        RSD_MODE="local"
+    elif [[ "$RSD_RUN_DIR" == "/usr/bin" ]]; then
+        RSD_MODE="distro"
+    elif [[ "$RSD_RUN_DIR" == "$HOME/bin" || "$RSD_RUN_DIR" == "$HOME/.local/bin"  ]]; then
+        RSD_MODE="user"
+    elif [[ -d "$RSD_RUN_DIR/lib" || -d "$RSD_RUN_DIR/command"  ]]; then
+        RSD_MODE="custom"
+    else
+        RSD_MODE="not-installer"
+    fi
+}
+
 # __main__
 # FIXME: as a recursive command calling, this is worked outside a function (for now at least)
 
 # preserves arguments
 RSD_ORIGINAL_ARGS=("$0" "${@}")
-
+rsd::find_mode
 rsd::parse_args RSD_ARGS_PARAM RSD_ARGS $*
 
 # import rsd::debug level
@@ -487,30 +518,122 @@ if ! [[ ${RSD_ARGS[no-local]} || ${RSD_ARGS[nl]} ]]; then
 	if [[ "$RSD_RUN_DIR" != "$RSD_LOCAL_DIR" ]]; then
 		RSD_LOCAL_RSD="$RSD_LOCAL_DIR/$RSD"
 		if [[ -x  "$RSD_LOCAL_RSD" ]]; then
-		#get version
-		RSD_LOCAL_VERSION=$( $RSD_LOCAL_RSD --version)
-		if rsd::version_gt "$RSD_LOCAL_VERSION" $VERSION; then
-			if [[ -z ${RSD_ARGS[completion]} ]]; then
-			rsd::warn "Switching to local version (-nl to avoid)."
-			fi
-			$RSD_LOCAL_RSD $@
-			exit 0
-		fi
+            #get version
+            RSD_LOCAL_VERSION=$( $RSD_LOCAL_RSD --version)
+            if rsd::version_gt "$RSD_LOCAL_VERSION" $VERSION; then
+                if [[ -z ${RSD_ARGS[completion]} ]]; then
+                    rsd::warn "Switching to pwd version (-nl to avoid)."
+                fi
+                $RSD_LOCAL_RSD $@
+                exit 0
+            fi
 		fi
 	fi
+fi
+
+# version
+if [[ ${RSD_ARGS[version]} ]]; then
+	echo $RSD_VERSION
+	exit 0
+fi
+
+if [[ ${RSD_ARGS[check-mode]} ]]; then
+	echo $RSD_MODE
+	exit 0
 fi
 
 # downloads and install
 # check version
 if [[ ${RSD_ARGS[install]} ]]; then
-	rsd::check_binaries_or_fail git
-	echo "Installing latest rsd from repository."
-	git clone --depth 1 $RSD_GITHUB_REPO "${RSD_ARGS[install]}"
-	exit $?
+	rsd::check_binaries_or_fail mktemp git mkdir cp chmod
+
+    if [[ ${RSD_ARGS[install]} == "local" || ${RSD_ARGS[install]} =~ ^/usr/local ]]; then
+        RSD_ARGS[install]="/usr/local"
+    elif [[ ${RSD_ARGS[install]} == "user" ]]; then
+        RSD_ARGS[install]="$HOME"
+    elif [[ ${RSD_ARGS[install]} == "distro" || ${RSD_ARGS[install]} =~ ^/usr/ ]]; then
+        rsd::warn "Instaltion in system directories is not supported.  Should be properly packed."
+        exit 16
+    fi
+
+    if [[ ! -v RSD_INSTALLATION_STEP ]]; then
+
+        # Step 1: Create a secure temporary directory
+        TEMP_DIR=$(mktemp -d)
+        if [[ ! "$TEMP_DIR" ]]; then
+            rsd::warn "Failed to create temp directory."
+            exit 14
+        fi
+        rsd::warn "Created temporary directory $TEMP_DIR."
+
+        # Step 2: Clone the repository into the temporary directory
+        rsd::warn "Downloading into $TEMP_DIR."
+        git clone --depth 1 "$RSD_GITHUB_REPO" "$TEMP_DIR"
+        if [[ $? -ne 0 ]]; then
+            rsd::warn "Failed to clone repository."
+            rm -rf "$TEMP_DIR"
+            exit 15
+        fi
+
+        # Step 3: Check permission and sudo if needed
+        if [[ ! -w "${RSD_ARGS[install]}" ]]; then
+            rsd::warn "Insufficient permissions to install to ${RSD_ARGS[install]}."
+            if [ $EUID != 0 ]; then
+                rsd::warn "Trying ro re-run with sudo."
+                RSD_INSTALLATION_STEP=2 exec sudo bash "$TEMP_DIR/rsd" "$@"
+            else
+                rsd::warn "Even as root, write permission is not available. Check permissions and ownership."
+                exit 13
+            fi
+        else
+            RSD_INSTALLATION_STEP = 2
+        fi
+    fi
+
+    if [[ -v RSD_INSTALLATION_STEP && $RSD_INSTALLATION_STEP -eq 2 ]]; then
+        # Installation is different for each mode
+        case "$RSD_ARGS[install]" in
+        /usr/local|/usr/local/*)
+            # Assuming that for /usr/local the user has write permission, we are in sudo
+            PREFIX = "/usr/local"
+            rsd::warn "Installing in $PREFIX"
+            mkdir -p $PREFIX/share/rsd
+            mkdir -p $PREFIX/etc/rsd
+            cp "$TEMP_DIR/rsd" $PREFIX/bin
+            chmod +x $PREFIX/bin/rsd
+            cp -r "$TEMP_DIR/lib" $PREFIX/share/rsd
+            cp -r "$TEMP_DIR/command" $PREFIX/share/rsd
+            cp -r "$TEMP_DIR/data" $PREFIX/share/rsd
+            cp "$TEMP_DIR/LICENSE" $PREFIX/share/rsd
+            cp "$TEMP_DIR/README.md" $PREFIX/share/rsd
+            cp "$TEMP_DIR/config/rsd.conf" $PREFIX/etc/rsd
+            ;;
+        $HOME|$HOME/*)
+            PREFIX = "$HOME/.local"
+            rsd::warn "Installing in $HOME"
+            mkdir -p $PREFIX/rsd
+            mkdir -p $PREFIX/bin
+            mkdir -p $HOME/.config/rsd
+            cp "$TEMP_DIR/rsd" $PREFIX/bin
+            chmod +x $PREFIX/bin/rsd
+            cp -r "$TEMP_DIR/lib" $PREFIX/share/rsd
+            cp -r "$TEMP_DIR/command" $PREFIX/share/rsd
+            cp -r "$TEMP_DIR/data" $PREFIX/share/rsd
+            cp "$TEMP_DIR/LICENSE" $PREFIX/share/rsd
+            cp "$TEMP_DIR/README.md" $PREFIX/share/rsd
+            cp "$TEMP_DIR/config/rsd.conf" $PREFIX/config/rsd
+            ;;
+        *)
+            rsd::warn "Installalling in custom directory: $RSD_ARGS[install]."
+            cp -r "$TEMP_DIR" "$RSD_ARGS[install]"
+            chmod a+x "$RSD_ARGS[install]/rsd/rsd"
+            ;;
+
+        exit 0
+    fi
 fi
 
 # Expands libdir search paths
-
 # Define the keys to check
 keys=("lib-dir" "l" "libdir" "lib")
 
@@ -536,19 +659,13 @@ if [[ -n "${RSD_ARGS[rsdlib]}" ]]; then
 	exit 0
 fi
 
-# version
-if [[ ${RSD_ARGS[version]} ]]; then
-	echo $RSD_VERSION
-	exit 0
-fi
-
 # check version
 if [[ ${RSD_ARGS[check-version]} ]]; then
 	if ! rsd::check_repository_version; then
-		rsd::warn "$RSD_ERROR_MSG"
+		echo "$RSD_ERROR_MSG"
 		exit 4
 	else
-		rsd::warn "$RSD_ERROR_MSG"
+		echo "$RSD_ERROR_MSG"
 		exit 0
 	fi
 fi
@@ -558,6 +675,7 @@ fi
 #Now load our defaults
 source "$(rsd::get_libdir_file lib/rsd.lib)"
 
+
 if rsd::check_libdir_file lib/bash_extensions.lib; then
 	source "$(rsd::get_libdir_file lib/bash_extensions.lib)"
 else
@@ -565,21 +683,18 @@ else
 	exit 5
 fi
 
-
-
-if [[ -z "${RSD_ARGS[command]}" ]]; then
-	if ! [[ ${RSD_ARGS[completion]} ]]; then
-		rsd::usage
-		exit 2
-	fi
+if [[ -z RSD_ARGS[command] && ! ${RSD_ARGS[completion]} ]]; then
+    rsd::usage
+    exit 2
 fi
 
 if [[ "${RSD_ARGS[command]}" ]]; then
 	RSD_COMMAND=${RSD_ARGS[command]}
+	rsd::debug "Using command $RSD_COMMAND" 15
 
 	# import the calling command script
 	if ! _rsd_source=$(rsd::load_command_file "$RSD_COMMAND"); then
-		rsd::warn "Command $RSD_COMMAND not found" 0
+		rsd::warn "Command `$RSD_COMMAND` not found!" 0
 		RSD_COMMAND=
 		rsd::usage
 		exit 2

@@ -1,9 +1,18 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call `rsd` to use it."
+    exit 12
+fi
 
 # configuration related stuff for RSD
 
-RSD_CONFIGLIB_VERSION='0.2.1'
+# FIXME: config is being evaluated after command line parsing.
+#        command line parsing should have precedence.
+# FIXME: Some searchpaths end up duplicates.  It is not a real problem, but should be sanitized too.
 
+RSD_CONFIGLIB_VERSION='0.2.2'
 
 # Searchs for all occurences of a file
 # Every one is loaded.
@@ -17,8 +26,9 @@ function rsd::config::get_file() {
 
 	for path in $(bash::reverse $RSD_CONFIGLIB_SEARCH_PATH)
 	do
-		rsd::warn2 10 rsd::config::get_file: Searching in $path
+		rsd::debug2 10 "rsd::config::get_file: Searching in $path"
 		if [[ -f "$path/$command.conf" ]]; then
+		    rsd::debug2 9 "rsd::config::get_file: Found as $path/$command.conf"
 			echo source "$path/$command.conf"
 			found=0
 		fi

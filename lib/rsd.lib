@@ -32,7 +32,7 @@ function rsd::check_command() {
 	local command
 
 	for command in $1 $1.sh $1.bash $1.cmd $1.rsd; do
-		rsd::warn2 10 "Looking for '$1' in $command"
+		rsd::warn "Looking for '$1' in $command"
 		if rsd::check_libdir_file command/$command; then
 		echo $(rsd::get_libdir_file command/$command)
 		return 0
@@ -51,7 +51,7 @@ function rsd::load_command_file() {
 	command_with_path=$(rsd::check_command $command)
 
 	if (($?)); then
-		rsd::warn "Command $command is invalid" 2
+		rsd::warn "Command $command is invalid!"
 		return 1
 	fi
 	echo source \"$command_with_path\"
@@ -241,20 +241,7 @@ function rsd::list_command_options() {
 	return 0
 }
 
-
-# Same as rsd::warn, but the level comes first, for convenience
-# Arguments:
-#   $1 - The debug level
-#   $* - The message(s) to be displayed
-function rsd::warn2() {
-	local level=$1
-	shift
-
-	if (( RSD_DEBUG >= level )); then
-		echo "$level:" "$@" >&2
-	fi
-}
-
+# FIXME: Remove level
 # Checks for a library in the search path
 # Returns the string to source it
 # Or a warning to STDERR (depending on the DEBUG level)
@@ -266,7 +253,7 @@ function rsd::source_lib() {
 	if rsd::check_libdir_file "$file"; then
 		echo source "$(rsd::get_libdir_file "$file")"
 	else
-		echo rsd::warn2 $level "Cannot load library $file!"
+		echo rsd::warn "Cannot load library $file!"
 		return 1
 	fi
 
@@ -287,31 +274,6 @@ function rsd::version_gt() {
 	test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1";
 }
 
-function rsd::usage_() {
-	local command
-
-	echo "$RSD v$RSD_VERSION"
-	echo "Usage:"
-	if [[ -z "$RSD_COMMAND" ]]; then
-		echo -e "\t$RSD [RSD OPTIONS] <command> "
-		if bash::is_function rsd::list_all_commands; then
-			echo -e "\tCommands:"
-			for command in $(rsd::list_all_commands); do
-				echo -e "\t\t$command"
-			done
-		fi
-	else
-		if bash::is_function rsd::list_all_actions; then
-			echo -e "\t$RSD [RSD OPTIONS] $RSD_COMMAND <action> [COMMAND OPTIONS]"
-			echo -e "\tActions for $RSD_COMMAND:"
-			rsd::list_all_actions $RSD_COMMAND
-		else
-			echo -e "\t$RSD [RSD OPTIONS] <command> "
-		fi
-	fi
-	exit 2
-}
-
 # Debug to STDOUT
 # Arguments:
 #   $1 - The message to be displayed
@@ -325,7 +287,7 @@ function rsd::debug() {
 		level=$1
 	fi
 	if (( RSD_DEBUG >= level )); then
-		echo "$level: $msg"
+		echo "$level: $msg" >&2
 	fi
 }
 
@@ -338,26 +300,18 @@ function rsd::debug2() {
 	shift
 
 	if (( RSD_DEBUG >= level )); then
-		echo "$level:" "$@"
+		echo "$level:" "$@" >&2
 	fi
 }
 
 # outputs a warning message to the STDERR
 # Arguments:
 #   $1 - The message to be displayed
-#   $2 - The debug level (default 1)
 function rsd::warn() {
 	local msg=$1
-	shift
-	local level=1
-
-	if (($#>0));then
-		level=$1
-	fi
-	if (( RSD_DEBUG >= level )); then
-		echo "$level: $msg" >&2
-	fi
+    echo "Warning: $msg" >&2
 }
+
 
 # Finds a bin file in the path
 # Arguments:
@@ -564,6 +518,20 @@ function rsd::get_libdir_file() {
 	return 1
 }
 
+# Same as rsd::get_libdir_file, but returns all occurrences
+function rsd::get_all_libdir_file() {
+	rsd::check_binaries_or_fail pwd
+	local file=$1
+	local libdir
+
+	for libdir in $RSD_LIBRARY_SEARCH_PATH; do
+		if [[ -e "$libdir/$file" ]]; then
+			echo "$libdir/$file"
+		fi
+	done
+	return 0
+}
+
 # just check if a file exists in LIBDIR
 # Arguments:
 #   $1 - The file to be found
@@ -589,5 +557,4 @@ fi
 
 # Let it get away with a warning
 $(rsd::source_lib lib/config.lib)
-
 RSD_LIB=1

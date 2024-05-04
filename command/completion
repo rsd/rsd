@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call `rsd` to use it."
+    exit 12
+fi
+
 # Companion utility for bash_completion script
 # or any completion
 
-RSD_COMMAND_COMPLETION_VERSION="0.1"
+RSD_COMMAND_COMPLETION_VERSION="0.1.1"
 
 
 # List all rsd options
@@ -22,7 +28,7 @@ function rsd::command::completion::action::list-command-options() {
 	local _rsd_source
 	
 	if ! _rsd_source=$(rsd::load_command_file $command); then
- 		rsd::warn "Command $command not found" 1
+ 		rsd::warn "Command $command not found"
 		exit 10
 	fi
 	
@@ -37,7 +43,7 @@ function rsd::command::completion::action::list-command-actions() {
 	local _rsd_source
 	
 	if ! _rsd_source=$(rsd::load_command_file $command); then
-		rsd::warn "Command $command not found" 1
+		rsd::warn "Command $command not found"
 		exit 10
 	fi
 	
@@ -70,7 +76,7 @@ function rsd::command::completion::action::check-command-option-has-value() {
 	fi
 	
 	if ! _rsd_source=$(rsd::load_command_file $command); then
-		rsd::warn "Command $command not found" 1
+		rsd::warn "Command $command not found"
 		exit 10
 	fi	
 	eval $_rsd_source

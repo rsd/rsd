@@ -8,7 +8,15 @@ The idea is to be fast to write code, easy to reuse and share between scripts.
 
 ## Instalation
 
+```bash
+curl -sL https://raw.githubusercontent.com/rsd/rsd/master/rsd  | bash -s -- --install /usr/local/bin
 ```
+
+Note that you are responsible for inspecting the script before running it.
+
+Or just clone it: 
+
+```bash
 git clone https://github.com/rsd/rsd.git
 ```
 
