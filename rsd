@@ -90,7 +90,8 @@ RSD_MODE="unknown"
 
 # The latest version of this file in the repository url
 RSD_GITHUB_REPO="https://github.com/rsd/rsd.git"
-RSD_LATEST_RSD_REPO="https://raw.githubusercontent.com/rsd/rsd/master/rsd"
+#RSD_LATEST_RSD_REPO="https://raw.githubusercontent.com/rsd/rsd/master/rsd"
+RSD_LATEST_RSD_REPO="https://raw.githubusercontent.com/rsd/rsd/2024/rsd"
 
 # if a function returns error, this is the reason
 # TODO: write a better API to handle errors
