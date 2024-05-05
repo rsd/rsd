@@ -557,4 +557,11 @@ fi
 
 # Let it get away with a warning
 $(rsd::source_lib lib/config.lib)
+
+# run again to add the config paths
+rsd::create_search_path
+
+# Run again to add the config paths from config
+$(rsd::source_lib lib/config.lib)
+
 RSD_LIB=1

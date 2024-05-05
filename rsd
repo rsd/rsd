@@ -26,6 +26,8 @@
 #       Sets the debug level
 #   --lib-dir PATHs | -l PATHs | --libdir PATHs | --lib PATHs
 #       Coma separated paths to search for libraries.
+#   --config-dir PATHs | --config PATHs | -c PATHs
+#       Coma separated paths to search for configuration files directories.
 #   --no-local | -nl
 #       Do not switch to a local rsd copy on the same directory.
 #   --completion
@@ -144,10 +146,15 @@ declare -A RSD_ARGS_PARAM=(
     ["help"]=0
     ["h"]=0
     ["check-mode"]=0
+    ["config-dir"]=1
+    ["config"]=1
+    ["c"]=1
 )
+
 
 # Seatch paths
 declare -ga RSD_LIBRARY_SEARCH_PATH
+declare -ga RSD_CONFIG_LIBRARY_SEARCH_PATH
 
 # Checks if a version is greater than another
 # Arguments:
@@ -186,6 +193,8 @@ function rsd::usage() {
 		echo -e "\t\t\tSets the debug level"
 		echo -e "\t\t--lib-dir PATHs | -l PATHs | --libdir PATHs | --lib PATHs"
 		echo -e "\t\t\tComa separated paths to search for libraries."
+		echo -e "\t\t--config-dir PATHs | --config PATHs | -c PATHs"
+		echo -e "\t\t\tComa separated paths to search for configuration files directories."
 		echo -e "\t\t--no-local | -nl"
 		echo -e "\t\t\tDo not switch to a local rsd copy on the same directory."
 		echo -e "\t\t--completion"
@@ -453,7 +462,7 @@ function rsd::get_libdir_file() {
 
 	for libdir in "${RSD_LIBRARY_SEARCH_PATH[@]}"; do
 	    for key in "${keys[@]}"; do
-	        path=$(readlink -f "$libdir/$key/$file")
+	        path=$(readlink -f "$libdir/$key")
             if [[ -e "$path/$file" ]]; then
                 if ((print)); then
                     echo "$path/$file"
@@ -610,7 +619,8 @@ function rsd::create_search_path() {
     # Command line arguments have precedence over the configuration file
     RSD_LIBRARY_SEARCH_PATH+=("${RSD_LIBDIR[@]}")
 
-    # FIXME:  Here should come the ones from the config files
+    # Here comes the ones from the config files, only in the second run
+    RSD_LIBRARY_SEARCH_PATH+=("${RSD_CONFIG_LIBRARY_SEARCH_PATH[@]}")
 
     # Dev comes first
     if [[ $RSD_MODE == "devel" ]]; then
@@ -619,6 +629,7 @@ function rsd::create_search_path() {
 
     # user stuff should have precedence over system stuff
     RSD_LIBRARY_SEARCH_PATH+=("$HOME/.local/share/rsd")
+    RSD_LIBRARY_SEARCH_PATH+=("$HOME/.rsd")
 
     # What is system now depends on the mode we are operating
     if [[ $RSD_MODE == "local" ]]; then

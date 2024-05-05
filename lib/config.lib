@@ -12,7 +12,11 @@ fi
 #        command line parsing should have precedence.
 # FIXME: Some searchpaths end up duplicates.  It is not a real problem, but should be sanitized too.
 
-RSD_CONFIGLIB_VERSION='0.2.2'
+RSD_CONFIGLIB_VERSION='0.2.3'
+
+declare -ga RSD_CONFIGLIB_SEARCH_PATH
+RSD_CONFIGDIR=()
+RSD_CONFIGDIR_temp=()
 
 # Searchs for all occurences of a file
 # Every one is loaded.
@@ -21,24 +25,69 @@ RSD_CONFIGLIB_VERSION='0.2.2'
 # TODO: Migrate to ini and merge multiple inis
 RSD_CONFIGLIB_SEARCH_PATH="$HOME/.rsd/ $HOME/.config/rsd/ /etc/rsd/ /usr/local/etc/rsd/ $RSD_LIBRARY_SEARCH_PATH"
 function rsd::config::get_file() {
+    declare -ga RSD_CONFIGLIB_SEARCH_PATH
 	local command=${1:-rsd}
 	local found=1
+    local key
+    local configdir
+    local keys=("config-dir" "config" "c")
 
-	for path in $(bash::reverse $RSD_CONFIGLIB_SEARCH_PATH)
-	do
-		rsd::debug2 10 "rsd::config::get_file: Searching in $path"
-		if [[ -f "$path/$command.conf" ]]; then
-		    rsd::debug2 9 "rsd::config::get_file: Found as $path/$command.conf"
-			echo source "$path/$command.conf"
-			found=0
-		fi
+    # 1 - Read from command line parameters
+    for key in "${keys[@]}"; do
+        if bash::key_exists "$key" in RSD_ARGS; then
+            IFS=',' read -r -a RSD_CONFIGDIR_temp <<< "${RSD_ARGS[$key]}"
+            RSD_CONFIGDIR=("${RSD_CONFIGDIR[@]}" "${RSD_CONFIGDIR_temp[@]}")
+        fi
+    done
 
-		if [[ -f "$path/config/$command.conf" ]]; then
-			echo source "$path/config/$command.conf"
-			found=0
-		fi
+    # Command line arguments have precedence over the configuration file
+    RSD_CONFIGLIB_SEARCH_PATH+=("${RSD_CONFIGDIR[@]}")
+
+    # Here comes the ones from the config files, only in the second run
+    RSD_CONFIGLIB_SEARCH_PATH+=("${RSD_CONFIG_CONFIG_SEARCH_PATH[@]}")
+
+    # Dev comes first
+    if [[ $RSD_MODE == "devel" ]]; then
+        RSD_CONFIGLIB_SEARCH_PATH+=("$RSD_RUN_DIR/config")
+    fi
+
+    # user stuff should have precedence over system stuff
+    RSD_CONFIGLIB_SEARCH_PATH+=("$HOME/.config/rsd")
+    RSD_CONFIGLIB_SEARCH_PATH+=("$HOME/.local/etc/rsd")
+    RSD_CONFIGLIB_SEARCH_PATH+=("$HOME/.rsd/config")
+
+    # What is system now depends on the mode we are operating
+    if [[ $RSD_MODE == "local" ]]; then
+        RSD_CONFIGLIB_SEARCH_PATH+=("/usr/local/etc/rsd")
+    elif [[ $RSD_MODE == "opt" ]]; then
+        #FIXME:  No opt installation yet
+        RSD_CONFIGLIB_SEARCH_PATH+=("/opt/rsd/config")
+    elif [[ $RSD_MODE == "distro" ]]; then
+        RSD_CONFIGLIB_SEARCH_PATH+=("/etc/rsd")
+    fi
+
+    # Where RSD is
+    RSD_CONFIGLIB_SEARCH_PATH+=("$RSD_RUN_DIR/config")
+    # Add the current working directory
+    RSD_CONFIGLIB_SEARCH_PATH+=("$(pwd)/config")
+
+    # Add the directories containing all sourced scripts or parent scripts
+    RSD_CONFIGLIB_SEARCH_PATH+=("$(dirname "${BASH_SOURCE[@]}")/config")
+
+    # Print all paths in the array for debugging
+    printf "Library Search Paths for $RSD_MODE:\n%s\n" "${RSD_CONFIGLIB_SEARCH_PATH[@]}"
+
+
+    for configdir in "${RSD_CONFIGLIB_SEARCH_PATH[@]}"; do
+	    for key in "${keys[@]}"; do
+	        path=$(readlink -f "$configdir/$key")
+            if [[ -e "$path/$command.conf" ]]; then
+                rsd::debug2 9 "rsd::config::get_file: Found as $path/$command.conf"
+			    echo source "$path/$command.conf"
+                return 0
+            fi
+        done
 	done
-	return $found
 }
 
 $(rsd::config::get_file)
