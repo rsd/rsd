@@ -2,8 +2,15 @@
 
 # old stuff that needs to be reintegrated
 command/old
+lib/lxc
 lib/lxc.lib
 lib/network.lib
 lib/sudo.lib
 lib/xrandr.lib
 config/lxc.conf
+
+data/applications/
+data/installer-base
+data/rsd
+data/rsd-bashrc
+data/web/

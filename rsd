@@ -74,7 +74,7 @@
 
 shopt -s extglob
 
-RSD_VERSION='1.9.9'
+RSD_VERSION='1.9.10'
 VERSION=$RSD_VERSION
 
 RSD_ON=1
@@ -131,6 +131,7 @@ declare -A RSD_ARGS_PARAM=(
     ["debug"]=1
     ["d"]=1
     ["version"]=0
+    ["v"]=0
     ["check-version"]=0
     ["lib-dir"]=1
     ["l"]=1
@@ -332,6 +333,8 @@ function rsd::check_binaries_or_fail() {
 # Returns:
 #   Associative Array with the parsed arguments
 #   0 - if the arguments are parsed
+# Attention:
+#   This will be ran before transfering control to another rsd (newer) installed.
 function rsd::parse_args() {
 	local config_name=$1
 	local param_name=$2
@@ -693,7 +696,7 @@ if ! [[ ${RSD_ARGS[no-local]} || ${RSD_ARGS[nl]} ]]; then
 fi
 
 # version
-if [[ ${RSD_ARGS[version]} ]]; then
+if [[ ${RSD_ARGS[version]} || ${RSD_ARGS[v]} ]]; then
 	echo $RSD_VERSION
 	exit 0
 fi
