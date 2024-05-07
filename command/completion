@@ -13,16 +13,16 @@ RSD_COMMAND_COMPLETION_VERSION="0.1.1"
 
 
 # List all rsd options
-function rsd::command::completion::action::list-rsd-options() {
+function rsd::c::completion::action::list-rsd-options() {
 	rsd::list_all_options
 }
 
-function rsd::command::completion::action::list-commands() {
+function rsd::c::completion::action::list-commands() {
     rsd::debug "Listing all commands"
 	rsd::list_all_commands
 }
 
-function rsd::command::completion::action::list-command-options() {
+function rsd::c::completion::action::list-command-options() {
 	rsd::arguments_or_usage 1 $@
 	local command=$1
 	local _rsd_source
@@ -37,7 +37,7 @@ function rsd::command::completion::action::list-command-options() {
 	rsd::list_command_options $command
 }
 
-function rsd::command::completion::action::list-command-actions() {
+function rsd::c::completion::action::list-command-actions() {
 	rsd::arguments_or_usage 1 $@
 	local command=$1
 	local _rsd_source
@@ -52,7 +52,7 @@ function rsd::command::completion::action::list-command-actions() {
 	rsd::list_all_actions_bare 0 $command
 }
 
-function rsd::command::completion::action::check-rsd-option-has-value() {
+function rsd::c::completion::action::check-rsd-option-has-value() {
 	rsd::arguments_or_usage 1 $@
 	local option=$1
 
@@ -62,7 +62,7 @@ function rsd::command::completion::action::check-rsd-option-has-value() {
 	exit 1
 }
 
-function rsd::command::completion::action::check-command-option-has-value() {
+function rsd::c::completion::action::check-command-option-has-value() {
 	rsd::arguments_or_usage 2 $@
 	local command=$1
 	local option=$2

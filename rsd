@@ -225,8 +225,8 @@ function rsd::usage() {
                     $(rsd::source_lib command/"$command")
                 fi
 
-                if bash::is_function rsd::command::"$command"::help; then
-                    echo -e "\t\t\t$(rsd::command::"$command"::help)"
+                if bash::is_function rsd::c::"$command"::help; then
+                    echo -e "\t\t\t$(rsd::c::"$command"::help)"
                 fi
             done
         else
