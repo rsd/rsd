@@ -140,7 +140,9 @@ function rsd::list_all_commands() {
 	do
 		for command in $command_dir/*
 		do
-			command_list[$(basename $command)]=1
+		    if [[ -f "$command" ]]; then
+                command_list[$(basename $command)]=1
+            fi
 		done
 	done
 
@@ -308,8 +310,7 @@ function rsd::debug2() {
 # Arguments:
 #   $1 - The message to be displayed
 function rsd::warn() {
-	local msg=$1
-    echo "Warning: $msg" >&2
+    echo "Warning: $*" >&2
 }
 
 
@@ -508,7 +509,6 @@ function rsd::get_libdir_file() {
 
 	for libdir in $RSD_LIBRARY_SEARCH_PATH; do
 		if [[ -e "$libdir/$file" ]]; then
-			RSD_LIB_CACHE[$file]="$libdir/$file"
 			if ((print)); then
 				echo "$libdir/$file"
 			fi

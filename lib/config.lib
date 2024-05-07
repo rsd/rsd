@@ -75,7 +75,7 @@ function rsd::config::get_file() {
     RSD_CONFIGLIB_SEARCH_PATH+=("$(dirname "${BASH_SOURCE[@]}")/config")
 
     # Print all paths in the array for debugging
-    printf "Library Search Paths for $RSD_MODE:\n%s\n" "${RSD_CONFIGLIB_SEARCH_PATH[@]}"
+    #printf "Library Search Paths for $RSD_MODE:\n%s\n" "${RSD_CONFIGLIB_SEARCH_PATH[@]}"
 
 
     for configdir in "${RSD_CONFIGLIB_SEARCH_PATH[@]}"; do
