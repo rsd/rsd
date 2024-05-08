@@ -43,6 +43,10 @@
 #       custom: installed in a custom directory with its own tree structure
 #       devel: running from the developement tree
 #       not-installed: not installed yet
+#   --pass-thru | -pt
+#       Pass the rest of the arguments to the shell and run whathever is there.
+#   --no-pass-thru | -np
+#       Do not pass the rest of the arguments to the shell.
 #
 # Exit codes:
 #   0 - SUCCESS
@@ -74,7 +78,7 @@
 
 shopt -s extglob
 
-RSD_VERSION='1.9.10'
+RSD_VERSION='1.9.11'
 VERSION=$RSD_VERSION
 
 RSD_ON=1
@@ -82,6 +86,9 @@ RSD_ON=1
 # Initial Debug level.  It will be replaced by command line arguments later on.
 # Set to 1 to debug stages before command line argument has a chance to kick in
 RSD_DEBUG=1
+
+# TESTING: PASSTHRU is on by default for testing
+RSD_PASS_THRU=1
 
 # Note: RSD will load the command file and call the command function as needed.
 #       Hoever the script needs to be self independent to download, install or upgrade itself as neeeded.
@@ -150,6 +157,11 @@ declare -A RSD_ARGS_PARAM=(
     ["config-dir"]=1
     ["config"]=1
     ["c"]=1
+    ["pass-thru"]=0
+    ["pt"]=0
+    ["no-pass-thru"]=0
+    ["np"]=0
+    ["debug-parse-args"]=0 # Internal use
 )
 
 # Processed Command Line Arguments
@@ -214,6 +226,10 @@ function rsd::usage() {
         echo -e "\t\t\tcustom: installed in a custom directory with its own tree structure"
         echo -e "\t\t\tdevel: running from the developement tree"
         echo -e "\t\t\tnot-installed: not installed yet"
+        echo -e "\t\t--pass-thru | -pt"
+        echo -e "\t\t\tPass the rest of the arguments to the shell and run whathever is there."
+        echo -e "\t\t--no-pass-thru | -np"
+        echo -e "\t\t\tDo not pass the rest of the arguments to the shell."
 
 		if bash::is_function rsd::list_all_commands; then
             echo -e "\tCommands:"
@@ -364,17 +380,18 @@ function rsd::parse_args() {
             arg=${arg#-}
             arg=${arg,,}
 
+#            rsd::warn "Processing $arg."
             if bash::key_exists "$arg" in config; then
                 if [[ "${config[$arg]}" -eq 1 ]]; then
                     if [[ -z $2 ]]; then
                         rsd::warn "Error: Missing argument for option $1."
                         exit 9
                     else
-                        param_name[$arg]="$2"
+                        param[$arg]="$2"
                         shift
                     fi
                 else
-                    param_name[$arg]=1
+                    param[$arg]=1
                 fi
             else
                 # Handling unrecognized options
@@ -385,7 +402,7 @@ function rsd::parse_args() {
             ;;
 		*)
             if [[ $count -eq 0 ]]; then
-                param_name[command]="$1"
+                param[command]="$1"
             else
                 unprocessed+=($1)
             fi
@@ -394,6 +411,18 @@ function rsd::parse_args() {
 		esac
 		shift
 	done
+
+	# Internal Parse Argument Debug
+	if [[ "${param[debug-parse-args]}" ]]; then
+	    # Deppending on the installation, this might not work at all
+	    rsd::create_search_path
+	    source "$(rsd::get_libdir_file lib/rsd.lib)"
+	    source "$(rsd::get_libdir_file lib/bash_extensions.lib)"
+	    rsd::warn "Debugging Parse Arguments"
+	    bash::dump_associative_array "$param_name"
+	    exit 0
+    fi
+
 	return 0
 }
 
@@ -735,6 +764,12 @@ if [[ ${RSD_ARGS[check-version]} ]]; then
 	fi
 fi
 
+if [[ ${RSD_ARGS[pass-thru]} || ${RSD_ARGS[pt]} ]]; then
+    RSD_PASS_THRU=1
+elif [[ ${RSD_ARGS[no-pass-thru]} || ${RSD_ARGS[np]} ]]; then
+    RSD_PASS_THRU=0
+fi
+
 # load our main library
 # after this point there is a need to the full installation
 #Now load our defaults
@@ -759,10 +794,16 @@ if [[ "${RSD_ARGS[command]}" ]]; then
 
 	# import the calling command script
 	if ! _rsd_source=$(rsd::load_command_file "$RSD_COMMAND"); then
-		rsd::warn "Command `$RSD_COMMAND` not found!" 0
-		RSD_COMMAND=
-		rsd::usage
-		exit 2
+	    if [[ $RSD_PASS_THRU -eq 1 ]]; then
+            rsd::debug "Command `$RSD_COMMAND` not found!" 10
+            rsd::debug "Passing through to the shell." 10
+            echo exec "${RSD_ARGS_UNPROCESSED[@]}"
+        else
+            rsd::warn "Command `$RSD_COMMAND` not found!" 0
+            RSD_COMMAND=
+            rsd::usage
+            exit 2
+        fi
 	fi
 
 	# sourcing the command, any argument left is passed to
@@ -773,12 +814,17 @@ if [[ "${RSD_ARGS[command]}" ]]; then
 	exit 0
 fi
 
+rsd::warn 803
+
 
 # help and usage
 if [[ ${RSD_ARGS[usage]} || ${RSD_ARGS[help]} || ${RSD_ARGS[h]} ]]; then
 	rsd::usage
 	exit 0
 fi
+
+
+rsd::warn 813
 
 # execute the command function and pass the rest of the arguments
 # if there is a command function arguments are given and let it takes control
