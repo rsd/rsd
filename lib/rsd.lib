@@ -32,7 +32,7 @@ function rsd::check_command() {
 	local command
 
 	for command in $1 $1.sh $1.bash $1.cmd $1.rsd; do
-		rsd::warn "Looking for '$1' in $command"
+		rsd::debug "Looking for '$1' in $command" 20
 		if rsd::check_libdir_file command/$command; then
 		echo $(rsd::get_libdir_file command/$command)
 		return 0
@@ -51,7 +51,7 @@ function rsd::load_command_file() {
 	command_with_path=$(rsd::check_command $command)
 
 	if (($?)); then
-		rsd::warn "Command $command is invalid!"
+		rsd::debug "Command $command is invalid!" 15
 		return 1
 	fi
 	echo source \"$command_with_path\"
@@ -105,6 +105,15 @@ function rsd::command() {
 		fi
 	fi
 	return
+}
+
+# Pass a command to the shell
+rsd::passthru() {
+    local command=$1
+    shift
+    local arguments=$*
+    exec $command $arguments
+    exit 0
 }
 
 

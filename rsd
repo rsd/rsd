@@ -73,8 +73,11 @@
 #       main idea is to have a clean environment for the commands to be loaded. So it is
 #       for external libraries to blindly check it.
 
-# FIXME: Uninstall
-# FIXME: Completion installation
+# TODO:
+#    - [ ] Define better debug level meanings.
+#    - [ ] Uninstall
+#    - [ ] Completion installation
+#    - [ ] Data dir Installation check
 
 shopt -s extglob
 
@@ -418,8 +421,8 @@ function rsd::parse_args() {
 	    rsd::create_search_path
 	    source "$(rsd::get_libdir_file lib/rsd.lib)"
 	    source "$(rsd::get_libdir_file lib/bash_extensions.lib)"
-	    rsd::warn "Debugging Parse Arguments"
 	    bash::dump_associative_array "$param_name"
+	    bash::dump_array "$unprocessed_name"
 	    exit 0
     fi
 
@@ -789,7 +792,7 @@ if [[ -z RSD_ARGS[command] && ! ${RSD_ARGS[completion]} ]]; then
 fi
 
 if [[ "${RSD_ARGS[command]}" ]]; then
-	RSD_COMMAND=${RSD_ARGS[command]}
+	RSD_COMMAND="${RSD_ARGS[command]}"
 	rsd::debug "Using command $RSD_COMMAND" 15
 
 	# import the calling command script
@@ -797,9 +800,10 @@ if [[ "${RSD_ARGS[command]}" ]]; then
 	    if [[ $RSD_PASS_THRU -eq 1 ]]; then
             rsd::debug "Command `$RSD_COMMAND` not found!" 10
             rsd::debug "Passing through to the shell." 10
-            echo exec "${RSD_ARGS_UNPROCESSED[@]}"
+            rsd::passthru "$RSD_COMMAND" "${RSD_ARGS_UNPROCESSED[@]}"
+            exit 0
         else
-            rsd::warn "Command `$RSD_COMMAND` not found!" 0
+            rsd::warn "Command \"$RSD_COMMAND\" not found!" 0
             RSD_COMMAND=
             rsd::usage
             exit 2
