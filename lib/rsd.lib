@@ -22,6 +22,8 @@ function rsd::arguments_or_usage() {
 
 	rsd::debug2 20 "rsd_arguments_or_usage: total arguments: $total, Arguments:" $@
 	if [[ "$#" -lt "$total" ]]; then
+	    rsd::warn "Abort! Missing required arguments: given $total of $#"
+	    rsd::warn "Called from "${FUNCNAME[1}"  "${FUNCNAME[2]}" "
 		rsd::usage
 	fi
 	return 0

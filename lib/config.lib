@@ -7,6 +7,11 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 # configuration related stuff for RSD
+# Configurations are read from files as global variables.
+# There are 2 types of configuration files:
+# 1. .conf files - they are sourced directly, so manypulations can be done - use with care.
+# 2. .ini files  - they are read into global associative arrays, so they are safer to use, but limited.
+#                - the ini config is saved in the global "R::INI::<command>" associative array.
 
 # FIXME: config is being evaluated after command line parsing.
 #        command line parsing should have precedence.
@@ -81,13 +86,67 @@ function rsd::config::get_file() {
     for configdir in "${RSD_CONFIGLIB_SEARCH_PATH[@]}"; do
 	    for key in "${keys[@]}"; do
 	        path=$(readlink -f "$configdir/$key")
-            if [[ -e "$path/$command.conf" ]]; then
+
+	        # .conf files are sourced
+            if [[ -f "$path/$command.conf" ]]; then
                 rsd::debug2 9 "rsd::config::get_file: Found as $path/$command.conf"
 			    echo source "$path/$command.conf"
-                return 0
+            fi
+
+            # .ini files are processed
+            if [[ -f "$path/$command.ini" ]]; then
+                rsd::debug2 9 "rsd::config::get_file: Found as $path/$command.ini"
+                if [[ ! -v "R::INI::$command" ]]; then
+                    declare -gA "R::INI::$command"
+                fi
+                rsd::config::read_ini "$path/$command.ini" "R::INI::$command"
             fi
         done
 	done
+}
+
+
+# Read an Ini File Into an existing associative array
+# Arguments:
+#   $1: The file to read
+#   $2: The name of the associative array to save the config
+# Notes:
+#   - The config name can contain data from other configs for the same command that will be appended or replaced
+function rsd::config::read_ini() {
+    rsd::arguments_or_usage 2 $@
+    local file=$1
+    local config_name=$2
+    declare -n config="$config_name"
+
+    local section
+    local key
+    local value
+    local line
+    local section_re='^\[([^\]]+)\]$'
+    local key_re='^\s*([^=]+?)\s*=\s*(.*)$'
+
+    if [[ ! -f "$file" ]]; then
+        rsd::warn "Error: File does not exist."
+        return 1
+    fi
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+
+        # Trim leading and trailing whitespace using Bash parameter expansion
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+
+        if [[ -z "$line" || "$line" =~ ^[;#] ]]; then
+            continue  # Skip blank lines and lines starting with ';' or '#'
+        fi
+        if [[ $line =~ $section_re ]]; then
+            section="${BASH_REMATCH[1]}"
+        elif [[ $line =~ $key_re ]]; then
+            key="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+            config["$section.$key"]="$value"
+        fi
+    done < "$file"
 }
 
 $(rsd::config::get_file)
