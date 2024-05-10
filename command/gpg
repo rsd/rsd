@@ -11,7 +11,7 @@ $(rsd::source_lib_or_die lib/gpg.lib)
 RSD_C_GPG_SHORT_DESC="GPG Integration"
 
 rsd::c::gpg::help() {
-    echo -e "\n\t\tGPG Related Actions\n"
+    echo -e "\n\tGPG Commanf Help:\n"
     echo -e "\t\tActions:"
     echo -e "\t\t\tcheck   Checks the GPG Installation"
     echo -e "\t\t\tinit    Initialize GPG"

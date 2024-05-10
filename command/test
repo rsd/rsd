@@ -16,7 +16,7 @@ function rsd::c::test::test2() {
 	echo "Still have these arguments to process:" $@
 }
 
-function rsd::c::test::action::test() {
+function rsd::c::test::test() {
 	echo Teste: $@
 	rsd::debug "Debug no level"
 	rsd::debug "Debug level 1 " 1
@@ -26,7 +26,7 @@ function rsd::c::test::action::test() {
 }
 
 
-function rsd::c::test::action::test_argument() {
+function rsd::c::test::test_argument() {
 	echo "Full Arguments before: "$@
 	rsd::arguments_or_usage 1 $@
 	echo "Full Arguments after: "$@

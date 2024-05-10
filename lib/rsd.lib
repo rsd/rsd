@@ -119,7 +119,6 @@ rsd::passthru() {
     exit 0
 }
 
-
 # call a generic action in command
 # pass the subargs in the RSD_ARGS hash
 function rsd::generic_action() {
@@ -128,7 +127,7 @@ function rsd::generic_action() {
 	local action=$2
 	local action_function
 
-	for action_function in 	rsd::c::${command}::action::${action} \
+	for action_function in 	rsd::c::${command}::${action} \
 				rsd::c::${command}::${action} \
 				rsd::${action} ${command}::${action}
 	do
@@ -182,7 +181,7 @@ function rsd::list_all_actions_bare() {
 	local sub help i real_sub
 
     local count=0
-	for sub in $(rsd::list_functions "rsd::c::$command::action::"); do
+	for sub in $(rsd::list_functions "rsd::c::$command::"); do
 	    ((count++))
 		rsd::debug "action function is $sub" 8
 		real_sub=$sub

@@ -256,14 +256,15 @@ function rsd::usage() {
             echo -e "\t$RSD [RSD OPTIONS] $RSD_COMMAND <action> [COMMAND OPTIONS]"
             short_desc="RSD_C_${RSD_COMMAND^^}_SHORT_DESC"
             short_desc="${!short_desc}"
+            echo -e "\n\t${short_desc}"
 
             if actions=$(rsd::list_all_actions "$RSD_COMMAND"); then
-                echo -e "\t\tActions for $RSD_COMMAND:"
+                echo -e "\n\tRegistered actions for $RSD_COMMAND:"
                 echo "$actions"
             fi
 
             if bash::is_function rsd::c::"$RSD_COMMAND"::help; then
-                echo -e "\t\t\t$(rsd::c::"$RSD_COMMAND"::help)"
+                echo -e "\t\t$(rsd::c::"$RSD_COMMAND"::help)"
             fi
         else
             echo -e "\t$RSD [RSD OPTIONS] <command> "
