@@ -114,8 +114,8 @@ function rsd::config::get_file() {
 #   - The config name can contain data from other configs for the same command that will be appended or replaced
 function rsd::config::read_ini() {
     rsd::arguments_or_usage 2 $@
-    local file=$1
-    local config_name=$2
+    local file="$1"
+    local config_name="$2"
     declare -n config="$config_name"
 
     local section
@@ -148,5 +148,37 @@ function rsd::config::read_ini() {
         fi
     done < "$file"
 }
+
+# Write an ini file from a config associative array
+# Arguments:
+#   $1: The file to write
+#   $2: The name of the associative array to read the config
+# Notes:
+#   - The config name can contain data from other configs for the same command that will be appended or replaced
+#   - the keys in the associative array should be in the form "section.key"
+function rsd::config::write_ini() {
+    local file="$1"
+    local config_name="$2"
+    declare -n config="$config_name"
+
+    local section
+    local key
+    local previous_section=""
+
+    # FIXME: Should do a backup first
+    > "$file"  # Clear the file if it exists or create a new one
+
+    for key in "${!config[@]}"; do
+        section="${key%%.*}"
+        local actual_key="${key#*.}"
+
+        if [[ "$section" != "$previous_section" ]]; then
+                printf "[%s]\n" "$section" >> "$file"
+                previous_section="$section"
+        fi
+        printf "%s = %s\n" "$actual_key" "${config[$section.$key]}" >> "$file"
+    done
+}
+
 
 $(rsd::config::get_file)
