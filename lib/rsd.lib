@@ -99,12 +99,13 @@ function rsd::command() {
 		$real_command ${RSD_ARGS[subargs]}
 		exit 0
 	else
-		rsd::parse_args RSD_COMMAND_${command^^}_ARGS_PARAM RSD_COMMAND_ARGS ${RSD_ARGS[subargs]}
-		if [[ ! -z ${RSD_COMMAND_ARGS[command]} ]]; then
-			rsd::generic_action $command ${RSD_COMMAND_ARGS[command]}
-		else
+	    # FIXME: FIX parse argues for commands
+#		rsd::parse_args RSD_COMMAND_${command^^}_ARGS_PARAM RSD_COMMAND_ARGS ${RSD_ARGS[subargs]}
+#		if [[ ! -z ${RSD_COMMAND_ARGS[command]} ]]; then
+#			rsd::generic_action $command ${RSD_COMMAND_ARGS[command]}
+#		else
 			rsd::usage
-		fi
+#		fi
 	fi
 	return
 }
@@ -167,6 +168,7 @@ function rsd::list_all_commands() {
 function rsd::list_all_actions() {
 	rsd::arguments_or_usage 1 $@
 	rsd::list_all_actions_bare 1 $1
+	return $?
 }
 
 # list all actions (rsd::<command>::<action>)
@@ -179,7 +181,9 @@ function rsd::list_all_actions_bare() {
 	local command=$2
 	local sub help i real_sub
 
+    local count=0
 	for sub in $(rsd::list_functions "rsd::c::$command::action::"); do
+	    ((count++))
 		rsd::debug "action function is $sub" 8
 		real_sub=$sub
 
@@ -198,6 +202,10 @@ function rsd::list_all_actions_bare() {
 			echo
 		fi
 	done
+	if ((count == 0)); then
+        return 1
+    fi
+    return 0
 }
 
 # list all function by prefix
@@ -386,7 +394,7 @@ function rsd::check_binaries_or_fail() {
 # - First argument is the name of the Associative Array with the configuration
 # - The second argument is the name of the Associative Array to be used as a return
 #   it will be created globally
-function rsd::parse_args() {
+function _rsd::parse_args() {
 	local config=$1
 	shift
 	local param=$1

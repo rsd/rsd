@@ -50,7 +50,7 @@
 #
 # Exit codes:
 #   0 - SUCCESS
-#   1 - Not bash 4
+#   1 - Not bash 4.3
 #   2 - Bad usage
 #   3 - Program not found
 #   4 - There is a new version in the repository
@@ -237,15 +237,15 @@ function rsd::usage() {
 		if bash::is_function rsd::list_all_commands; then
             echo -e "\tCommands:"
             for command in $(rsd::list_all_commands); do
-                echo -e "\t\t$command"
-
                 # load right here (if there is a complete installation)
                 if bash::is_function rsd::source_lib; then
                     $(rsd::source_lib command/"$command")
                 fi
-
-                if bash::is_function rsd::c::"$command"::help; then
-                    echo -e "\t\t\t$(rsd::c::"$command"::help)"
+                short_desc="RSD_C_${command^^}_SHORT_DESC"
+                short_desc="${!short_desc}"
+                echo -e "\t\t$command"
+                if [[ -n ${short_desc} ]]; then
+                    echo -e "\t\t\t${short_desc}"
                 fi
             done
         else
@@ -253,11 +253,20 @@ function rsd::usage() {
 		fi
 	else
 		if bash::is_function rsd::list_all_actions; then
-		echo -e "\t$RSD [RSD OPTIONS] $RSD_COMMAND <action> [COMMAND OPTIONS]"
-		echo -e "\tActions for $RSD_COMMAND:"
-		rsd::list_all_actions "$RSD_COMMAND"
-		else
-		echo -e "\t$RSD [RSD OPTIONS] <command> "
+            echo -e "\t$RSD [RSD OPTIONS] $RSD_COMMAND <action> [COMMAND OPTIONS]"
+            short_desc="RSD_C_${RSD_COMMAND^^}_SHORT_DESC"
+            short_desc="${!short_desc}"
+
+            if actions=$(rsd::list_all_actions "$RSD_COMMAND"); then
+                echo -e "\t\tActions for $RSD_COMMAND:"
+                echo "$actions"
+            fi
+
+            if bash::is_function rsd::c::"$RSD_COMMAND"::help; then
+                echo -e "\t\t\t$(rsd::c::"$RSD_COMMAND"::help)"
+            fi
+        else
+            echo -e "\t$RSD [RSD OPTIONS] <command> "
 		fi
 	fi
 }
@@ -818,17 +827,11 @@ if [[ "${RSD_ARGS[command]}" ]]; then
 	exit 0
 fi
 
-rsd::warn 803
-
-
 # help and usage
 if [[ ${RSD_ARGS[usage]} || ${RSD_ARGS[help]} || ${RSD_ARGS[h]} ]]; then
 	rsd::usage
 	exit 0
 fi
-
-
-rsd::warn 813
 
 # execute the command function and pass the rest of the arguments
 # if there is a command function arguments are given and let it takes control

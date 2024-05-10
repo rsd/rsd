@@ -8,14 +8,27 @@ fi
 
 $(rsd::source_lib_or_die lib/gpg.lib)
 
+RSD_C_GPG_SHORT_DESC="GPG Integration"
+
 rsd::c::gpg::help() {
-    echo "GPG Related Actions"
-    echo "\t\tActions:"
-    echo "\t\t\tinit    Initialize GPG"
-    echo "\t\t\tencrypt Encrypt a file"
-    echo "\t\t\tdecrypt Decrypt a file"
-    echo "\t"
+    echo -e "\n\t\tGPG Related Actions\n"
+    echo -e "\t\tActions:"
+    echo -e "\t\t\tcheck   Checks the GPG Installation"
+    echo -e "\t\t\tinit    Initialize GPG"
+    echo -e "\t\t\tencrypt Encrypt a file"
+    echo -e "\t\t\tdecrypt Decrypt a file"
 }
+
+rsd::c::gpg::check() {
+    if ! rsd::check_binary gpg; then
+        rsd::warn "GPG is not installed. Please install it first."
+        exit 3
+    fi
+
+    echo "GPG is installed and ready for use."
+}
+
 rsd::c::gpg::init() {
+    rsd::check_binaries_or_fail gpg
     echo "init..."
 }
