@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call `rsd` to use it."
+    exit 12
+fi
+
+$(rsd::source_lib_or_die lib/gpg.lib)
+
+rsd::c::gpg::help() {
+    echo "GPG Related Actions"
+    echo "\t\tActions:"
+    echo "\t\t\tinit    Initialize GPG"
+    echo "\t\t\tencrypt Encrypt a file"
+    echo "\t\t\tdecrypt Decrypt a file"
+    echo "\t"
+}
+rsd::c::gpg::init() {
+    echo "init..."
+}

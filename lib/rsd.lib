@@ -273,6 +273,14 @@ function rsd::source_lib() {
 	return 0
 }
 
+# Same as rsd::source_lib, but aborts if the library is not found
+function rsd::source_lib_or_die() {
+    if ! RSD_LIBRARY_LOAD=$(rsd::source_lib $1); then
+        $RSD_LIBRARY_LOAD
+        exit 5
+    fi
+}
+
 #--------------------------------------------------
 # Functions that are on rsd too
 #--------------------------------------------------
