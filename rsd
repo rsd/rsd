@@ -139,6 +139,11 @@ declare -A RSD_PARSE_CONFIG=(
     # "ignore" - ignore them (default)
     # "error" - raise an error
     ["unknown-option"]="ignore"
+    # Stop processing options on the first command
+    # Or keeo processing until the end?
+    # This control wheather options with the same name can coehwist and the place where found
+    # is imporntant or repeated options are not allowed and they be placed anywhere.
+    ["stop-on-command"]=1
 )
 
 
@@ -176,8 +181,10 @@ declare -A RSD_ARGS_PARAM=(
     ["debug-parse-args"]=0 # Internal use
 )
 
-# Processed Command Line Arguments
+# Processed Command Line Arguments for main rsd
 declare -A RSD_ARGS
+# Processed Command Line Arguments for the command
+declare -A RSD_COMMAND_ARGS
 # Unprocessed Command Line Arguments
 declare -a RSD_ARGS_UNPROCESSED
 
@@ -403,12 +410,16 @@ function rsd::parse_args() {
 
 	while [ $# -gt 0 ]; do
 		case "$1" in
+		--)
+            shift
+            unprocessed+=("$@")
+            break
+		    ;;
         --*|-*)
             arg=${1#-}
             arg=${arg#-}
             arg=${arg,,}
 
-#            rsd::warn "Processing $arg."
             if bash::key_exists "$arg" in config; then
                 if [[ "${config[$arg]}" -eq 1 ]]; then
                     if [[ -z $2 ]]; then
@@ -428,15 +439,20 @@ function rsd::parse_args() {
                     rsd::warn "Error: Unrecognized option '$1'."
                     exit 2
                 fi
-                unprocessed+=($1)
+                unprocessed+=("$1")
                 shift
             fi
             ;;
 		*)
             if [[ $count -eq 0 ]]; then
                 param[command]="$1"
+
+                if [[ "${RSD_PARSE_CONFIG[stop-on-command]}" -eq 1 ]]; then
+                    unprocessed+=("$@")
+                    break
+                fi
             else
-                unprocessed+=($1)
+                unprocessed+=("$1")
             fi
             ((count++))
             ;;
@@ -733,8 +749,8 @@ fi
 DEBUG=$RSD_DEBUG
 
 rsd::debug "Debug set to $RSD_DEBUG" 2
-rsd::debug2 9 "Arguments parsed (values): keys -> (${RSD_ARGS[@]}): " ${!RSD_ARGS[@]}
-rsd::debug "Original call was $RSD_ORIGINAL_ARGS" 7
+rsd::debug2 9 "Arguments parsed (values): keys -> (${RSD_ARGS[*]}): " "${!RSD_ARGS[*]}"
+rsd::debug "Original call was ${RSD_ORIGINAL_ARGS[*]}" 7
 
 # swith to a local copy if any (local == pwd)
 if ! [[ ${RSD_ARGS[no-local]} || ${RSD_ARGS[nl]} ]]; then
@@ -748,7 +764,7 @@ if ! [[ ${RSD_ARGS[no-local]} || ${RSD_ARGS[nl]} ]]; then
                 if [[ -z ${RSD_ARGS[completion]} ]]; then
                     rsd::warn "Switching to pwd version (-nl to avoid)."
                 fi
-                $RSD_LOCAL_RSD $@
+                $RSD_LOCAL_RSD "$@"
                 exit 0
             fi
 		fi
@@ -815,7 +831,7 @@ else
 	exit 5
 fi
 
-if [[ -z RSD_ARGS[command] && ! ${RSD_ARGS[completion]} ]]; then
+if [[ -z "${RSD_ARGS[command]}" && ! ${RSD_ARGS[completion]} ]]; then
     rsd::usage
     exit 2
 fi
@@ -827,7 +843,7 @@ if [[ "${RSD_ARGS[command]}" ]]; then
 	# import the calling command script
 	if ! _rsd_source=$(rsd::load_command_file "$RSD_COMMAND"); then
 	    if [[ $RSD_PASS_THRU -eq 1 ]]; then
-            rsd::debug "Command `$RSD_COMMAND` not found!" 10
+            rsd::debug "Command '$RSD_COMMAND' not found!" 10
             rsd::debug "Passing through to the shell." 10
             rsd::passthru "$RSD_COMMAND" "${RSD_ARGS_UNPROCESSED[@]}"
             exit 0
@@ -861,7 +877,7 @@ rsd::warn "About to call command $RSD_COMMAND with arguments ${RSD_ARGS[subargs]
 if [[ ${RSD_ARGS[command]} ]]; then
 	if ! [[ ${RSD_ARGS[completion]} ]]; then
 	    rsd::warn "GO..."
-		rsd::command $RSD_COMMAND
+		rsd::command "$RSD_COMMAND"
 	fi
 else
 	rsd::usage
