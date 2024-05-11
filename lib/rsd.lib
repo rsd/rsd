@@ -94,19 +94,29 @@ function rsd::command() {
 	local command=$1
 	local real_command
 
+	rsd::warn "rsd::command $command"
+
+    # Try a command function first
+    # You cannot have a command function and actions, either have actions or have command.
 	if real_command=$(rsd::search_command $command); then
 		rsd::debug "Calling $real_command with arguments: ${RSD_ARGS[subargs]}" 5
 		$real_command ${RSD_ARGS[subargs]}
 		exit 0
 	else
+	    # Try action
 	    # FIXME: FIX parse argues for commands
-#		rsd::parse_args RSD_COMMAND_${command^^}_ARGS_PARAM RSD_COMMAND_ARGS ${RSD_ARGS[subargs]}
-#		if [[ ! -z ${RSD_COMMAND_ARGS[command]} ]]; then
-#			rsd::generic_action $command ${RSD_COMMAND_ARGS[command]}
-#		else
-			rsd::usage
-#		fi
-	fi
+
+        local args_parm="RSD_C_${command^^}_ARGS_PARAM"
+        #args_parm="${!args_parm}"
+	    if [[ -n "${!args_parm}" ]]; then
+            rsd::parse_args ${args_parm} RSD_COMMAND_ARGS ${RSD_ARGS_UNPROCESSED[@]}
+        fi
+        if [[ ! -z ${RSD_COMMAND_ARGS[command]} ]]; then
+            rsd::generic_action $command ${RSD_COMMAND_ARGS[command]}
+        else
+            rsd::usage
+        fi
+    fi
 	return
 }
 

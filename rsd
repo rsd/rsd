@@ -133,6 +133,15 @@ if [[ "${BASH_VERSINFO[0]}" -lt 4 ]] || [[ "${BASH_VERSINFO[0]}" -eq 4 && "${BAS
 	exit 1
 fi
 
+# Parse Config
+declare -A RSD_PARSE_CONFIG=(
+    # What to do with unkown options?
+    # "ignore" - ignore them (default)
+    # "error" - raise an error
+    ["unknown-option"]="ignore"
+)
+
+
 # paramenters arguments
 # 0 => No argument
 # 1 => One argument
@@ -306,7 +315,7 @@ function rsd::debug2() {
 # Arguments:
 #   $1 - The message to be displayed
 function rsd::warn() {
-    echo "Warning: $*" >&2
+    echo "$*" >&2
 }
 
 # Finds a bin file in the path
@@ -360,7 +369,7 @@ function rsd::check_binaries_or_fail() {
 
 # Parse command line arguments:
 # Arguments:
-#   $1 - The name of the Associative Array with the configuration
+#   $1 - The name of the Associative Array with the configuration [optional]
 #   $2 - The name of the Associative Array to be used as a return with processed information
 #   $3 - The name of the Array to be used as a return with non-processed information (pass-thru).
 #   $* - The command line arguments
@@ -368,19 +377,25 @@ function rsd::check_binaries_or_fail() {
 #   Associative Array with the parsed arguments
 #   0 - if the arguments are parsed
 # Attention:
-#   This will be ran before transfering control to another rsd (newer) installed.
+#   This will be run before transfering control to another rsd (newer) installed.
 function rsd::parse_args() {
 	local config_name=$1
 	local param_name=$2
 	local unprocessed_name=$3
 	shift 3
 
-    declare -n config="$config_name"
-    declare -n param="$param_name"
-    declare -n unprocessed="$unprocessed_name"
-
 	local arg
 	local count=0
+
+    local has_config=1
+    if [[ -z "$config_name" ]]; then
+        has_config=0
+        declare -A config
+    else
+        declare -n config="$config_name"
+    fi
+    declare -n param="$param_name"
+    declare -n unprocessed="$unprocessed_name"
 
     if [[ "$RSD_DEBUG" -gt 0 ]]; then
         rsd::warn "rsd::parse_args: Total: $#, Arguments:" "$@"
@@ -409,6 +424,10 @@ function rsd::parse_args() {
             else
                 # Handling unrecognized options
                 rsd::debug2 10 "Error: Unrecognized option '$1'."
+                if [[ "${RSD_PARSE_CONFIG[unknown-option]}" == "error" ]]; then
+                    rsd::warn "Error: Unrecognized option '$1'."
+                    exit 2
+                fi
                 unprocessed+=($1)
                 shift
             fi
