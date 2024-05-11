@@ -20,7 +20,6 @@ function rsd::arguments_or_usage() {
 	local total=$1
 	shift
 
-	rsd::debug2 20 "rsd_arguments_or_usage: total arguments: $total, Arguments:" "$@"
 	if [[ "$#" -lt "$total" ]]; then
 	    rsd::warn "Abort! Missing required arguments: given $total of $#"
 	    rsd::warn "Called from ${FUNCNAME[1]} -> ${FUNCNAME[2]}"
@@ -34,27 +33,31 @@ function rsd::check_command() {
 	local command
 
 	for command in $1 $1.sh $1.bash $1.cmd $1.rsd; do
-		rsd::debug "Looking for '$1' in $command" 20
+		rsd::debug "Looking for '$1' in $command" 30
 		if rsd::check_libdir_file "command/$command"; then
             echo "$(rsd::get_libdir_file "command/$command")"
+            rsd::debug "Found $command" 21
             return 0
 		fi
 	done
 	return 1
 }
 
-# this outputs the source line to be executed
-# it does not execut directly, as this needs to be outsie of a function
+# this outputs the source line to be executed by source
+# Arguments:
+#   $1 - the command to be loaded
+# Example:
+#   source rsd::load_command_file "command"
 function rsd::load_command_file() {
 	rsd::arguments_or_usage 1 "$@"
 	local command_with_path
 	local command=$1
 
-	if command_with_path=$(rsd::check_command "$command"); then
+	if ! command_with_path=$(rsd::check_command "$command"); then
 		rsd::debug "Command $command is invalid!" 15
 		return 1
 	fi
-	echo source \"$command_with_path\"
+	echo "$command_with_path"
 	return 0
 }
 
@@ -92,22 +95,22 @@ function rsd::command() {
 	local command=$1
 	local real_command
 
-	rsd::warn "rsd::command $command"
-
     # Try a command function first
     # You cannot have a command function and actions, either have actions or have command.
 	if real_command=$(rsd::search_command "$command"); then
-		rsd::debug "Calling $real_command with arguments: ${RSD_ARGS[subargs]}" 5
-		$real_command "${RSD_ARGS[subargs]}"
+		rsd::debug "Calling $real_command with arguments: ${RSD_ARGS_UNPROCESSED[*]}" 5
+		$real_command "${RSD_ARGS_UNPROCESSED[@]}"
 		exit 0
 	else
 	    # Try action
 	    # FIXME: FIX parse argues for commands
 
         rsd::parse_args "RSD_C_${command^^}_ARGS_PARAM" RSD_COMMAND_ARGS RSD_ARGS_UNPROCESSED "${RSD_ARGS_UNPROCESSED[@]}"
-        if [[ ! -z ${RSD_COMMAND_ARGS[command]} ]]; then
+        if [[ -n ${RSD_COMMAND_ARGS[command]} ]]; then
+            rsd::debug2 20 "Calling generic_action $command ${RSD_COMMAND_ARGS[command]}"
             rsd::generic_action "$command" "${RSD_COMMAND_ARGS[command]}"
         else
+            rsd::debug2 5 "Did not find a command or action for $command"
             rsd::usage
         fi
     fi
@@ -115,7 +118,7 @@ function rsd::command() {
 }
 
 # Pass a command to the shell
-rsd::passthru() {
+function rsd::passthru() {
     local command=$1
     shift
     local arguments=$*
@@ -125,6 +128,9 @@ rsd::passthru() {
 
 # call a generic action in command
 # pass the subargs in the RSD_ARGS hash
+# Arguments:
+#   $1 - command
+#   $2 - action
 function rsd::generic_action() {
 	rsd::arguments_or_usage 2 "$@"
 	local command=$1
@@ -135,6 +141,7 @@ function rsd::generic_action() {
 				rsd::c::${command}::${action} \
 				rsd::${action} ${command}::${action}
 	do
+	    rsd::debug2 30 "Checking for action $action_function"
 		if bash::is_function "$action_function"; then
 			rsd::debug "function for action $RSD_ACTION is $action_function" 8
 			$action_function "${RSD_COMMAND_ARGS[subargs]}"
@@ -340,7 +347,7 @@ function rsd::debug2() {
 # Arguments:
 #   $1 - The message to be displayed
 function rsd::warn() {
-    echo "Warning: $*" >&2
+    echo "$*" >&2
 }
 
 

@@ -14,6 +14,11 @@ BASH_EXTENSIONS_VERSION='0.2.2'
 function bash::is_function() {
 	local func=$1
 
+    if [[ $RSD_DEBUG -ge 30 ]]; then
+        rsd::warn "Checking if $func is a function"
+        type -t $func
+    fi
+
 	if [[ $(type -t $func) ]] && [[ $(type -t $func) = function ]]; then
 		return 0
 	else

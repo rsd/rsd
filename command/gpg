@@ -9,8 +9,9 @@ fi
 $(rsd::source_lib_or_die lib/gpg.lib)
 
 RSD_C_GPG_SHORT_DESC="GPG Integration"
+RSD_C_GPG_VERSION="0.0.2"
 
-rsd::c::gpg::help() {
+function rsd::c::gpg::help() {
     echo -e "\n\tGPG Commanf Help:\n"
     echo -e "\t\tActions:"
     echo -e "\t\t\tcheck   Checks the GPG Installation"
@@ -19,7 +20,7 @@ rsd::c::gpg::help() {
     echo -e "\t\t\tdecrypt Decrypt a file"
 }
 
-rsd::c::gpg::check() {
+function rsd::c::gpg::check() {
     if ! rsd::check_binary gpg; then
         rsd::warn "GPG is not installed. Please install it first."
         exit 3
@@ -28,7 +29,7 @@ rsd::c::gpg::check() {
     echo "GPG is installed and ready for use."
 }
 
-rsd::c::gpg::init() {
+function rsd::c::gpg::init() {
     rsd::check_binaries_or_fail gpg
     echo "init..."
 }

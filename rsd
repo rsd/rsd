@@ -88,7 +88,7 @@ RSD_ON=1
 
 # Initial Debug level.  It will be replaced by command line arguments later on.
 # Set to 1 to debug stages before command line argument has a chance to kick in
-RSD_DEBUG=1
+RSD_DEBUG=0
 
 # TESTING: PASSTHRU is on by default for testing
 RSD_PASS_THRU=1
@@ -178,7 +178,7 @@ declare -A RSD_ARGS_PARAM=(
     ["pt"]=0
     ["no-pass-thru"]=0
     ["np"]=0
-    ["debug-parse-args"]=0 # Internal use
+    #["debug-parse-args"]=0 # Internal use
 )
 
 # Processed Command Line Arguments for main rsd
@@ -403,12 +403,13 @@ function rsd::parse_args() {
     fi
     declare -n param="$param_name"
     declare -n unprocessed="$unprocessed_name"
+    unprocessed=()
 
-    if [[ "$RSD_DEBUG" -gt 0 ]]; then
-        rsd::warn "rsd::parse_args: Total: $#, Arguments:" "$@"
-    fi
+    [[ "$RSD_DEBUG" -gt 0 ]] && rsd::warn "rsd::parse_args: Total: $#, Arguments:" "$@"
 
 	while [ $# -gt 0 ]; do
+	    [[ "$RSD_DEBUG" -gt 0 ]] && rsd::warn "rsd::parse_args: Processing: $1"
+
 		case "$1" in
 		--)
             shift
@@ -432,26 +433,31 @@ function rsd::parse_args() {
                 else
                     param[$arg]=1
                 fi
+            elif [[ "$arg" == "debug-parse-args" ]]; then
+                # pass ahead
+                unprocessed+=("--debug-parse-args")
+                param[$arg]=1
             else
                 # Handling unrecognized options
-                rsd::debug2 10 "Error: Unrecognized option '$1'."
                 if [[ "${RSD_PARSE_CONFIG[unknown-option]}" == "error" ]]; then
                     rsd::warn "Error: Unrecognized option '$1'."
                     exit 2
+                else
+                    [[ "$RSD_DEBUG" -gt 0 ]] && rsd::warn "Unrecognized option '$1'. Ignoring here."
                 fi
                 unprocessed+=("$1")
-                shift
             fi
             ;;
 		*)
             if [[ $count -eq 0 ]]; then
                 param[command]="$1"
-
+                [[ "$RSD_DEBUG" -gt 0 ]] && rsd::warn "Got command: $1"
+            else
                 if [[ "${RSD_PARSE_CONFIG[stop-on-command]}" -eq 1 ]]; then
                     unprocessed+=("$@")
                     break
                 fi
-            else
+
                 unprocessed+=("$1")
             fi
             ((count++))
@@ -463,12 +469,13 @@ function rsd::parse_args() {
 	# Internal Parse Argument Debug
 	if [[ "${param[debug-parse-args]}" ]]; then
 	    # Deppending on the installation, this might not work at all
+	    rsd::warn "Debugging Parse Arguments: $param_name, $unprocessed_name"
 	    rsd::create_search_path
 	    source "$(rsd::get_libdir_file lib/rsd.lib)"
 	    source "$(rsd::get_libdir_file lib/bash_extensions.lib)"
 	    bash::dump_associative_array "$param_name"
 	    bash::dump_array "$unprocessed_name"
-	    exit 0
+	    rsd::warn "----------------------------------------------------------"
     fi
 
 	return 0
@@ -823,7 +830,6 @@ fi
 #Now load our defaults
 source "$(rsd::get_libdir_file lib/rsd.lib)"
 
-
 if rsd::check_libdir_file lib/bash_extensions.lib; then
 	source "$(rsd::get_libdir_file lib/bash_extensions.lib)"
 else
@@ -831,6 +837,13 @@ else
 	exit 5
 fi
 
+# help and usage
+if [[ ${RSD_ARGS[usage]} || ${RSD_ARGS[help]} || ${RSD_ARGS[h]} ]]; then
+	rsd::usage
+	exit 0
+fi
+
+# No Command or completion
 if [[ -z "${RSD_ARGS[command]}" && ! ${RSD_ARGS[completion]} ]]; then
     rsd::usage
     exit 2
@@ -841,47 +854,26 @@ if [[ "${RSD_ARGS[command]}" ]]; then
 	rsd::debug "Using command $RSD_COMMAND" 15
 
 	# import the calling command script
-	if ! _rsd_source=$(rsd::load_command_file "$RSD_COMMAND"); then
+	if ! command_source=$(rsd::load_command_file "$RSD_COMMAND"); then
+	    rsd::debug2 20 "Could not load command $RSD_COMMAND"
 	    if [[ $RSD_PASS_THRU -eq 1 ]]; then
             rsd::debug "Command '$RSD_COMMAND' not found!" 10
             rsd::debug "Passing through to the shell." 10
             rsd::passthru "$RSD_COMMAND" "${RSD_ARGS_UNPROCESSED[@]}"
             exit 0
         else
-            rsd::warn "Command \"$RSD_COMMAND\" not found!" 0
+            rsd::warn "Command '$RSD_COMMAND' not found!" 0
             RSD_COMMAND=
             rsd::usage
             exit 2
         fi
 	fi
 
-	# sourcing the command, any argument left is passed to
-	eval "$_rsd_source" "${RSD_ARGS[subargs]}"
-
+    source "$command_source" "${RSD_ARGS_UNPROCESSED[@]}"
 	rsd::command "$RSD_COMMAND"
 
 	exit 0
 fi
 
-# help and usage
-if [[ ${RSD_ARGS[usage]} || ${RSD_ARGS[help]} || ${RSD_ARGS[h]} ]]; then
-	rsd::usage
-	exit 0
-fi
-
-# execute the command function and pass the rest of the arguments
-# if there is a command function arguments are given and let it takes control
-# FIXME: Not sure if this is still needed.
-# Watch for a while
-rsd::warn "About to call command $RSD_COMMAND with arguments ${RSD_ARGS[subargs]} in the end"
-if [[ ${RSD_ARGS[command]} ]]; then
-	if ! [[ ${RSD_ARGS[completion]} ]]; then
-	    rsd::warn "GO..."
-		rsd::command "$RSD_COMMAND"
-	fi
-else
-	rsd::usage
-fi
-
-# FIXME: for now
-exit 0
+# Should not get here
+exit 11
