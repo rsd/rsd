@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+
+  if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+      echo "This is a RSD library file. It should not be executed directly."
+      echo "Please call 'rsd' to use it."
+      exit 12
+  fi
+
+RSD_NET_LIB=1
+RSD_NET_LIB_VERSION="0.0.1"
+
+# Get the hostname of the machine
+# Fallsback to hostname if necessary
+function rsd::l::net::hostname() {
+    local hostname=$HOSTNAME
+    if [[ -n $hostname ]]; then
+        echo $hostname
+        return 0
+    fi
+    if  rsd::check_binaries cat; then
+        hostname=$(cat /etc/hostname)
+        if [[ -n $hostname ]]; then
+            echo $hostname
+            return 0
+        fi
+    fi
+    if  rsd::check_binaries hostname; then
+        hostname=$(hostname)
+        if [[ -n $hostname ]]; then
+            echo $hostname
+            return 0
+        fi
+    fi
+    if  rsd::check_binaries systemctl hostnamectl grep awk; then
+        if systemctl > /dev/null 2>&1; then
+            hostname=$(hostnamectl | grep "Static hostname" | awk '{print $3}')
+            if [[ -n $hostname ]]; then
+                echo $hostname
+                return 0
+            fi
+        fi
+    fi
+    if  rsd::check_binaries uname; then
+        hostname=$(uname -n)
+        if [[ -n $hostname ]]; then
+            echo $hostname
+            return 0
+        fi
+    fi
+    if  rsd::check_binaries dig awk; then
+        hostname=$(dig -x $(hostname -I | awk '{print $1}') +short)
+        if [[ -n $hostname ]]; then
+            echo $hostname
+            return 0
+        fi
+    fi
+    if  rsd::check_binaries nslookup; then
+        local ip=$(hostname -I | awk '{print $1}')
+        hostname=$(nslookup $ip | grep 'name =' | awk '{print $4}')
+        if [[ -n $hostname ]]; then
+            echo $hostname
+            return 0
+        fi
+    fi
+    # Note that Powershell will give the windows "host" hosname than a wsl if run in a WSL
+    if  rsd::check_binaries powershell.exe; then
+        hostname=$(powershell.exe -Command "hostname")
+        if [[ -n $hostname ]]; then
+            echo $hostname
+            return 0
+        fi
+    fi
+    if  rsd::check_binaries cmd.exe; then
+        hostname=$(cmd.exe /c hostname 2>/dev/null)
+        if [[ -n $hostname ]]; then
+            echo $hostname
+            return 0
+        fi
+    fi
+    # Git Bash
+    if [[ -n $COMPUTERNAME ]]; then
+        hostname=$COMPUTERNAME
+        if [[ -n $hostname ]]; then
+            echo $hostname
+            return 0
+        fi
+    fi
+    hostname="localhost"
+    echo $hostname
+    return 1
+}

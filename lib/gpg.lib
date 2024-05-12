@@ -7,3 +7,130 @@
   fi
 
 RSD_GPG_LIB=1
+RSD_GPG_LIB_VERSION="0.0.1"
+
+$(rsd::source_lib lib/net.lib)
+
+# FIXME: This should come from a config file
+RSD_GPG_USER_ID="rsd@$(rsd::l::net::hostname)"
+
+
+# Reference for gpg fields: https://github.com/gpg/gnupg/blob/master/doc/DETAILS
+
+# Gets all GPG keys from the keyring and returns them as an array.
+# Arguments:
+#   $1: The user id to search for.
+#       Empty string for all user ids
+#   $2: The name of the array to store the keys in.
+# Returns:
+#   An array of GPG keys.
+function rsd::l::gpg::get_keys() {
+    rsd::check_binaries_or_fail gpg
+    local user_id="$1"
+    local array_name="$2"
+    declare -n arr="$array_name"
+
+    local -a keys
+    IFS=$'\n' read -r -d '' -a keys < <(gpg --list-keys --with-colons $user_id | grep '^fpr' | cut -d: -f10 && printf '\0')
+    arr=("${keys[@]}")
+}
+
+# Takes one argument: the fingerprint of the GPG key
+function rsd::l::gpg::show_key_capabilities() {
+    rsd::arguments_or_usage 1 $@
+    rsd::check_binaries_or_fail gpg
+
+    local fingerprint=$1
+
+    # Fetching the key details
+    local key_details=$(gpg --list-options show-usage --with-colons --list-keys "$fingerprint")
+    local key_details=$(gpg --with-colons --list-keys "$fingerprint")
+
+    echo $key_details
+
+    echo "Key Capabilities for $fingerprint:"
+    echo "---------------------------------"
+    echo "Capability : Is Capable"
+    echo "---------------------------------"
+    echo -e "Sign\t: $(echo "$key_details" | grep '^pub' | grep -o 'cC' && echo "Yes" || echo "No")"
+    echo -e "Encrypt\t: $(echo "$key_details" | grep '^pub' | grep -o 'eE' && echo "Yes" || echo "No")"
+    echo -e "Authenticate : $(echo "$key_details" | grep '^pub' | grep -o 'aA' && echo "Yes" || echo "No")"
+    echo -e "Certify\t: $(echo "$key_details" | grep '^pub' | grep -o 'sS' && echo "Yes" || echo "No")"
+    echo "---------------------------------"
+
+    echo "---------------------------------"
+    echo -e "Sign\t: $(echo "$key_details" | grep '^pub' | grep -o 'cC')"
+    echo -e "Encrypt\t: $(echo "$key_details" | grep '^pub' | grep -o 'eE')"
+    echo -e "Authenticate : $(echo "$key_details" | grep '^pub' | grep -o 'aA')"
+    echo -e "Certify\t: $(echo "$key_details" | grep '^pub' | grep -o 'sS')"
+    echo "---------------------------------"
+
+}
+
+# Encrypts a file and replaces it with the encrypted version.
+# Adds .gpg extension to the file.
+# Arguments:
+#   $1: The file to encrypt
+# Notes:
+#   - The encrypted file will be named as the original file with .gpg extension.
+#   - If the encrypted file already exists, the function will fail.
+#   - The original file will be removed
+function rsd::l::gpg::encrypt_file() {
+    rsd::arguments_or_usage 1 "$@"
+    rsd::check_binaries_or_fail gpg rm
+
+    local file="$1"
+    local encrypted_file="$file.gpg"
+
+    if [[ -e "$encrypted_file" ]]; then
+        rsd::warn "Encrypted file '$encrypted_file' already exists. Nothing to do."
+        return 1
+    fi
+
+    if [[ ! -e "$file" ]]; then
+        rsd::warn "File '$file' does not exist."
+        return 2
+    fi
+
+    if gpg --encrypt --sign --recipient "$RSD_GPG_USER_ID" "$file"; then
+        rm "$file"
+        return 0
+    else
+        rsd::warn "Some error occurred while encrypting the file.  Check stderr."
+        return 3
+    fi
+}
+
+# Decrypts a file and replaces it with the decrypted version.
+# Removes the .gpg extension from the file.
+# Arguments:
+#   $1: The file to decrypt
+# Note:
+#   - The decrypted file will be named as the original file without the .gpg extension.
+#   - If the decrypted file already exists, the function will fail.
+#   - The original file will be removed
+function rsd::l::gpg::decrypt_file() {
+    rsd::arguments_or_usage 1 "$@"
+    rsd::check_binaries_or_fail gpg rm
+
+    local file="$1"
+    local decrypted_file="${file%.gpg}"
+
+    if [[ -e "$decrypted_file" ]]; then
+        rsd::warn "Decrypted file '$decrypted_file' already exists. Nothing to do."
+        return 1
+    fi
+
+    if [[ ! -e "$file" ]]; then
+        rsd::warn "File '$file' does not exist."
+        return 2
+    fi
+
+    if gpg --decrypt --output "$decrypted_file" "$file"; then
+        rm "$file"
+        return 0
+    else
+        rsd::warn "Some error occurred while decrypting the file.  Check stderr."
+        return 3
+    fi
+}

@@ -14,10 +14,10 @@ RSD_C_GPG_VERSION="0.0.2"
 function rsd::c::gpg::help() {
     echo -e "\n\tGPG Commanf Help:\n"
     echo -e "\t\tActions:"
-    echo -e "\t\t\tcheck   Checks the GPG Installation"
-    echo -e "\t\t\tinit    Initialize GPG"
-    echo -e "\t\t\tencrypt Encrypt a file"
-    echo -e "\t\t\tdecrypt Decrypt a file"
+    echo -e "\t\t\tcheck        Checks the GPG Installation"
+    echo -e "\t\t\tinit         Initialize GPG"
+    echo -e "\t\t\encrypt-file  Encrypts (and sign) a file"
+    echo -e "\t\t\decrypt-file  Decrypt a file"
 }
 
 function rsd::c::gpg::check() {
@@ -26,10 +26,76 @@ function rsd::c::gpg::check() {
         exit 3
     fi
 
-    echo "GPG is installed and ready for use."
+    rsd::l::gpg::get_keys "" _r_gpg_keys
+    if [[ -z $_r_gpg_keys ]]; then
+        rsd::warn "No GPG keys found. Please create one first with:"
+        exit 3
+    fi
+
+    echo "GPG Keys: "
+        bash::print::array_with_prefix _r_gpg_keys " - "
+
+    rsd::l::gpg::get_keys $RSD_GPG_USER_ID _r_gpg_keys
+    if [[ -z $_r_gpg_keys ]]; then
+        rsd::warn "There are some gpg keys installed, but none for RSD usage. Please create one first with:"
+        exit 3
+    fi
+
+    echo "GPG Keys for RSD:"
+    bash::print::array_with_prefix _r_gpg_keys " - "
+
+    rsd::l::gpg::show_key_capabilities "${_r_gpg_keys[0]}"
 }
 
 function rsd::c::gpg::init() {
     rsd::check_binaries_or_fail gpg
     echo "init..."
+}
+
+function rsd::c::gpg::create-key() {
+    rsd::check_binaries_or_fail gpg
+
+    rsd::warn "Generating a new GPG key for RSD usage."
+    rsd::warn "You will be prompt for a secure strong password from the gpg command."
+    rsd::warn "It will be created under the user id: $RSD_GPG_USER_ID."
+    rsd::warn "These process will be done in 2 parts:"
+    rsd::warn "1. Create the key with certifying capability."
+    rsd::warn "2. Create a sub key with encryption capability."
+    rsd::warn
+
+    rsd::l::gpg::get_keys $RSD_GPG_USER_ID _r_gpg_keys
+    if [[ -n "${_r_gpg_keys[0]}" ]]; then
+        rsd::warn "There is already a GPG key for RSD usage. Please remove it first."
+        exit 3
+    fi
+
+    gpg --quick-generate-key $RSD_GPG_USER_ID ed25519 cert,sign 0
+    rsd::l::gpg::get_keys $RSD_GPG_USER_ID _r_gpg_keys
+
+    rsd::warn Fingerprint: ${_r_gpg_keys[0]}
+    rsd::warn
+
+    if [[ -z "${_r_gpg_keys[0]}" ]]; then
+        rsd::warn "Failed to create the GPG key with the user id: '$RSD_GPG_USER_ID'."
+        rsd::warn "You will have to check and clean up (sorry) and then try again."
+        exit 3
+    fi
+    rsd::warn
+    rsd::warn "Creating now the sub key for encryption."
+    gpg --quick-add-key ${_r_gpg_keys[0]} cv25519 encr 0
+    return 0
+}
+
+function rsd::c::gpg::encrypt-file() {
+    rsd::arguments_or_usage 1 "$@"
+    local file="$1"
+    rsd::l::gpg::encrypt_file "$file"
+    return $?
+}
+
+function rsd::c::gpg::decrypt-file() {
+    rsd::arguments_or_usage 1 "$@"
+    local file="$1"
+    rsd::l::gpg::decrypt_file "$file"
+    return $?
 }

@@ -144,8 +144,11 @@ function rsd::generic_action() {
 	    rsd::debug2 30 "Checking for action $action_function"
 		if bash::is_function "$action_function"; then
 			rsd::debug "function for action $RSD_ACTION is $action_function" 8
-			$action_function "${RSD_COMMAND_ARGS[subargs]}"
-			exit 0
+			if $action_function "${RSD_ARGS_UNPROCESSED[@]}"; then
+                exit 0
+            else
+                exit 10
+            fi
 		fi
 	done
 
@@ -293,9 +296,12 @@ function rsd::source_lib() {
 
 # Same as rsd::source_lib, but aborts if the library is not found
 function rsd::source_lib_or_die() {
+    rsd::debug2 21 "Sourcing $1"
     if ! RSD_LIBRARY_LOAD=$(rsd::source_lib "$1"); then
-        $RSD_LIBRARY_LOAD
+        rsd::warn "Coulg not load library $1!"
         exit 5
+    else
+        echo $RSD_LIBRARY_LOAD
     fi
 }
 

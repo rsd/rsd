@@ -6,7 +6,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
     exit 12
 fi
 
-BASH_EXTENSIONS_VERSION='0.2.2'
+BASH_EXTENSIONS_VERSION='0.2.3'
 
 # functions to help bash as a language
 # prefixed with bash::
@@ -115,5 +115,16 @@ function bash::dump_array() {
     local key
     for key in "${!array_ref[@]}"; do
         printf "%s: %s\n" "$key" "${array_ref[$key]}" >&2
+    done
+}
+
+function bash::print::array_with_prefix() {
+    local array_name="$1"
+    local prefix="$2"
+
+    declare -n arr="$array_name"
+
+    for item in "${arr[@]}"; do
+        printf "%s%s\n" "$prefix" "$item"
     done
 }
