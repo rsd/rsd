@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 
-  if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
-      echo "This is a RSD library file. It should not be executed directly."
-      echo "Please call 'rsd' to use it."
-      exit 12
-  fi
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
 
-RSD_KPX_LIB=1
-RSD_KPX_LIB_VERSION="0.0.1"
 
-$(rsd::source_lib lib/gpg.lib)
+$(rsd::source_lib_or_die lib/kpx.lib)
 
+RSD_C_GPG_SHORT_DESC="KeePass Integration"
+RSD_C_GPG_VERSION="0.0.1"

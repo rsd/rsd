@@ -1,2 +1,35 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+RSD_KPX_LIB=1
+RSD_KPX_LIB_VERSION="0.0.1"
+
+# Using the `keepassxc-cli` to interact with the keepassxc database
+# Note that are other options for it like:
+# - keepass
+# - kpcli
+# The syntax may vary
+# Also it might be installed but not on the PATH.
+
+RSD_KPX_BIN="keepassxc-cli"
+
+$(rsd::source_lib lib/gpg.lib)
+
+# Checks for the availability of the keepassxc-cli command
+function rsd::l::kpx::check() {
+    rsd::arguments_or_usage 1 "$@"
+    local silent="$1"
+    if rsd::check_binary "$RSD_KPX_BIN"; then
+        return 0
+    fi
+    if ((! silent)); then
+        rsd::warn "$RSD_KPX_BIN is not installed or not in the PATH."
+        rsd::warn "Please install it and try again."
+        rsd::warn "Refer to the KPX.md for further instructions."
+    fi
+}
