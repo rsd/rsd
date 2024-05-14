@@ -286,6 +286,7 @@ function rsd::usage() {
             echo -e "\t$RSD [RSD OPTIONS] <command> "
 		fi
 	fi
+	echo
 }
 
 # Debug to STDOUT

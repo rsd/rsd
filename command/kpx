@@ -9,5 +9,22 @@ fi
 
 $(rsd::source_lib_or_die lib/kpx.lib)
 
-RSD_C_GPG_SHORT_DESC="KeePass Integration"
-RSD_C_GPG_VERSION="0.0.1"
+RSD_C_KPX_SHORT_DESC="KeePass Integration"
+RSD_C_KPX_VERSION="0.0.1"
+
+function rsd::c::kpx::check() {
+    rsd::l::kpx::check
+    if ((! $?)); then
+        echo "kpx command is ready for use."
+        return 0
+    fi
+    return $?
+}
+
+# TODO:
+# - [ ] check if vault exists
+# - [ ]  check if password exists
+# - [ ]  check if password is saved with gpg
+# - [ ]  open the vault
+# - [ ]  save a key in the vault
+# - [ ]  get a key from the vault

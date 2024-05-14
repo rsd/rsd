@@ -22,7 +22,6 @@ $(rsd::source_lib lib/gpg.lib)
 
 # Checks for the availability of the keepassxc-cli command
 function rsd::l::kpx::check() {
-    rsd::arguments_or_usage 1 "$@"
     local silent="$1"
     if rsd::check_binary "$RSD_KPX_BIN"; then
         return 0
@@ -32,4 +31,5 @@ function rsd::l::kpx::check() {
         rsd::warn "Please install it and try again."
         rsd::warn "Refer to the KPX.md for further instructions."
     fi
+    return 1
 }
