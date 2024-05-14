@@ -118,7 +118,7 @@ function bash::dump_array() {
     done
 }
 
-function bash::print::array_with_prefix() {
+function bash::print_array_with_prefix() {
     local array_name="$1"
     local prefix="$2"
 

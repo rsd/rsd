@@ -35,36 +35,79 @@ function rsd::l::gpg::get_keys() {
     arr=("${keys[@]}")
 }
 
+# Check Installation and Configuration of GPG within RSD
+# Arguments:
+#   $1: If set to 1, the function will not print any output.
+# Returns:
+#   0: If GPG is installed and configured correctly
+#   1: If GPG is not installed
+#   2: If no GPG keys are found
+#   3: If no GPG keys for RSD are found
+#   4: If the key is not capable of encryption
+function rsd::l::gpg::check() {
+    rsd::check_binaries_or_fail gpg
+    local silent=0
+    if [[ -n $1 && $1 -eq 1 ]]; then
+        silent=1
+    fi
+    declare -g -A _r_gpg_keys_cap
+
+    if ! rsd::check_binary gpg; then
+        ((silent)) || rsd::warn "GPG is not installed. Please install it first."
+        return 1
+    fi
+
+    rsd::l::gpg::get_keys "" _r_gpg_keys
+    if [[ -z $_r_gpg_keys ]]; then
+        ((silent)) || rsd::warn "No GPG keys found. Please create one first with:"
+        ((silent)) || rsd::warn "rsd gpg --create-key"
+        return 2
+    fi
+
+    rsd::l::gpg::get_keys $RSD_GPG_USER_ID _r_gpg_keys
+    if [[ -z $_r_gpg_keys ]]; then
+        ((silent)) || rsd::warn "There are some gpg keys installed, but none for RSD usage. Please create one first with:"
+        exit 3
+    fi
+
+    rsd::l::gpg::key_capabilities "${_r_gpg_keys[0]}" "_r_gpg_keys_cap"
+
+    if [[ "${_r_gpg_keys_cap[encrypt]}" == "1" ]];
+    then
+        return 0
+    else
+        ((silent)) || rsd::warn "Key is not capable of encryption. Please create a new key with encryption capabilities."
+        return 4
+    fi
+}
+
 # Takes one argument: the fingerprint of the GPG key
-function rsd::l::gpg::show_key_capabilities() {
-    rsd::arguments_or_usage 1 $@
+function rsd::l::gpg::key_capabilities() {
+    rsd::arguments_or_usage 2 $@
     rsd::check_binaries_or_fail gpg
 
-    local fingerprint=$1
+    local fingerprint="$1"
+    local cap_name="$2"
+    declare -n cap="$cap_name"
 
     # Fetching the key details
-    local key_details=$(gpg --list-options show-usage --with-colons --list-keys "$fingerprint")
     local key_details=$(gpg --with-colons --list-keys "$fingerprint")
+    local has_subkey=0
+    if [[ -n $(echo "$key_details" | grep '^sub') ]]; then
+        has_subkey=1
+    fi
 
-    echo $key_details
+    cap["encrypt"]=$(echo "$key_details" | grep '^pub' | cut -d: -f12 | grep -q 'e' && echo 1 || echo 0)
+    cap["sign"]=$(echo "$key_details" | grep '^pub' | cut -d: -f12 | grep -q 's' && echo 1 || echo 0)
+    cap["curve-name"]=$(echo "$key_details" | grep '^pub' | cut -d: -f17 | grep -q 's' && echo 1 || echo 0)
 
-    echo "Key Capabilities for $fingerprint:"
-    echo "---------------------------------"
-    echo "Capability : Is Capable"
-    echo "---------------------------------"
-    echo -e "Sign\t: $(echo "$key_details" | grep '^pub' | grep -o 'cC' && echo "Yes" || echo "No")"
-    echo -e "Encrypt\t: $(echo "$key_details" | grep '^pub' | grep -o 'eE' && echo "Yes" || echo "No")"
-    echo -e "Authenticate : $(echo "$key_details" | grep '^pub' | grep -o 'aA' && echo "Yes" || echo "No")"
-    echo -e "Certify\t: $(echo "$key_details" | grep '^pub' | grep -o 'sS' && echo "Yes" || echo "No")"
-    echo "---------------------------------"
-
-    echo "---------------------------------"
-    echo -e "Sign\t: $(echo "$key_details" | grep '^pub' | grep -o 'cC')"
-    echo -e "Encrypt\t: $(echo "$key_details" | grep '^pub' | grep -o 'eE')"
-    echo -e "Authenticate : $(echo "$key_details" | grep '^pub' | grep -o 'aA')"
-    echo -e "Certify\t: $(echo "$key_details" | grep '^pub' | grep -o 'sS')"
-    echo "---------------------------------"
-
+    if [[ $has_subkey -eq 1 ]]; then
+        cap["curve-name"]=$(echo "$key_details" | grep '^sub' | cut -d: -f17)
+         if [[ ${cap["encrypt"]} -eq 0 ]]; then
+            cap["encrypt"]=$(echo "$key_details" | grep '^sub' | cut -d: -f12 | grep -q 'e' && echo 1 || echo 0)
+        fi
+    fi
+    return 0
 }
 
 # Encrypts a file and replaces it with the encrypted version.
