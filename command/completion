@@ -9,7 +9,7 @@ fi
 # Companion utility for bash_completion script
 # or any completion
 
-RSD_COMMAND_COMPLETION_VERSION="0.1.1"
+RSD_COMMAND_COMPLETION_VERSION="0.1.2"
 
 
 # List all rsd options
@@ -69,11 +69,7 @@ function rsd::c::completion::check-command-option-has-value() {
 	local _rsd_source _option
 	local options="RSD_COMMAND_${command^^}_ARGS_PARAM"
 	
-	if [[ -z ${!options} ]]; then
-		declare -n _option=$options
-	else
-		exit 1
-	fi
+	declare -n _option=$options
 	
 	if ! _rsd_source=$(rsd::load_command_file $command); then
 		rsd::warn "Command $command not found"

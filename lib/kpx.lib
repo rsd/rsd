@@ -7,7 +7,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_KPX_LIB=1
-RSD_KPX_LIB_VERSION="0.0.1"
+RSD_KPX_LIB_VERSION="0.0.2"
 
 # Using the `keepassxc-cli` to interact with the keepassxc database
 # Note that are other options for it like:
@@ -18,7 +18,7 @@ RSD_KPX_LIB_VERSION="0.0.1"
 
 RSD_KPX_BIN="keepassxc-cli"
 
-$(rsd::source_lib lib/gpg.lib)
+[[ "$RSD_GPG_LIB" != "1" ]] && $(rsd::source_lib lib/gpg.lib)
 
 # Checks for the availability of the keepassxc-cli command
 function rsd::l::kpx::check() {

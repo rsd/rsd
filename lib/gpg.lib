@@ -7,9 +7,9 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_GPG_LIB=1
-RSD_GPG_LIB_VERSION="0.0.2"
+RSD_GPG_LIB_VERSION="0.0.4"
 
-$(rsd::source_lib lib/net.lib)
+[[ "$RSD_NET_LIB" != "1" ]] && $(rsd::source_lib lib/net.lib)
 
 # FIXME: This should come from a config file
 RSD_GPG_USER_ID="rsd@$(rsd::l::net::hostname)"
@@ -19,7 +19,7 @@ RSD_GPG_USER_ID="rsd@$(rsd::l::net::hostname)"
 #   "yes": GPG is ready to be used
 #   "no": GPG is not ready to be used
 #   "unknown": GPG status is unknown
-RSD_GPG_READY="unkown"
+RSD_GPG_READY="unknown"
 
 # Reference for gpg fields: https://github.com/gpg/gnupg/blob/master/doc/DETAILS
 
@@ -115,7 +115,7 @@ function rsd::l::gpg::key_capabilities() {
 
     cap["encrypt"]=$(echo "$key_details" | grep '^pub' | cut -d: -f12 | grep -q 'e' && echo 1 || echo 0)
     cap["sign"]=$(echo "$key_details" | grep '^pub' | cut -d: -f12 | grep -q 's' && echo 1 || echo 0)
-    cap["curve-name"]=$(echo "$key_details" | grep '^pub' | cut -d: -f17 | grep -q 's' && echo 1 || echo 0)
+    cap["curve-name"]=$(echo "$key_details" | grep '^pub' | cut -d: -f17)
 
     if [[ $has_subkey -eq 1 ]]; then
         cap["curve-name"]=$(echo "$key_details" | grep '^sub' | cut -d: -f17)
@@ -173,6 +173,10 @@ function rsd::l::gpg::decrypt_file() {
     rsd::check_binaries_or_fail gpg rm
 
     local file="$1"
+    if [[ "$file" != *.gpg ]]; then
+        rsd::warn "File '$file' must end with .gpg for decryption."
+        return 2
+    fi
     local decrypted_file="${file%.gpg}"
 
     if [[ -e "$decrypted_file" ]]; then
@@ -195,6 +199,6 @@ function rsd::l::gpg::decrypt_file() {
 }
 
 #force checking on startup
-if [[ "$RSD_GPG_READY" == "unkown" ]]; then
+if [[ "$RSD_GPG_READY" == "unknown" ]]; then
     rsd::l::gpg::check 1
 fi

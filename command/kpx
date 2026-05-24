@@ -7,10 +7,10 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 
-$(rsd::source_lib_or_die lib/kpx.lib)
+[[ "$RSD_KPX_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/kpx.lib)
 
 RSD_C_KPX_SHORT_DESC="KeePass Integration"
-RSD_C_KPX_VERSION="0.0.1"
+RSD_C_KPX_VERSION="0.0.2"
 
 function rsd::c::kpx::check() {
     rsd::l::kpx::check

@@ -6,18 +6,18 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
     exit 12
 fi
 
-$(rsd::source_lib_or_die lib/gpg.lib)
+[[ "$RSD_GPG_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/gpg.lib)
 
 RSD_C_GPG_SHORT_DESC="GPG Integration"
-RSD_C_GPG_VERSION="0.0.2"
+RSD_C_GPG_VERSION="0.0.4"
 
 function rsd::c::gpg::help() {
     echo -e "\n\tGPG Commanf Help:\n"
     echo -e "\t\tActions:"
     echo -e "\t\t\tcheck        Checks the GPG Installation"
     echo -e "\t\t\tinit         Initialize GPG"
-    echo -e "\t\t\encrypt-file  Encrypts (and sign) a file"
-    echo -e "\t\t\decrypt-file  Decrypt a file"
+    echo -e "\t\t\tencrypt-file  Encrypts (and sign) a file"
+    echo -e "\t\t\tdecrypt-file  Decrypt a file"
 }
 
 function rsd::c::gpg::check() {
