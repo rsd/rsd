@@ -17,7 +17,7 @@ fi
 #        command line parsing should have precedence.
 # FIXME: Some searchpaths end up duplicates.  It is not a real problem, but should be sanitized too.
 
-RSD_CONFIGLIB_VERSION='0.3.0'
+RSD_CONFIGLIB_VERSION='0.3.1'
 
 declare -ga RSD_CONFIGLIB_SEARCH_PATH
 RSD_CONFIGDIR=()
@@ -176,7 +176,7 @@ function rsd::config::write_ini() {
                 printf "[%s]\n" "$section" >> "$file"
                 previous_section="$section"
         fi
-        printf "%s = %s\n" "$actual_key" "${config[$section.$key]}" >> "$file"
+        printf "%s = %s\n" "$actual_key" "${config[$key]}" >> "$file"
     done
 }
 

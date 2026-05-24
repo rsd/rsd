@@ -7,7 +7,7 @@
   fi
 
 RSD_NET_LIB=1
-RSD_NET_LIB_VERSION="0.0.1"
+RSD_NET_LIB_VERSION="0.0.2"
 
 # Get the hostname of the machine
 # Fallsback to hostname if necessary
@@ -47,14 +47,14 @@ function rsd::l::net::hostname() {
             return 0
         fi
     fi
-    if  rsd::check_binaries dig awk; then
+    if  rsd::check_binaries dig awk hostname; then
         hostname=$(dig -x $(hostname -I | awk '{print $1}') +short)
         if [[ -n $hostname ]]; then
             echo $hostname
             return 0
         fi
     fi
-    if  rsd::check_binaries nslookup; then
+    if  rsd::check_binaries nslookup hostname; then
         local ip=$(hostname -I | awk '{print $1}')
         hostname=$(nslookup $ip | grep 'name =' | awk '{print $4}')
         if [[ -n $hostname ]]; then
