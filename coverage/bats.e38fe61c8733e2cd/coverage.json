@@ -1,0 +1,22 @@
+{
+  "files": [
+    {"file": "/home/raul/Devel/rsd/command/test", "percent_covered": "52.94", "covered_lines": "9", "total_lines": "17"},
+    {"file": "/home/raul/Devel/rsd/command/kpx", "percent_covered": "33.33", "covered_lines": "4", "total_lines": "12"},
+    {"file": "/home/raul/Devel/rsd/command/completion", "percent_covered": "4.76", "covered_lines": "2", "total_lines": "42"},
+    {"file": "/home/raul/Devel/rsd/lib/gpg.lib", "percent_covered": "72.16", "covered_lines": "70", "total_lines": "97"},
+    {"file": "/home/raul/Devel/rsd/command/gpg", "percent_covered": "23.53", "covered_lines": "12", "total_lines": "51"},
+    {"file": "/home/raul/Devel/rsd/lib/config.lib", "percent_covered": "39.29", "covered_lines": "33", "total_lines": "84"},
+    {"file": "/home/raul/Devel/rsd/lib/bash_extensions.lib", "percent_covered": "21.15", "covered_lines": "11", "total_lines": "52"},
+    {"file": "/home/raul/Devel/rsd/lib/kpx.lib", "percent_covered": "31.25", "covered_lines": "5", "total_lines": "16"},
+    {"file": "/home/raul/Devel/rsd/lib/net.lib", "percent_covered": "11.67", "covered_lines": "7", "total_lines": "60"},
+    {"file": "/home/raul/Devel/rsd/lib/rsd.lib", "percent_covered": "55.56", "covered_lines": "120", "total_lines": "216"},
+    {"file": "/home/raul/Devel/rsd/rsd", "percent_covered": "49.88", "covered_lines": "207", "total_lines": "415"}
+  ],
+  "percent_covered": "45.20",
+  "covered_lines": 480,
+  "total_lines": 1062,
+  "percent_low": 25,
+  "percent_high": 75,
+  "command": "bats",
+  "date": "2026-05-24 18:42:18"
+}

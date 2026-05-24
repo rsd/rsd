@@ -18,7 +18,9 @@ setup() {
 }
 
 @test "rsd test command executes correctly" {
-    run "$RSD_BIN" test test arg1 arg2
+    # rsd::c::test::test acts as the top-level command function,
+    # so we call "rsd test arg1 arg2" directly.
+    run "$RSD_BIN" test arg1 arg2
     
     [ "$status" -eq 0 ]
     [[ "$output" == *"Teste: arg1 arg2"* ]]
