@@ -14,3 +14,7 @@ data/installer-base
 data/rsd
 data/rsd-bashrc
 data/web/
+
+# Test coverage reports
+coverage/
+
