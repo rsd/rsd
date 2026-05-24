@@ -79,7 +79,38 @@ The `rsd` executable is responsible for orchestrating the following nine distinc
 
 ---
 
-## 3. Directory and File Boundaries
+## 3. Code Conventions, Scoping, and Idempotency Protections
+
+To guarantee runtime stability, avoid symbol collisions, and minimize sourcing overhead, RSD enforces strict defensive programming guidelines for libraries and command modules.
+
+### 3.1 Framework Presence Protection (Re-execution Guard)
+Every library file (`lib/*.lib`) must enforce strict bootstrap validation at its very first lines of code to prevent accidental direct shell execution:
+```bash
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+```
+This re-execution guard guarantees that library files cannot be run as standalone binaries (e.g., `bash lib/gpg.lib`) in an un-sandboxed global scope. Sourcing is blocked unless the parent `rsd` framework entry point has properly initialized the environment.
+
+### 3.2 Double-Sourcing Prevention (Idempotency Guards)
+To minimize CPU overhead and prevent function re-definition issues, all subsystem libraries set a global loaded flag (e.g., `RSD_LIB=1`, `RSD_NET_LIB=1`, `RSD_GPG_LIB=1`) upon successful sourcing.
+Command files and other libraries utilize **short-circuit guard evaluations** before sourcing files:
+```bash
+[[ "$RSD_SUDO_LIB" != "1" ]] && source "$RSD_BASE/lib/sudo.lib"
+```
+This keeps sourcing fully idempotent, preventing redundant filesystem read operations and ensuring static variables are not cleared or re-assigned.
+
+### 3.3 Dynamic Namespace Scoping Conventions
+RSD relies strictly on namespace separation using specific identifiers (`::c::` and `::l::`) to avoid namespace contamination inside the caller process:
+* **Subsystem Libraries (`::l::`)**: All library functions are prefixed using the `rsd::l::<library_name>::` convention (e.g. `rsd::l::gpg::get_keys`, `rsd::l::kpx::check`). The `::l::` designation uniquely identifies shared, low-level modules.
+* **Command Modules (`::c::`)**: Sourced sub-commands and actions are prefixed using the `rsd::c::<command_name>::` convention (e.g. `rsd::c::gpg::check`, `rsd::c::gpg::init`). The `::c::` designation maps directly to command actions executed via CLI.
+* **Global Variables**: Global variables driving the shell wrapper are named in uppercase with an `RSD_` prefix (e.g. `RSD_DEBUG`, `RSD_VERSION`). Scoped configurations fetched from `.ini` maps are strictly confined under `R::INI::<command>` namespaces.
+
+---
+
+## 4. Directory and File Boundaries
 
 RSD maintains a strict distinction between shared libraries, dynamic commands, and configurations:
 
@@ -91,7 +122,7 @@ RSD maintains a strict distinction between shared libraries, dynamic commands, a
 
 ---
 
-## 4. Standard Lifecycle of an RSD Call
+## 5. Standard Lifecycle of an RSD Call
 
 The following sequence details how RSD routes and executes an action:
 
