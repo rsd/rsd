@@ -17,7 +17,7 @@ fi
 #        command line parsing should have precedence.
 # FIXME: Some searchpaths end up duplicates.  It is not a real problem, but should be sanitized too.
 
-RSD_CONFIGLIB_VERSION='0.2.3'
+RSD_CONFIGLIB_VERSION='0.3.0'
 
 declare -ga RSD_CONFIGLIB_SEARCH_PATH
 RSD_CONFIGDIR=()
@@ -28,14 +28,14 @@ RSD_CONFIGDIR_temp=()
 # The same file can be loaded multiple times.
 # The config is a bash script anyways
 # TODO: Migrate to ini and merge multiple inis
-RSD_CONFIGLIB_SEARCH_PATH="$HOME/.rsd/ $HOME/.config/rsd/ /etc/rsd/ /usr/local/etc/rsd/ $RSD_LIBRARY_SEARCH_PATH"
+RSD_CONFIGLIB_SEARCH_PATH=("$HOME/.rsd/" "$HOME/.config/rsd/" "/etc/rsd/" "/usr/local/etc/rsd/" "${RSD_LIBRARY_SEARCH_PATH[@]}")
 function rsd::config::get_file() {
     declare -ga RSD_CONFIGLIB_SEARCH_PATH
 	local command=${1:-rsd}
 	local found=1
     local key
     local configdir
-    local keys=("config-dir" "config" "c")
+    local keys=(".")
 
     # 1 - Read from command line parameters
     for key in "${keys[@]}"; do

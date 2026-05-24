@@ -10,7 +10,7 @@ fi
 
 # _prefix rsd::
 
-RSD_RSDLIB_VERSION='0.2.1'
+RSD_RSDLIB_VERSION='0.3.0'
 
 # used globals
 RSD_LIBRARY_LOAD=
@@ -466,7 +466,7 @@ function rsd::get_libdir_file() {
 		fi
 	fi
 
-	for libdir in $RSD_LIBRARY_SEARCH_PATH; do
+	for libdir in "${RSD_LIBRARY_SEARCH_PATH[@]}"; do
 		if [[ -e "$libdir/$file" ]]; then
 			if ((print)); then
 				echo "$libdir/$file"
@@ -483,7 +483,7 @@ function rsd::get_all_libdir_file() {
 	local file=$1
 	local libdir
 
-	for libdir in $RSD_LIBRARY_SEARCH_PATH; do
+	for libdir in "${RSD_LIBRARY_SEARCH_PATH[@]}"; do
 		if [[ -e "$libdir/$file" ]]; then
 			echo "$libdir/$file"
 		fi
