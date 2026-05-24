@@ -9,7 +9,7 @@ fi
 # Companion utility for bash_completion script
 # or any completion
 
-RSD_COMMAND_COMPLETION_VERSION="0.1.2"
+RSD_COMMAND_COMPLETION_VERSION="0.1.3"
 
 
 # List all rsd options
@@ -32,7 +32,7 @@ function rsd::c::completion::list-command-options() {
 		exit 10
 	fi
 	
-	eval $_rsd_source
+	source "$_rsd_source"
 	
 	rsd::list_command_options $command
 }
@@ -47,7 +47,7 @@ function rsd::c::completion::list-command-actions() {
 		exit 10
 	fi
 	
-	eval $_rsd_source
+	source "$_rsd_source"
 	
 	rsd::list_all_actions_bare 0 $command
 }
@@ -75,7 +75,7 @@ function rsd::c::completion::check-command-option-has-value() {
 		rsd::warn "Command $command not found"
 		exit 10
 	fi	
-	eval $_rsd_source
+	source "$_rsd_source"
 	
 	if [[ "${_option[$option]}" == "1" ]]; then
 		exit 0
