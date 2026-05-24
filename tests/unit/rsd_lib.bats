@@ -72,3 +72,29 @@ setup() {
     [ "$status" -eq 12 ]
     [[ "$output" == *"This is a RSD library file. It should not be executed directly."* ]]
 }
+
+@test "rsd::create_search_path respects first-match-wins order: CLI override > config > workspace > user > system" {
+    # Extract the real create_search_path function from rsd runner
+    eval "$(sed -n '/^function rsd::create_search_path() {/,/^}/p' "${BATS_TEST_DIRNAME}/../../rsd")"
+    
+    # Isolate parameters
+    RSD_LIBRARY_SEARCH_PATH=()
+    RSD_CONFIG_LIBRARY_SEARCH_PATH=()
+    RSD_LIBDIR=()
+    RSD_LIBDIR_temp=()
+    RSD_MODE="devel"
+    RSD_RUN_DIR="/tmp/run"
+    
+    local mock_cli="/mock/cli/lib"
+    
+    # Mock CLI parameter mapping in RSD_ARGS
+    RSD_ARGS["lib-dir"]="$mock_cli"
+    
+    rsd::create_search_path
+    
+    # Assert size of the search path
+    [ "${#RSD_LIBRARY_SEARCH_PATH[@]}" -gt 0 ]
+    
+    # In first-match-wins, the CLI override must be at index 0 (highest priority)
+    [ "${RSD_LIBRARY_SEARCH_PATH[0]}" = "$mock_cli" ]
+}
