@@ -53,6 +53,26 @@ Note that any --option passed after the command will be passed to the command it
 	    In completion mode, no command or action is actually executed.
 	    No command file should exec in global space.
 
+## Testing
+
+RSD features unit, integration, and sandboxed E2E test suites. Testing requires **Bats-core** (test runner) and **Kcov** (coverage analysis).
+
+For full details on setup, coverage generation, and GPG keyring sandboxing, see the [RSD Test Execution & Integration Guide](docs/testing_guide.md).
+
+### Quick Start:
+
+#### For Native/Local Users (Arch Linux Setup)
+```bash
+sudo pacman -S bats kcov
+bats tests/
+```
+
+#### For Docker/Standard Users (Containerized Setup)
+```bash
+docker build -t rsd-test-runner -f Dockerfile.test .
+docker run --rm -v "$(pwd):/workspace" -w /workspace rsd-test-runner bats tests/
+```
+
 ## Contributing
 
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
