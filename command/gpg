@@ -9,7 +9,7 @@ fi
 [[ "$RSD_GPG_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/gpg.lib)
 
 RSD_C_GPG_SHORT_DESC="GPG Integration"
-RSD_C_GPG_VERSION="0.0.4"
+RSD_C_GPG_VERSION="0.1.0"
 
 function rsd::c::gpg::help() {
     echo -e "\n\tGPG Commanf Help:\n"

@@ -7,7 +7,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_GPG_LIB=1
-RSD_GPG_LIB_VERSION="0.0.4"
+RSD_GPG_LIB_VERSION="0.1.0"
 
 [[ "$RSD_NET_LIB" != "1" ]] && $(rsd::source_lib lib/net.lib)
 
@@ -198,7 +198,18 @@ function rsd::l::gpg::decrypt_file() {
     fi
 }
 
-#force checking on startup
-if [[ "$RSD_GPG_READY" == "unknown" ]]; then
-    rsd::l::gpg::check 1
-fi
+# Check if gpg-agent is active and responsive, attempting recovery auto-launch if unresponsive.
+# Returns:
+#   0: Agent is healthy
+#   3: Environment failure / unresponsive
+function rsd::l::gpg::validate_agent_or_fail() {
+    rsd::check_binaries_or_fail gpg-connect-agent gpgconf
+
+    if ! gpg-connect-agent /bye &>/dev/null; then
+        if ! gpgconf --launch gpg-agent &>/dev/null; then
+            rsd::warn "Critical: gpg-agent daemon is unresponsive or failed to launch."
+            return 3
+        fi
+    fi
+    return 0
+}

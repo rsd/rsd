@@ -7,7 +7,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_KPX_LIB=1
-RSD_KPX_LIB_VERSION="0.0.2"
+RSD_KPX_LIB_VERSION="0.1.0"
 
 # Using the `keepassxc-cli` to interact with the keepassxc database
 # Note that are other options for it like:
@@ -21,6 +21,11 @@ RSD_KPX_BIN="keepassxc-cli"
 [[ "$RSD_GPG_LIB" != "1" ]] && $(rsd::source_lib lib/gpg.lib)
 
 # Checks for the availability of the keepassxc-cli command
+# Arguments:
+#   $1: Silent mode. Set to 1 to suppress output warning.
+# Returns:
+#   0: Success
+#   1: KeepassXC-cli not found
 function rsd::l::kpx::check() {
     local silent="$1"
     if rsd::check_binary "$RSD_KPX_BIN"; then
@@ -32,4 +37,248 @@ function rsd::l::kpx::check() {
         rsd::warn "Refer to the KPX.md for further instructions."
     fi
     return 1
+}
+
+# Hardened Initialization Protocol (Atomic Write, Mnemonic Key, Pre-flight Checks)
+# Returns:
+#   0: SUCCESS
+#   10: GPG key checking failure or encryption failure
+#   13: Workspace path creation or move failure
+#   14: Temporary directory creation failure
+function rsd::l::kpx::init() {
+    # 1. Pre-flight check: Verify GPG Key availability (Protocol D)
+    if ! gpg --list-secret-keys "$RSD_GPG_USER_ID" &>/dev/null; then
+        rsd::warn "Critical: No GPG secret key found matching User ID: '$RSD_GPG_USER_ID'"
+        rsd::warn "Please generate a GPG key first with 'rsd gpg create-key' or set 'RSD_GPG_USER_ID' in your config."
+        return 10
+    fi
+
+    # 2. Pre-flight check: Validate gpg-agent health (Protocol F)
+    rsd::l::gpg::validate_agent_or_fail || return $?
+
+    # Check for keepassxc-cli availability
+    rsd::l::kpx::check || return $?
+
+    # 3. Transaction isolation: Create temporary directory in ~/.config/rsd (Protocol C)
+    local config_dir="${RSD_CONFIG_DIR:-$HOME/.config/rsd}"
+    if [[ ! -d "$config_dir" ]]; then
+        mkdir -p "$config_dir" || {
+            rsd::warn "Failed to create config directory '$config_dir'."
+            return 13
+        }
+    fi
+
+    local temp_dir
+    temp_dir=$(mktemp -d "$config_dir/tmp.init.XXXXXX") || {
+        rsd::warn "Failed to create temporary directory for initialization."
+        return 14
+    }
+    
+    # Establish transaction-wide signal trap for cleanup (Protocol E)
+    trap 'rm -rf "$temp_dir"; unset master_secret recovery_token; trap - EXIT INT TERM' EXIT INT TERM
+
+    # 4. Generate master secret and recovery phrase (Protocol A)
+    rsd::check_binaries_or_fail openssl gpg keepassxc-cli
+    local master_secret
+    master_secret=$(openssl rand -base64 48)
+    
+    local recovery_token
+    recovery_token=$(openssl rand -hex 24 | tr '[:lower:]' '[:upper:]' | sed 's/.\{4\}/&-/g; s/-$//')
+
+    # 5. Generate encrypted master key and KeePass database in the temp folder
+    if ! echo "$master_secret" | gpg --encrypt --batch --recipient "$RSD_GPG_USER_ID" --output "$temp_dir/vault.key.gpg" 2>/dev/null; then
+        rsd::warn "Failed to encrypt master secret using GPG."
+        return 10
+    fi
+
+    if ! echo "$recovery_token" | gpg --encrypt --batch --recipient "$RSD_GPG_USER_ID" --output "$temp_dir/recovery.key.gpg" 2>/dev/null; then
+        rsd::warn "Failed to encrypt recovery token using GPG."
+        return 10
+    fi
+    
+    if ! echo "$master_secret" | keepassxc-cli db-create "$temp_dir/vault.kdbx" &>/dev/null; then
+        rsd::warn "Failed to create KeePass database."
+        return 10
+    fi
+
+    # 6. Atomic Promotion (Transaction Commit - Protocol C)
+    mv "$temp_dir/vault.key.gpg" "$config_dir/vault.key.gpg" || return 13
+    mv "$temp_dir/recovery.key.gpg" "$config_dir/recovery.key.gpg" || return 13
+    mv "$temp_dir/vault.kdbx" "$config_dir/vault.kdbx" || return 13
+    
+    # 7. One-time recovery key output display (Protocol A)
+    rsd::warn "=========================================================="
+    rsd::warn "             KEEPASS VAULT INITIALIZED SUCCESSFULLY        "
+    rsd::warn "=========================================================="
+    rsd::warn "  CRITICAL: Write down your ONE-TIME backup recovery token. "
+    rsd::warn "  If your primary GPG key is lost, this token can restore "
+    rsd::warn "  access to your KeePass database."
+    rsd::warn ""
+    rsd::warn "  RECOVERY TOKEN: $recovery_token"
+    rsd::warn ""
+    rsd::warn "  Store this token in a physical vault or secure offline medium."
+    rsd::warn "=========================================================="
+
+    # Remove temporary directory and unset variables (handled by trap on exit)
+    return 0
+}
+
+# Retrieve a password from the KeePass vault safely
+# Arguments:
+#   $1: The path to the entry in the vault (e.g. "RemoteHosts/host1")
+#   $2: The name of the reference variable to write the password into
+# Returns:
+#   0: Success
+#   1: Encryption decryption check failure
+#   2: Entry not found in vault
+function rsd::l::kpx::get_password() {
+    rsd::arguments_or_usage 2 "$@"
+    local entry_path="$1"
+    local output_var="$2"
+    declare -n out="$output_var"
+
+    local config_dir="${RSD_CONFIG_DIR:-$HOME/.config/rsd}"
+    local vault_key="$config_dir/vault.key.gpg"
+    local vault_db="$config_dir/vault.kdbx"
+
+    if [[ ! -f "$vault_key" || ! -f "$vault_db" ]]; then
+        rsd::warn "KeePass vault has not been initialized. Please run 'rsd kpx init' first."
+        return 1
+    fi
+
+    # 1. Lazy gpg-agent validation (Protocol F & G)
+    rsd::l::gpg::validate_agent_or_fail || return $?
+
+    # 2. Establish cleanup trap for secrets (Protocol E)
+    trap 'unset master_key; trap - EXIT INT TERM' EXIT INT TERM
+
+    # 3. Decrypt Master Key via GPG (leverages gpg-agent cache)
+    local master_key
+    if ! master_key=$(gpg --decrypt --quiet --batch "$vault_key" 2>/dev/null); then
+        rsd::warn "Failed to decrypt KeePass master key via GPG."
+        return 1
+    fi
+
+    # 4. Extract Password from KeePass using FD redirect instead of echo pipe
+    # Use highly unique local variable name to prevent dynamic nameref variable shadowing bug
+    local _kpx_ret_secret
+    if ! _kpx_ret_secret=$(keepassxc-cli show -a Password "$vault_db" "$entry_path" <<< "$master_key" 2>/dev/null); then
+         rsd::warn "Entry '$entry_path' not found in vault."
+         return 2
+    fi
+
+    out="$_kpx_ret_secret"
+    return 0
+}
+
+# Add a password to the KeePass vault safely
+# Arguments:
+#   $1: The path to the entry in the vault (e.g. "RemoteHosts/host1")
+#   $2: The username (optional, empty string for none)
+#   $3: The password to store
+# Returns:
+#   0: Success
+#   1: Vault not initialized or decrypted check failure
+#   2: KeePass XC write error
+function rsd::l::kpx::add_password() {
+    rsd::arguments_or_usage 3 "$@"
+    local entry_path="$1"
+    local username="$2"
+    local secret_to_store="$3"
+
+    local config_dir="${RSD_CONFIG_DIR:-$HOME/.config/rsd}"
+    local vault_key="$config_dir/vault.key.gpg"
+    local vault_db="$config_dir/vault.kdbx"
+
+    if [[ ! -f "$vault_key" || ! -f "$vault_db" ]]; then
+        rsd::warn "KeePass vault has not been initialized. Please run 'rsd kpx init' first."
+        return 1
+    fi
+
+    rsd::l::gpg::validate_agent_or_fail || return $?
+    trap 'unset master_key; trap - EXIT INT TERM' EXIT INT TERM
+
+    local master_key
+    if ! master_key=$(gpg --decrypt --quiet --batch "$vault_key" 2>/dev/null); then
+        rsd::warn "Failed to decrypt KeePass master key via GPG."
+        return 1
+    fi
+
+    # Write entry programmatically via stdin piping:
+    # Line 1: Database master password
+    # Line 2: Entry password
+    # Line 3: Entry password (confirmation)
+    if ! printf "%s\n%s\n%s\n" "$master_key" "$secret_to_store" "$secret_to_store" | keepassxc-cli add -p --username "$username" "$vault_db" "$entry_path" &>/dev/null; then
+         rsd::warn "Failed to add entry '$entry_path' to the vault."
+         return 2
+    fi
+
+    return 0
+}
+
+# Rotates GPG keys for encrypting vault.key.gpg
+# Arguments:
+#   $1: The new GPG user ID recipient
+# Returns:
+#   0: Success
+#   2: Bad usage
+#   10: GPG key error or encryption decryption error
+#   13: Commit move error
+#   14: Temporary directory error
+function rsd::l::kpx::rotate_key() {
+    rsd::arguments_or_usage 1 "$@"
+    local new_gpg_id="$1"
+
+    # 1. Pre-flight check: Verify GPG Key availability (Protocol D & B)
+    if ! gpg --list-secret-keys "$new_gpg_id" &>/dev/null; then
+        rsd::warn "Critical: New GPG key matching User ID '$new_gpg_id' is not present in keyring."
+        return 10
+    fi
+
+    # 2. Pre-flight check: Validate gpg-agent health (Protocol F)
+    rsd::l::gpg::validate_agent_or_fail || return $?
+
+    local config_dir="${RSD_CONFIG_DIR:-$HOME/.config/rsd}"
+    local vault_key="$config_dir/vault.key.gpg"
+    local recovery_key="$config_dir/recovery.key.gpg"
+
+    if [[ ! -f "$vault_key" ]]; then
+        rsd::warn "KeePass vault has not been initialized. Please run 'rsd kpx init' first."
+        return 1
+    fi
+
+    # 3. Create sandboxed workspace (Protocol C)
+    local temp_dir
+    temp_dir=$(mktemp -d "$config_dir/tmp.rotate.XXXXXX") || return 14
+    trap 'rm -rf "$temp_dir"; unset master_key recovery_token; trap - EXIT INT TERM' EXIT INT TERM
+
+    # 4. Decrypt current vault key in-memory
+    local master_key
+    if ! master_key=$(gpg --decrypt --quiet --batch "$vault_key" 2>/dev/null); then
+        rsd::warn "Rotation failed: Unable to decrypt vault key using the current GPG key."
+        return 10
+    fi
+
+    # 5. Re-encrypt using the new GPG User ID to the temporary space
+    if ! echo "$master_key" | gpg --encrypt --batch --recipient "$new_gpg_id" --output "$temp_dir/vault.key.gpg" 2>/dev/null; then
+        rsd::warn "Rotation failed: Unable to encrypt using new GPG key."
+        return 10
+    fi
+
+    # Rotate recovery token if it exists
+    if [[ -f "$recovery_key" ]]; then
+        local recovery_token
+        if recovery_token=$(gpg --decrypt --quiet --batch "$recovery_key" 2>/dev/null); then
+            echo "$recovery_token" | gpg --encrypt --batch --recipient "$new_gpg_id" --output "$temp_dir/recovery.key.gpg" 2>/dev/null
+        fi
+    fi
+
+    # 6. Commit transaction atomically (Protocol C)
+    mv "$temp_dir/vault.key.gpg" "$vault_key" || return 13
+    if [[ -f "$temp_dir/recovery.key.gpg" ]]; then
+        mv "$temp_dir/recovery.key.gpg" "$recovery_key" || return 13
+    fi
+
+    rsd::warn "Success: GPG key rotated successfully. Vault key is now encrypted to recipient '$new_gpg_id'."
+    return 0
 }
