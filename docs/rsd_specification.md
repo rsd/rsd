@@ -161,3 +161,28 @@ The following sequence details how RSD routes and executes an action:
  │  6. Execute  │ ──► Invokes target function; exits with status or passes to shell
  └──────────────┘
 ```
+
+---
+
+## 6. Exit Code & Diagnostics Specification
+
+RSD implements a highly structured, defensive diagnostics model mapping exit codes directly to the failure boundaries of the engine, libraries, and installers:
+
+| Exit Code | Classification | Trigger Condition |
+| :---: | :--- | :--- |
+| **`0`** | SUCCESS | Complete successful execution of standard wrapper routes or sub-command actions. |
+| **`1`** | Requirement Gatekeeper Failure | Host system processor fails to meet minimum dependency requirements (e.g. `BASH < 4.3`). |
+| **`2`** | Bad Usage | Invalid CLI parameters passed or missing mandatory sub-commands in action group routing. |
+| **`3`** | Program Not Found | Defensive binary validation fails (`rsd::check_binaries_or_fail`) because a system utility (like `gpg` or `mktemp`) is missing in `$PATH`. |
+| **`4`** | Upstream Version Mismatch | Upstream repository checks detect a newer release version in the remote Git origin. |
+| **`5`** | Missing Core Libraries | Critical framework components (like `lib/rsd.lib` or `lib/bash_extensions.lib`) cannot be resolved or sourced. |
+| **`6`** | Missing System Files | Framework defaults, templates, or expected configurations are missing, indicating incomplete installation. |
+| **`7`** | Parameter Mismatch | Unrecognized option values or system-level configuration value collision. |
+| **`9`** | Missing CLI Argument | CLI option expecting an argument (e.g. `--debug` with registry value `1`) is passed without a subsequent parameter. |
+| **`10`** | Sub-Command Failure | Sourced action function returns failure status or runs into an unhandled module exception. |
+| **`11`** | Internal Engine Failure | The wrapper hits an unreachable execution block or experiences a recursive parsing exception. |
+| **`12`** | Library Direct Execution Block | Re-execution guard triggers because a static library file (`lib/*.lib`) was executed directly outside of the parent runner. |
+| **`13`** | Install Permission Denied | Installer fails due to insufficient permissions to write in target PATH (even after attempting `sudo` escalations). |
+| **`14`** | Install Temp Dir Failure | Installer fails to provision a secure temporary directory (`mktemp -d`) for repository packaging. |
+| **`15`** | Git Clone Failure | Installer fails to download the remote repository source branch. |
+| **`16`** | Distro Tree Unsupported | User attempts to install in restricted system binary directories (such as `/usr`) instead of `/usr/local` or `$HOME`. |
