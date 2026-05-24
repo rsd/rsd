@@ -38,7 +38,9 @@ The `rsd` executable is responsible for orchestrating the following nine distinc
 
 ### 2.1 Dynamic Command & Sub-command Routing
 * **Lazy Sourcing**: Dynamically matches, resolves, and loads only the specific command module matching the CLI call.
-* **Namespace Resolution**: Dispatches parameters to sub-command (action) functions matching the `rsd::c::<command>::<action>` namespace.
+* **Dual Execution Routes**: RSD supports two distinct routing flows depending on the internal function layout of the sourced command module:
+  - **Top-Level Execution (Sub-command NOT mandatory)**: RSD first searches for a generic command function matching `rsd::c::<command>::<command>`, `rsd::c::<command>::command`, `rsd::c::<command>`, `rsd::<command>`, or `main`. If any are defined, the wrapper executes the function directly with unprocessed arguments and terminates—avoiding sub-command requirements entirely.
+  - **Action Group Routing (Sub-command IS mandatory)**: If no top-level function is found, the engine treats the command file as a grouping module. The first subsequent argument is parsed as the action (sub-command). RSD validates and dispatches execution to `rsd::c::<command>::<action>`. If no action argument is supplied, execution halts, displaying `rsd::usage` with exit code `2`.
 
 ### 2.2 System & Command Argument Parsing
 * **Global Options**: Parses wrapper-specific configurations (e.g., `--debug`, `--lib-dir`, `--config-dir`, `--no-local`).
@@ -107,6 +109,14 @@ RSD relies strictly on namespace separation using specific identifiers (`::c::` 
 * **Subsystem Libraries (`::l::`)**: All library functions are prefixed using the `rsd::l::<library_name>::` convention (e.g. `rsd::l::gpg::get_keys`, `rsd::l::kpx::check`). The `::l::` designation uniquely identifies shared, low-level modules.
 * **Command Modules (`::c::`)**: Sourced sub-commands and actions are prefixed using the `rsd::c::<command_name>::` convention (e.g. `rsd::c::gpg::check`, `rsd::c::gpg::init`). The `::c::` designation maps directly to command actions executed via CLI.
 * **Global Variables**: Global variables driving the shell wrapper are named in uppercase with an `RSD_` prefix (e.g. `RSD_DEBUG`, `RSD_VERSION`). Scoped configurations fetched from `.ini` maps are strictly confined under `R::INI::<command>` namespaces.
+
+### 3.4 Defensive Binary Validation (Availability Checking)
+To prevent unexpected pipeline failures, silent command drops, or unhandled shell exit codes, RSD operates under a strict **defensive validation constraint**:
+* **The Rule**: Every command module or library function that depends on external system binary utilities (e.g. `gpg`, `keepassxc-cli`, `git`, `mktemp`, `wget`, `readlink`) MUST verify the program's availability in the system `$PATH` before executing any logic.
+* **The Validation APIs**: The framework provides three standard checker functions:
+  - `rsd::check_binary <binary_name>`: Looks up a single executable inside `$PATH` using native loop splitting, returning status `0` if found, and `1` if missing.
+  - `rsd::check_binaries <list...>`: Loops over a list of utilities, returning success only if *all* are available in `$PATH`.
+  - `rsd::check_binaries_or_fail <list...>`: Validates a list of system dependencies. If any utility is missing, it intercepts execution early, prints a clean error warning the user, and terminates with exit code `3` (Program Not Found).
 
 ---
 
