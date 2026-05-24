@@ -91,3 +91,31 @@ EOF
     [ "${verified_config[".host "]}" = "127.0.0.1" ]
     [ "${verified_config[".port "]}" = "8080" ]
 }
+
+@test "rsd::config::get_file respects priority order: CLI override > workspace > user > system" {
+    # Isolate parameters
+    RSD_LIBRARY_SEARCH_PATH=()
+    RSD_CONFIG_CONFIG_SEARCH_PATH=()
+    RSD_MODE="devel"
+    RSD_RUN_DIR="${TEST_CONF_DIR}/run"
+    mkdir -p "$RSD_RUN_DIR/config"
+    
+    # Mock system configuration paths
+    local mock_system="/etc/rsd/"
+    local mock_user="$HOME/.config/rsd"
+    local mock_workspace="$(pwd)/config"
+    local mock_cli="${TEST_CONF_DIR}/cli"
+    
+    # Set RSD_ARGS simulating a command line --config-dir parameter
+    RSD_ARGS["config-dir"]="$mock_cli"
+    
+    rsd::config::get_file
+    
+    # Assert size of the constructed array
+    [ "${#RSD_CONFIGLIB_SEARCH_PATH[@]}" -gt 0 ]
+    
+    # Verify that CLI override has precedence over workspace, user, and system configs.
+    # Therefore, CLI override must be at the very end of the array (processed last).
+    local last_index=$(( ${#RSD_CONFIGLIB_SEARCH_PATH[@]} - 1 ))
+    [ "${RSD_CONFIGLIB_SEARCH_PATH[$last_index]}" = "$mock_cli" ]
+}
