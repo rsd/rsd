@@ -734,7 +734,7 @@ function rsd::create_search_path() {
     RSD_LIBRARY_SEARCH_PATH+=("$(pwd)")
 
     # Add the directories containing all sourced scripts or parent scripts
-    RSD_LIBRARY_SEARCH_PATH+=("$(dirname "${BASH_SOURCE[@]}")")
+    RSD_LIBRARY_SEARCH_PATH+=("$(dirname "${BASH_SOURCE[0]:-.}")")
 
     # Print all paths in the array for debugging
     #printf "Library Search Paths for $RSD_MODE:\n%s\n" "${RSD_LIBRARY_SEARCH_PATH[@]}"
