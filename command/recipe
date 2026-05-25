@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+
+# @see docs/host.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+[[ "$RSD_RECIPE_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/recipe.lib)
+
+RSD_C_RECIPE_SHORT_DESC="Idempotent Recipe Provisioning Subsystem"
+RSD_C_RECIPE_VERSION="0.1.0"
+
+# Recipe command is remote-aware (Mode A) to manage local/remote context dynamically
+RSD_C_RECIPE_REMOTE_AWARE=1
+
+declare -g -A RSD_C_RECIPE_ARGS_PARAM=(
+    ["dry-run"]=0
+    ["n"]=0
+    ["verbose"]=0
+    ["v"]=0
+)
+
+# Help and usage action
+function rsd::c::recipe::help() {
+    echo -e "\n\tRecipe Command Help:\n"
+    echo -e "\t\tUsage:"
+    echo -e "\t\t\trsd recipe run <name> [options]"
+    echo -e "\n\t\tActions:"
+    echo -e "\t\t\trun                 Execute a declarative recipe stack"
+    echo -e "\n\t\tOptions:"
+    echo -e "\t\t\t--dry-run | -n         Simulate actions without executing payloads"
+    echo -e "\t\t\t--verbose | -v         Output verbose pre-flight and post-flight log assertions"
+}
+
+# The main recipe execution entry point
+# Arguments:
+#   $1 - recipe name (mandatory)
+# Returns:
+#   Exit code of the recipe engine execution
+function rsd::c::recipe::run() {
+    local old_stop="${RSD_PARSE_CONFIG[stop-on-command]:-1}"
+    RSD_PARSE_CONFIG[stop-on-command]=0
+    rsd::parse_args "RSD_C_RECIPE_ARGS_PARAM" RSD_COMMAND_ARGS RSD_ARGS_UNPROCESSED "$@"
+    RSD_PARSE_CONFIG[stop-on-command]="$old_stop"
+
+    local recipe="${RSD_COMMAND_ARGS[command]}"
+    if [[ -z "$recipe" ]]; then
+        rsd::arguments_or_usage 1
+    fi
+
+    # Dry-run tracking
+    local dry_run=0
+    if [[ -v RSD_COMMAND_ARGS[dry-run] || -v RSD_COMMAND_ARGS[n] ]]; then
+        dry_run=1
+    fi
+
+    # Verbose tracking
+    local verbose=0
+    if [[ -v RSD_COMMAND_ARGS[verbose] || -v RSD_COMMAND_ARGS[v] ]]; then
+        verbose=1
+    fi
+
+    rsd::warn "Initializing Recipe: $recipe"
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::warn "Target Host: $RSD_REMOTE_TARGET"
+    else
+        rsd::warn "Target Host: localhost"
+    fi
+
+    # 1. Compile the recipe tasks recursively into the flat stack
+    if ! rsd::recipe::include_recipe "$recipe"; then
+        rsd::warn "Error: Failed to load recipe '$recipe'."
+        return 5
+    fi
+
+    # 2. Execute compiled tasks
+    rsd::l::recipe::execute_engine "$dry_run" "$verbose"
+    return $?
+}

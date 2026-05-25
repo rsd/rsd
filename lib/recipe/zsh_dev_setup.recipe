@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+
+# @see docs/host.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+function rsd::recipe::zsh_dev_setup::register() {
+    # 1. Include core Zsh setup
+    rsd::recipe::include_recipe "zsh_core"
+
+    # 2. Include P10k theme configuration
+    rsd::recipe::include_recipe "zsh_theme"
+
+    # 3. Include plugins and custom settings block
+    rsd::recipe::include_recipe "zsh_plugins"
+
+    # 4. Include companion packages and source compilers
+    rsd::recipe::include_recipe "zsh_tools"
+}

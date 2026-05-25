@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+
+# @see docs/host.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+if [[ "$RSD_RECIPE_LIB" == "1" ]]; then
+    return 0
+fi
+RSD_RECIPE_LIB=1
+RSD_RECIPE_LIB_VERSION="0.1.0"
+
+# Scoped task definitions
+declare -g -a RSD_REGISTERED_TASKS=()
+declare -g -A RSD_TASKS_PRE
+declare -g -A RSD_TASKS_APPLY
+declare -g -A RSD_TASKS_POST
+declare -g -A RSD_TASKS_RECOVERY
+declare -g -A RSD_TASKS_ROLLBACK
+
+# Session stack tracking completed tasks
+declare -g -a RSD_COMPLETED_STACK=()
+
+# Register a declarative recipe task
+# Arguments:
+#   --name) Task identifier (mandatory)
+#   --pre-check) State detection function/command
+#   --apply) Execution payload (mandatory)
+#   --post-check) State verification function/command
+#   --recovery) Fault handling mode ('forward', 'rollback', 'ignore')
+#   --rollback) Rollback execution payload (required if recovery is 'rollback')
+# Returns:
+#   0 - Success
+#   11 - Mandatory parameter missing
+function rsd::recipe::register_task() {
+    local name="" pre="" apply="" post="" recovery="forward" rollback=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name) name="$2"; shift ;;
+            --pre-check) pre="$2"; shift ;;
+            --apply) apply="$2"; shift ;;
+            --post-check) post="$2"; shift ;;
+            --recovery) recovery="$2"; shift ;;
+            --rollback) rollback="$2"; shift ;;
+        esac
+        shift
+    done
+
+    if [[ -z "$name" || -z "$apply" ]]; then
+        rsd::warn "Error: Task registration requires --name and --apply parameters."
+        return 11
+    fi
+
+    RSD_REGISTERED_TASKS+=("$name")
+    RSD_TASKS_PRE["$name"]="$pre"
+    RSD_TASKS_APPLY["$name"]="$apply"
+    RSD_TASKS_POST["$name"]="$post"
+    RSD_TASKS_RECOVERY["$name"]="$recovery"
+    RSD_TASKS_ROLLBACK["$name"]="$rollback"
+    return 0
+}
+
+# Compile and include a sub-recipe dynamically into the active task stack
+# Arguments:
+#   $1 - sub-recipe file basename (e.g. 'zsh_core')
+# Returns:
+#   0 - Success
+#   5 - File not resolved
+#   11 - Registration hook missing
+function rsd::recipe::include_recipe() {
+    rsd::arguments_or_usage 1 "$@"
+    local name="$1"
+
+    if ! rsd::check_libdir_file "lib/recipe/${name}.recipe"; then
+        rsd::warn "Error: Sub-recipe file '${name}' could not be resolved."
+        exit 5
+    fi
+
+    # Source the sub-recipe file dynamically
+    source "$(rsd::get_libdir_file "lib/recipe/${name}.recipe")"
+
+    # Invoke the registration hook
+    local reg_func="rsd::recipe::${name}::register"
+    if bash::is_function "$reg_func"; then
+        "$reg_func"
+    else
+        rsd::warn "Error: Recipe registration hook '${reg_func}' is missing."
+        exit 11
+    fi
+    return 0
+}
+
+# Executes the compiled flat task stack
+# Arguments:
+#   $1 - dry_run (0 or 1, default 0)
+#   $2 - verbose (0 or 1, default 0)
+# Returns:
+#   0 - Success
+#   10 - Task execution failed
+function rsd::l::recipe::execute_engine() {
+    local dry_run="${1:-0}"
+    local verbose="${2:-0}"
+    
+    RSD_COMPLETED_STACK=()
+    local name pre apply post recovery rollback
+
+    for name in "${RSD_REGISTERED_TASKS[@]}"; do
+        pre="${RSD_TASKS_PRE["$name"]}"
+        apply="${RSD_TASKS_APPLY["$name"]}"
+        post="${RSD_TASKS_POST["$name"]}"
+        recovery="${RSD_TASKS_RECOVERY["$name"]}"
+        rollback="${RSD_TASKS_ROLLBACK["$name"]}"
+
+        # 1. Pre-flight Necessity Guard
+        if [[ -n "$pre" ]]; then
+            if ((verbose)); then
+                rsd::warn "  [CHECKING] Task '$name'..."
+            fi
+            if "$pre" &>/dev/null; then
+                rsd::warn "  [SKIPPED] Task '$name' is already satisfied."
+                continue
+            fi
+        fi
+
+        # 2. Dry-Run Isolation Check
+        if ((dry_run)); then
+            rsd::warn "  [DRY-RUN] Would apply task '$name'"
+            continue
+        fi
+
+        # 3. Execution Phase
+        rsd::warn "  [APPLYING] Executing task '$name'..."
+        if ! "$apply"; then
+            if [[ "$recovery" == "ignore" ]]; then
+                rsd::warn "  [WARNING] Task '$name' failed. Skipping optional step."
+                continue
+            else
+                rsd::l::recipe::handle_failure "$name" "$recovery"
+                return 10
+            fi
+        fi
+
+        # 4. Post-flight Verification
+        if [[ -n "$post" ]]; then
+            if ((verbose)); then
+                rsd::warn "  [VERIFYING] Task '$name'..."
+            fi
+            if ! "$post" &>/dev/null; then
+                if [[ "$recovery" == "ignore" ]]; then
+                    rsd::warn "  [WARNING] Task '$name' verification failed. Skipping optional step."
+                    continue
+                else
+                    rsd::warn "  [ERROR] Verification failed for task '$name'."
+                    rsd::l::recipe::handle_failure "$name" "$recovery"
+                    return 10
+                fi
+            fi
+        fi
+
+        # 5. Registry Success Track
+        RSD_COMPLETED_STACK+=("$name")
+        rsd::warn "  [OK] Task '$name' applied successfully."
+    done
+
+    rsd::warn "\nRecipe execution completed successfully."
+    return 0
+}
+
+# Coordinate state-specific failure recovery
+# Arguments:
+#   $1 - failed task name
+#   $2 - recovery mode ('forward', 'rollback')
+function rsd::l::recipe::handle_failure() {
+    local name="$1"
+    local recovery="$2"
+
+    rsd::warn "\n!!! [FAILURE] Recipe failed at step: '$name' !!!"
+
+    if [[ "$recovery" == "rollback" ]]; then
+        rsd::warn "Initiating Backward Recovery (Rollback)..."
+        local i completed rollback
+        for (( i=${#RSD_COMPLETED_STACK[@]}-1; i>=0; i-- )); do
+            completed="${RSD_COMPLETED_STACK[i]}"
+            rollback="${RSD_TASKS_ROLLBACK["$completed"]}"
+            if [[ -n "$rollback" ]]; then
+                rsd::warn "  [ROLLBACK] Undoing changes for task '$completed'..."
+                if ! "$rollback"; then
+                    rsd::warn "  [CRITICAL] Rollback failed for task '$completed'! Manual cleanup required."
+                fi
+            fi
+        done
+        exit 10
+    else
+        rsd::warn "Recovery Mode: FORWARD."
+        rsd::warn "Please resolve the environmental issue, then run the recipe again."
+        rsd::warn "Already satisfied steps will be automatically skipped."
+        exit 10
+    fi
+}

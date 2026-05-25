@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+
+# @see docs/host.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load dependencies
+[[ "$RSD_HOST_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/host.lib)"
+[[ "$RSD_SUDO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/sudo.lib)"
+
+function rsd::recipe::zsh_tools::register() {
+    rsd::recipe::register_task \
+        --name "zsh_tools::install_companion_tools" \
+        --pre-check "rsd::recipe::zsh_tools::companion_pre" \
+        --apply "rsd::recipe::zsh_tools::companion_apply" \
+        --recovery "forward"
+
+    rsd::recipe::register_task \
+        --name "zsh_tools::install_cargo" \
+        --pre-check "rsd::recipe::zsh_tools::cargo_pre" \
+        --apply "rsd::recipe::zsh_tools::cargo_apply" \
+        --recovery "forward"
+
+    rsd::recipe::register_task \
+        --name "zsh_tools::compile_eza" \
+        --pre-check "rsd::recipe::zsh_tools::eza_pre" \
+        --apply "rsd::recipe::zsh_tools::eza_apply" \
+        --recovery "forward"
+
+    rsd::recipe::register_task \
+        --name "zsh_tools::install_make" \
+        --pre-check "rsd::recipe::zsh_tools::make_pre" \
+        --apply "rsd::recipe::zsh_tools::make_apply" \
+        --recovery "forward"
+
+    rsd::recipe::register_task \
+        --name "zsh_tools::compile_lesspipe" \
+        --pre-check "rsd::recipe::zsh_tools::lesspipe_pre" \
+        --apply "rsd::recipe::zsh_tools::lesspipe_apply" \
+        --recovery "ignore"
+}
+
+# 1. Companion tools pre-check (Validates key binaries exist)
+function rsd::recipe::zsh_tools::companion_pre() {
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "which chsh && which chafa" &>/dev/null
+    else
+        hash chsh 2>/dev/null && hash chafa 2>/dev/null
+    fi
+}
+
+# 2. Companion tools installation portably across Arch / Debian
+function rsd::recipe::zsh_tools::companion_apply() {
+    source "$(rsd::get_libdir_file command/install)"
+
+    local host_alias="localhost"
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        host_alias="${RSD_REMOTE_TARGET#@}"
+    fi
+
+    local family=""
+    rsd::l::host::get_property "$host_alias" "family" family
+
+    # Install packages portably based on family
+    if [[ "$family" == "debian" ]]; then
+        rsd::c::install::command "chafa"
+        rsd::c::install::command "libimage-exiftool-perl"
+        rsd::c::install::command "bat"
+        rsd::c::install::command "fd-find"
+
+        # Apply batcat symlink remotely or locally
+        if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+            local elevated_target="${RSD_REMOTE_TARGET},sudo://root"
+            rsd::l::remote::execute "$elevated_target" "ln" "-sf" "/usr/bin/batcat" "/usr/local/bin/bat"
+        else
+            rsd::l::sudo::run "" "ln" "-sf" "/usr/bin/batcat" "/usr/local/bin/bat"
+        fi
+    elif [[ "$family" == "arch" ]]; then
+        rsd::c::install::command "chafa"
+        rsd::c::install::command "perl-image-exiftool"
+        rsd::c::install::command "bat"
+        rsd::c::install::command "fd"
+    else
+        # Generic fallback
+        rsd::c::install::command "chafa"
+    fi
+}
+
+# 3. Cargo pre-check
+function rsd::recipe::zsh_tools::cargo_pre() {
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "which" "cargo" &>/dev/null
+    else
+        rsd::l::os::is_package_installed "cargo"
+    fi
+}
+
+# 4. Cargo installation
+function rsd::recipe::zsh_tools::cargo_apply() {
+    source "$(rsd::get_libdir_file command/install)"
+    rsd::c::install::command "cargo"
+}
+
+# 5. Eza pre-check
+function rsd::recipe::zsh_tools::eza_pre() {
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "test" "-f" "\$HOME/.cargo/bin/eza"
+    else
+        [[ -f "$HOME/.cargo/bin/eza" ]]
+    fi
+}
+
+# 6. Eza local compilation (User space)
+function rsd::recipe::zsh_tools::eza_apply() {
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "cargo" "install" "eza"
+    else
+        cargo install eza
+    fi
+}
+
+# 7. Make pre-check
+function rsd::recipe::zsh_tools::make_pre() {
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "which" "make" &>/dev/null
+    else
+        rsd::l::os::is_package_installed "make"
+    fi
+}
+
+# 8. Make installation
+function rsd::recipe::zsh_tools::make_apply() {
+    source "$(rsd::get_libdir_file command/install)"
+    rsd::c::install::command "make"
+}
+
+# 9. Lesspipe pre-check
+function rsd::recipe::zsh_tools::lesspipe_pre() {
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "test" "-f" "/usr/local/bin/lesspipe.sh"
+    else
+        [[ -f "/usr/local/bin/lesspipe.sh" ]]
+    fi
+}
+
+# 10. Lesspipe source compile and install (Mixed User/Sudo wrapping)
+function rsd::recipe::zsh_tools::lesspipe_apply() {
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        local elevated_target="${RSD_REMOTE_TARGET},sudo://root"
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "mkdir" "-p" "\$HOME/dev"
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "rm" "-rf" "\$HOME/dev/lesspipe"
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "git" "clone" "https://github.com/wofr06/lesspipe" "\$HOME/dev/lesspipe"
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "sh" "-c" "'cd \$HOME/dev/lesspipe && ./configure'"
+        rsd::l::remote::execute "$elevated_target" "sh" "-c" "'cd /home/raul/dev/lesspipe && make install'"
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "rm" "-rf" "\$HOME/dev/lesspipe"
+    else
+        mkdir -p "$HOME/dev"
+        rm -rf "$HOME/dev/lesspipe"
+        git clone https://github.com/wofr06/lesspipe "$HOME/dev/lesspipe"
+        (cd "$HOME/dev/lesspipe" && ./configure)
+        [[ "$RSD_SUDO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/sudo.lib)"
+        rsd::l::sudo::run "" sh -c "cd $HOME/dev/lesspipe && make install"
+        rm -rf "$HOME/dev/lesspipe"
+    fi
+}

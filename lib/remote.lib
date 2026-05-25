@@ -257,17 +257,20 @@ function rsd::l::remote::prompt_user() {
     local prompt_msg="$1"
     local reply
     
+    # Check if mock prompt reply is set to bypass interactive read
+    if [[ -v RSD_MOCK_PROMPT_REPLY ]]; then
+        if [[ "${RSD_MOCK_PROMPT_REPLY}" == "Y" ]]; then
+            echo "(Mocked Y)" >&2
+            return 0
+        fi
+        return 1
+    fi
+    
     # Prompt the user on stderr and read from /dev/tty
     echo -n "$prompt_msg " >&2
     if read -n 1 -r reply < /dev/tty 2>/dev/null; then
         echo >&2 # line break
         if [[ "$reply" =~ ^[Yy]$ ]]; then
-            return 0
-        fi
-    else
-        # Fallback if /dev/tty is not available (e.g. non-interactive or bats test mocks)
-        if [[ "${RSD_MOCK_PROMPT_REPLY}" == "Y" ]]; then
-            echo "(Mocked Y)" >&2
             return 0
         fi
     fi

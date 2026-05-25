@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+
+# @see docs/host.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load dependencies
+[[ "$RSD_HOST_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/host.lib)"
+[[ "$RSD_SUDO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/sudo.lib)"
+
+function rsd::recipe::zsh_core::register() {
+    rsd::recipe::register_task \
+        --name "zsh_core::install_zsh" \
+        --pre-check "rsd::recipe::zsh_core::install_pre" \
+        --apply "rsd::recipe::zsh_core::install_apply" \
+        --recovery "forward"
+
+    rsd::recipe::register_task \
+        --name "zsh_core::set_default_shell" \
+        --pre-check "rsd::recipe::zsh_core::shell_pre" \
+        --apply "rsd::recipe::zsh_core::shell_apply" \
+        --recovery "rollback" \
+        --rollback "rsd::recipe::zsh_core::shell_rollback"
+
+    rsd::recipe::register_task \
+        --name "zsh_core::install_oh_my_zsh" \
+        --pre-check "rsd::recipe::zsh_core::omz_pre" \
+        --apply "rsd::recipe::zsh_core::omz_apply" \
+        --recovery "forward"
+}
+
+# 1. Zsh installation pre-check
+function rsd::recipe::zsh_core::install_pre() {
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "which" "zsh" &>/dev/null
+    else
+        rsd::l::os::is_package_installed "zsh"
+    fi
+}
+
+# 2. Zsh installation execution
+function rsd::recipe::zsh_core::install_apply() {
+    # Dynamically leverage RSD install module for local/remote routing
+    source "$(rsd::get_libdir_file command/install)"
+    rsd::c::install::command "zsh"
+}
+
+# 3. Default shell check
+function rsd::recipe::zsh_core::shell_pre() {
+    local current_shell=""
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        current_shell=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "echo \$SHELL")
+    else
+        current_shell="$SHELL"
+    fi
+    [[ "$current_shell" == *"/zsh" ]]
+}
+
+# 4. Default shell execution (Dynamic Sudo Wrapping)
+function rsd::recipe::zsh_core::shell_apply() {
+    local zsh_path=""
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        zsh_path=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "which" "zsh" 2>/dev/null)
+        zsh_path="${zsh_path#"${zsh_path%%[![:space:]]*}"}"
+        zsh_path="${zsh_path%"${zsh_path%%[![:space:]]*}"}"
+        
+        if [[ -z "$zsh_path" ]]; then
+            rsd::warn "Error: Zsh binary was not found on remote target."
+            return 3
+        fi
+
+        # Elevate dynamically using sudo.lib pathway wrapping
+        local elevated_target="${RSD_REMOTE_TARGET},sudo://root"
+        rsd::l::remote::execute "$elevated_target" "chsh" "-s" "$zsh_path" "$USER"
+    else
+        zsh_path=$(which zsh 2>/dev/null)
+        rsd::l::sudo::run "" "chsh" "-s" "$zsh_path" "$USER"
+    fi
+}
+
+# 5. Default shell rollback
+function rsd::recipe::zsh_core::shell_rollback() {
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        local elevated_target="${RSD_REMOTE_TARGET},sudo://root"
+        rsd::l::remote::execute "$elevated_target" "chsh" "-s" "/bin/bash" "$USER"
+    else
+        rsd::l::sudo::run "" "chsh" "-s" "/bin/bash" "$USER"
+    fi
+}
+
+# 6. Oh My Zsh pre-check
+function rsd::recipe::zsh_core::omz_pre() {
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "test" "-d" "\$HOME/.oh-my-zsh"
+    else
+        [[ -d "$HOME/.oh-my-zsh" ]]
+    fi
+}
+
+# 7. Oh My Zsh unattended execution (User Context)
+function rsd::recipe::zsh_core::omz_apply() {
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "curl" "-fsSL" "https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh" "-o" "/tmp/omz_install.sh"
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "sh" "/tmp/omz_install.sh" "--unattended"
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "rm" "-f" "/tmp/omz_install.sh"
+    else
+        sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+    fi
+}
