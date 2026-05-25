@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+
+# @see docs/host.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Lazy-load remote helper library
+[[ "$RSD_REMOTE_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/remote.lib)"
+
+RSD_C_REMOTE_SHORT_DESC="Remote RSD Environment Management Subsystem"
+RSD_C_REMOTE_VERSION="0.1.0"
+
+# Module is remote-aware to allow routing local/remote target orchestration natively
+RSD_C_REMOTE_REMOTE_AWARE=1
+
+# Help and usage action.
+function rsd::c::remote::help() {
+    echo -e "\n\tRemote Command Help:\n"
+    echo -e "\t\tUsage:"
+    echo -e "\t\t\trsd <remote_target> remote <action> [options]"
+    echo -e "\n\t\tActions:"
+    echo -e "\t\t\tcheck       Verify if target has dependencies to install RSD"
+    echo -e "\t\t\tinstall     Stream and bootstrap install RSD on the target host"
+    echo -e "\t\t\tverify      Perform post-install framework verification"
+}
+
+# Pre-flight remote target validation.
+# Intent: Compiles a lightweight zero-dependency path probe script to check remote programs.
+#
+# @return int 0 if all dependencies exist, 1 otherwise.
+function rsd::c::remote::check() {
+    if [[ -z "$RSD_REMOTE_TARGET" ]]; then
+        rsd::warn "Error: No remote target specified. Usage: rsd @target remote check"
+        return 2
+    fi
+
+    rsd::warn "Performing remote pre-flight dependency check on '$RSD_REMOTE_TARGET'..."
+
+    # Zero-dependency remote probe payload
+    local probe_script
+    probe_script=$(cat << 'EOF'
+        deps=(tar bash mkdir cp chmod mktemp openssl)
+        missing=()
+        for bin in "${deps[@]}"; do
+            if ! hash "$bin" 2>/dev/null; then
+                missing+=("$bin")
+            fi
+        done
+        if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "FAILED:${missing[*]}"
+            exit 1
+        fi
+        echo "OK"
+        exit 0
+EOF
+    )
+
+    local check_output
+    check_output=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "bash" "-s" <<< "$probe_script" 2>/dev/null)
+    local status=$?
+
+    if [[ $status -ne 0 || "$check_output" != "OK" ]]; then
+        local missing_bins="${check_output#FAILED:}"
+        rsd::warn "   [FAIL] Target '$RSD_REMOTE_TARGET' is missing required installer binaries: $missing_bins"
+        return 3
+    fi
+
+    rsd::warn "   [OK] Remote dependencies are met. Host is ready for RSD."
+    return 0
+}
+
+# Bootstrap install RSD on the remote host.
+#
+# @param string $1 Optional install mode ('user' or 'local'). Defaults to 'user'.
+# @return int exit code of the installer.
+function rsd::c::remote::install() {
+    local mode="${1:-user}"
+
+    # 1. Force pre-flight validation check
+    rsd::c::remote::check || return $?
+
+    # 2. Run remote bootstrapping
+    rsd::warn "Proceeding with remote streaming bootstrap installation ($mode)..."
+    if ! rsd::l::remote::bootstrap_install "$RSD_REMOTE_TARGET" "$mode"; then
+        rsd::warn "   [ERROR] Bootstrap installation failed."
+        return 13
+    fi
+
+    rsd::warn "   [SUCCESS] RSD installation completed successfully on target."
+    return 0
+}
+
+# Post-flight health verification.
+function rsd::c::remote::verify() {
+    if [[ -z "$RSD_REMOTE_TARGET" ]]; then
+        rsd::warn "Error: No remote target specified. Usage: rsd @target remote verify"
+        return 2
+    fi
+
+    rsd::warn "Verifying remote framework health on '$RSD_REMOTE_TARGET'..."
+    local ver
+    ver=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "\$HOME/.local/bin/rsd" "--version" 2>/dev/null)
+    if [[ $? -eq 0 ]]; then
+        rsd::warn "   [OK] RSD is responsive at \$HOME/.local/bin/rsd (v${ver})"
+        return 0
+    fi
+
+    ver=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "rsd" "--version" 2>/dev/null)
+    if [[ $? -eq 0 ]]; then
+        rsd::warn "   [OK] RSD is responsive in system PATH (v${ver})"
+        return 0
+    fi
+
+    rsd::warn "   [FAIL] RSD framework is unresponsive on target."
+    return 3
+}
+
+# Route actions dynamically
+function rsd::c::remote::command() {
+    local action="$1"
+    shift
+    case "$action" in
+        check)   rsd::c::remote::check "$@" ;;
+        install) rsd::c::remote::install "$@" ;;
+        verify)  rsd::c::remote::verify "$@" ;;
+        *)       rsd::c::remote::help ;;
+    esac
+}
