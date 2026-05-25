@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# @see docs/config.md
+# @see docs/host.md
 # @see AGENTS.md
 
 if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
@@ -13,9 +13,13 @@ if [[ "$RSD_HOST_LIB" == "1" ]]; then
     return 0
 fi
 RSD_HOST_LIB=1
-RSD_HOST_LIB_VERSION="0.1.0"
+RSD_HOST_LIB_VERSION="0.1.1"
 
-# Sourcing hosts.ini if not loaded yet
+# Sourcing hosts.ini if not loaded yet.
+# Intent: Lazy-load hosts configuration profiles to save memory and parsing overhead.
+#
+# @return void
+# @throws 5 Sourced library file cannot be resolved during config delegation.
 function rsd::l::host::load_config() {
     if [[ ! -v "R_INI_hosts" ]]; then
         declare -gA R_INI_hosts
@@ -25,12 +29,13 @@ function rsd::l::host::load_config() {
     fi
 }
 
-# Performs host platform identification
-# Arguments:
-#   $1 - nameref output variable for associative array of host properties
-# Returns:
-#   0: Success
-#   1: Failed to determine host properties
+# Performs host platform identification.
+# Intent: Safely scan system-level releases (such as /etc/os-release) using string parsing
+#         to extract distribution family, kernel OS type, architecture, and package manager.
+#
+# @param AssociativeArray& $1 nameref output variable for associative array of host properties.
+# @return int 0 on success.
+# @throws 3 Program not found if 'uname' binary is missing from PATH.
 function rsd::l::host::identify() {
     rsd::arguments_or_usage 1 "$@"
     local _out_var="$1"
@@ -38,12 +43,12 @@ function rsd::l::host::identify() {
     
     rsd::check_binaries_or_fail uname
     
-    # 1. Detect OS
+    # 1. Detect OS (convert to standard lowercase representation)
     local os
     os=$(uname -s | tr '[:upper:]' '[:lower:]')
     _r_props[os]="$os"
     
-    # 2. Detect Architecture
+    # 2. Detect Architecture (convert to standard lowercase representation)
     local arch
     arch=$(uname -m | tr '[:upper:]' '[:lower:]')
     _r_props[arch]="$arch"
@@ -56,7 +61,7 @@ function rsd::l::host::identify() {
     
     if [[ "$os" == "linux" ]]; then
         local os_release_file="${RSD_MOCK_OS_RELEASE:-/etc/os-release}"
-        # Fallback to usr/lib/os-release if /etc/os-release is missing
+        # Intent: Fallback to usr/lib/os-release if /etc/os-release is missing
         if [[ ! -f "$os_release_file" && -f "/usr/lib/os-release" && -z "$RSD_MOCK_OS_RELEASE" ]]; then
             os_release_file="/usr/lib/os-release"
         fi
@@ -78,7 +83,7 @@ function rsd::l::host::identify() {
                     key="${BASH_REMATCH[1]}"
                     value="${BASH_REMATCH[2]}"
                     
-                    # Trim quotes
+                    # Trim quotes around value assignments
                     if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
                         value="${BASH_REMATCH[1]}"
                     fi
@@ -102,9 +107,8 @@ function rsd::l::host::identify() {
                 _r_props[version]="rolling"
             fi
             
-            # Inferred family mapping:
-            # If ID_LIKE is defined, extract the first entry as family.
-            # Else family is ID.
+            # Intent: Inferred family mapping. If ID_LIKE is defined, extract first entry as family;
+            #         otherwise fall back to ID.
             if [[ -n "$raw_id_like" ]]; then
                 # Get first word of ID_LIKE
                 local family_cand
@@ -136,14 +140,14 @@ function rsd::l::host::identify() {
     return 0
 }
 
-# Retrieve a host property safely
-# Arguments:
-#   $1 - target host alias (e.g. localhost, server1)
-#   $2 - property key (e.g. distro, family, version, arch, pkg_manager)
-#   $3 - nameref output variable for value
-# Returns:
-#   0: Success
-#   1: Property not found
+# Retrieve a host property safely.
+# Intent: Resolves the requested metadata attribute for a designated host alias. If the
+#         requested host is 'localhost' and no configuration exists, falls back dynamically.
+#
+# @param string $1 target host alias (e.g., 'localhost', 'server1').
+# @param string $2 property key (e.g., 'distro', 'family', 'version', 'arch', 'pkg_manager').
+# @param string& $3 nameref output variable for resolved string value.
+# @return int 0 on success, 1 if property not found.
 function rsd::l::host::get_property() {
     rsd::arguments_or_usage 3 "$@"
     local alias="$1"
@@ -159,7 +163,7 @@ function rsd::l::host::get_property() {
         return 0
     fi
     
-    # Fallback for localhost dynamic detection
+    # Intent: Fallback dynamically if requested for local environment and no config is saved
     if [[ "$alias" == "localhost" ]]; then
         declare -A local_props
         if rsd::l::host::identify local_props; then

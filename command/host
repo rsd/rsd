@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# @see docs/config.md
+# @see docs/host.md
 # @see AGENTS.md
 
 if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
@@ -12,12 +12,15 @@ fi
 [[ "$RSD_HOST_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/host.lib)
 
 RSD_C_HOST_SHORT_DESC="Host Platform Identification Subsystem"
-RSD_C_HOST_VERSION="0.1.0"
+RSD_C_HOST_VERSION="0.1.1"
 
 # Host command is remote-naive to support automatic delegation (Mode B)
 RSD_C_HOST_REMOTE_AWARE=0
 
-# Help and usage action
+# Help and usage action.
+# Intent: Display sub-commands and description for the host module.
+#
+# @return void
 function rsd::c::host::help() {
     echo -e "\n\tHost Command Help:\n"
     echo -e "\t\tActions:"
@@ -25,8 +28,11 @@ function rsd::c::host::help() {
     echo -e "\t\t\tsave [alias]          Identify and save host properties to hosts.ini"
 }
 
-# Discover and display host properties
-# @return int 0 on success, 10 on identification failure
+# Discover and display host properties.
+# Intent: Query platform attributes dynamically and print them to stdout as key=value lines.
+#
+# @return int 0 on success.
+# @throws 10 on platform identification failure.
 function rsd::c::host::identify() {
     declare -A props
     if ! rsd::l::host::identify props; then
@@ -43,9 +49,13 @@ function rsd::c::host::identify() {
     return 0
 }
 
-# Save host configuration to hosts.ini
-# @param string $1 Optional host alias. Defaults to 'localhost'.
-# @return int 0 on success, 10 on identification failure, 13 on write failure
+# Save host configuration to hosts.ini.
+# Intent: Discovers host properties and writes them atomically into hosts.ini config file.
+#
+# @param string $1 Optional host alias override. Defaults to 'localhost' or remote target spec.
+# @return int 0 on success.
+# @throws 10 on identification failure.
+# @throws 13 on write failure or transaction commit failure.
 function rsd::c::host::save() {
     local alias="$1"
     if [[ -z "$alias" ]]; then
