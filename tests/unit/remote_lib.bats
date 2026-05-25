@@ -161,3 +161,50 @@ setup() {
     [ "$rsd_bin" = "rsd" ]
 }
 
+@test "rsd::l::remote::bootstrap_check blocks bootstrapping if allow_bootstrap is false and framework is missing" {
+    # Ensure R_INI_hosts associative array exists
+    declare -gA R_INI_hosts
+    R_INI_hosts["hosts.blocked-host.allow_bootstrap"]="false"
+    
+    # Mock probe failure (RSD missing remotely)
+    rsd::l::remote::execute() {
+        return 127
+    }
+    
+    # Stub load_config to prevent loading real files
+    rsd::l::host::load_config() {
+        return 0
+    }
+    
+    local rsd_bin=""
+    run rsd::l::remote::bootstrap_check "blocked-host" rsd_bin
+    [ "$status" -eq 1 ]
+}
+
+@test "rsd::l::remote::bootstrap_check skips upgrade but executes if allow_bootstrap is false and remote has older version" {
+    declare -gA R_INI_hosts
+    R_INI_hosts["hosts.readonly-host.allow_bootstrap"]="no"
+    
+    # Mock probe returning an older remote version
+    rsd::l::remote::execute() {
+        local cmd="$2"
+        if [[ "$cmd" == "rsd" && "$3" == "--version" ]]; then
+            echo "1.8.0"
+            return 0
+        fi
+        return 1
+    }
+    
+    # Stub load_config to prevent loading real files
+    rsd::l::host::load_config() {
+        return 0
+    }
+    
+    local rsd_bin=""
+    rsd::l::remote::bootstrap_check "readonly-host" rsd_bin
+    
+    [ "$?" -eq 0 ]
+    [ "$rsd_bin" = "rsd" ]
+}
+
+

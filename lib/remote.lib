@@ -291,6 +291,7 @@ function rsd::l::remote::bootstrap_install() {
 # Coordinate remote pre-flight framework validation.
 # Intent: Probes for remote RSD presence, guides self-healing copy-install bootstrap
 #         on target hosts, and compares version parity for compliance sync-upgrades.
+#         Respects hosts.<alias>.allow_bootstrap settings to protect guest servers.
 #
 # @param string $1 The target remote specification.
 # @param string& $2 nameref output variable for resolved remote binary string (e.g. 'rsd' or '$HOME/.local/bin/rsd').
@@ -302,6 +303,11 @@ function rsd::l::remote::bootstrap_check() {
     declare -n _r_bin="$_out_bin"
     
     _r_bin="rsd"
+    
+    # Lazy load hosts configuration to check bootstrap permission keys
+    if bash::is_function rsd::l::host::load_config; then
+        rsd::l::host::load_config
+    fi
     
     # 1. Probe for framework presence
     local remote_ver=""
@@ -321,6 +327,17 @@ function rsd::l::remote::bootstrap_check() {
     
     # 2. Trigger bootstrapper if missing
     if [[ $probe_status -ne 0 ]]; then
+        # Check if bootstrapping is explicitly blocked for this target
+        local host_alias="${remote_spec#@}"
+        local allow_key="hosts.${host_alias}.allow_bootstrap"
+        if [[ -v "R_INI_hosts" && -n "${R_INI_hosts[$allow_key]}" ]]; then
+            local allowed="${R_INI_hosts[$allow_key]}"
+            if [[ "$allowed" == "false" || "$allowed" == "0" || "$allowed" == "no" ]]; then
+                rsd::warn "Abort: Bootstrapping is disabled for target '$remote_spec' in hosts.ini."
+                return 1
+            fi
+        fi
+
         if rsd::l::remote::prompt_user "RSD is not installed on remote target '$remote_spec'. Would you like to bootstrap the installation now? [Y/n]"; then
             if ! rsd::l::remote::bootstrap_install "$remote_spec"; then
                 rsd::warn "Error: Failed to bootstrap remote target."
@@ -348,12 +365,28 @@ function rsd::l::remote::bootstrap_check() {
     
     if rsd::version_gt "$RSD_VERSION" "$remote_ver"; then
         rsd::warn "Warning: Remote framework version ($remote_ver) is older than your local version ($RSD_VERSION)."
-        if rsd::l::remote::prompt_user "Would you like to sync-upgrade remote target '$remote_spec' to $RSD_VERSION? [Y/n]"; then
-            if ! rsd::l::remote::bootstrap_install "$remote_spec"; then
-                rsd::warn "Error: Failed to upgrade remote target. Executing with existing version $remote_ver."
-            else
-                _r_bin="\$HOME/.local/bin/rsd"
+        
+        # Check if upgrades/writes are blocked for this target
+        local host_alias="${remote_spec#@}"
+        local allow_key="hosts.${host_alias}.allow_bootstrap"
+        local can_upgrade=1
+        if [[ -v "R_INI_hosts" && -n "${R_INI_hosts[$allow_key]}" ]]; then
+            local allowed="${R_INI_hosts[$allow_key]}"
+            if [[ "$allowed" == "false" || "$allowed" == "0" || "$allowed" == "no" ]]; then
+                can_upgrade=0
             fi
+        fi
+        
+        if [[ $can_upgrade -eq 1 ]]; then
+            if rsd::l::remote::prompt_user "Would you like to sync-upgrade remote target '$remote_spec' to $RSD_VERSION? [Y/n]"; then
+                if ! rsd::l::remote::bootstrap_install "$remote_spec"; then
+                    rsd::warn "Error: Failed to upgrade remote target. Executing with existing version $remote_ver."
+                else
+                    _r_bin="\$HOME/.local/bin/rsd"
+                fi
+            fi
+        else
+            rsd::warn "Upgrade skipped because bootstrapping is disabled for target '$remote_spec' (allow_bootstrap=false)."
         fi
     fi
     
