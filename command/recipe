@@ -12,7 +12,7 @@ fi
 [[ "$RSD_RECIPE_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/recipe.lib)
 
 RSD_C_RECIPE_SHORT_DESC="Idempotent Recipe Provisioning Subsystem"
-RSD_C_RECIPE_VERSION="0.1.1"
+RSD_C_RECIPE_VERSION="0.1.2"
 
 # Recipe command is remote-aware (Mode A) to manage local/remote context dynamically
 RSD_C_RECIPE_REMOTE_AWARE=1
@@ -25,13 +25,60 @@ declare -g -A RSD_C_RECIPE_ARGS_PARAM=(
 )
 
 # Help and usage action
+# Arguments:
+#   $1 - Recipe name (optional)
+# Returns:
+#   Exit code of overview compilation or 0
 function rsd::c::recipe::help() {
+    local recipe="$1"
+    if [[ -n "$recipe" ]]; then
+        # Compile the recipe tasks recursively into the flat stack
+        RSD_REGISTERED_TASKS=()
+        declare -g -A RSD_TASKS_PRE
+        declare -g -A RSD_TASKS_APPLY
+        declare -g -A RSD_TASKS_POST
+        declare -g -A RSD_TASKS_RECOVERY
+        declare -g -A RSD_TASKS_ROLLBACK
+
+        if ! rsd::recipe::include_recipe "$recipe" &>/dev/null; then
+            rsd::warn "Error: Recipe '$recipe' not found or could not be loaded."
+            return 5
+        fi
+
+        rsd::warn "=== Recipe Overview: $recipe ==="
+        echo -e "This recipe compiles into ${#RSD_REGISTERED_TASKS[@]} sequential tasks:\n"
+
+        local name pre apply recovery rollback
+        for name in "${RSD_REGISTERED_TASKS[@]}"; do
+            pre="${RSD_TASKS_PRE["$name"]}"
+            apply="${RSD_TASKS_APPLY["$name"]}"
+            recovery="${RSD_TASKS_RECOVERY["$name"]}"
+            rollback="${RSD_TASKS_ROLLBACK["$name"]}"
+
+            echo -e "  \033[1m$name\033[0m"
+            echo -e "    Action Payload:  $apply"
+            if [[ -n "$pre" ]]; then
+                echo -e "    Necessity Check: $pre"
+            else
+                echo -e "    Necessity Check: (None - Always runs)"
+            fi
+            echo -e "    On Failure:      $recovery"
+            if [[ "$recovery" == "rollback" && -n "$rollback" ]]; then
+                echo -e "    Rollback Payload: $rollback"
+            fi
+            echo -e ""
+        done
+        return 0
+    fi
+
     echo -e "\n\tRecipe Command Help:\n"
     echo -e "\t\tUsage:"
     echo -e "\t\t\trsd recipe run <name> [options]"
+    echo -e "\t\t\trsd recipe help <name>"
     echo -e "\t\t\trsd recipe list"
     echo -e "\n\t\tActions:"
     echo -e "\t\t\trun                 Execute a declarative recipe stack"
+    echo -e "\t\t\thelp                Explain what a recipe does and list its tasks"
     echo -e "\t\t\tlist                List all available recipes in the search paths"
     echo -e "\n\t\tOptions:"
     echo -e "\t\t\t--dry-run | -n         Simulate actions without executing payloads"

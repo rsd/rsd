@@ -146,3 +146,42 @@ setup() {
     [[ "$output" == *"test_recipe_A"* ]]
     [[ "$output" == *"test_recipe_B"* ]]
 }
+
+@test "rsd::c::recipe::help compiles and displays tasks inside the specified recipe" {
+    # 1. Create an isolated mock recipe library directory
+    local mock_libdir
+    mock_libdir=$(mktemp -d -t rsd-recipe-help.XXXXXX)
+    mkdir -p "${mock_libdir}/lib/recipe"
+    
+    # Write mock recipe file content
+    cat << 'EOF' > "${mock_libdir}/lib/recipe/test_help.recipe"
+function rsd::recipe::test_help::register() {
+    rsd::recipe::register_task \
+        --name "mock_task_1" \
+        --pre-check "mock_pre_1" \
+        --apply "mock_apply_1" \
+        --recovery "forward"
+}
+EOF
+
+    # 2. Configure path array
+    local -a old_path
+    old_path=("${RSD_LIBRARY_SEARCH_PATH[@]}")
+    RSD_LIBRARY_SEARCH_PATH=("${mock_libdir}")
+
+    # Load recipe command
+    source "${BATS_TEST_DIRNAME}/../../command/recipe"
+
+    run rsd::c::recipe::help "test_help"
+
+    # Restore path array and cleanup
+    RSD_LIBRARY_SEARCH_PATH=("${old_path[@]}")
+    rm -rf "$mock_libdir"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"=== Recipe Overview: test_help ==="* ]]
+    [[ "$output" == *"mock_task_1"* ]]
+    [[ "$output" == *"Action Payload:  mock_apply_1"* ]]
+    [[ "$output" == *"Necessity Check: mock_pre_1"* ]]
+    [[ "$output" == *"On Failure:      forward"* ]]
+}
