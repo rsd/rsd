@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# @see docs/host.md
+# @see docs/recipes.md
 # @see AGENTS.md
 
 if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
