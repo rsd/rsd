@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+
+# @see docs/host.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+if [[ "$RSD_OS_LINUX_LIB" == "1" ]]; then
+    return 0
+fi
+RSD_OS_LINUX_LIB=1
+RSD_OS_LINUX_LIB_VERSION="0.1.0"
+
+# Install a package dynamically.
+# Intent: Fallback generic Linux package manager execution.
+#
+# @param string $1 The name of the package.
+# @return int exit code of execution.
+# @throws 3 if package manager is not found.
+function rsd::l::os::install_package() {
+    rsd::arguments_or_usage 1 "$@"
+    local package="$1"
+    rsd::warn "Error: Generic Linux has no default package manager defined. Cannot install '$package'."
+    return 3
+}
+
+# Check if a package/utility binary is present in the path.
+# Intent: Safely verify utility presence prior to service orchestration.
+#
+# @param string $1 The name of the package or command binary.
+# @return int 0 if present, 1 if missing.
+function rsd::l::os::is_package_installed() {
+    rsd::arguments_or_usage 1 "$@"
+    local package="$1"
+    hash "$package" 2>/dev/null
+}

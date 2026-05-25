@@ -39,3 +39,18 @@ setup() {
     # Fallback triggers since gpgg doesn't exist in command/
     [[ "$output" == *"No custom RSD script found for 'gpgg'. Triggering raw remote pass-through."* ]]
 }
+
+@test "rsd install command with --dry-run simulates package manager execution" {
+    run "$RSD_BIN" install tmux --dry-run
+    
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"sudo pacman "* || "$output" == *"sudo apt-get "* ]]
+}
+
+@test "rsd install command with shorthand -n simulates package manager execution" {
+    run "$RSD_BIN" install tmux -n
+    
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"sudo pacman "* || "$output" == *"sudo apt-get "* ]]
+}
+

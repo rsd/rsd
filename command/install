@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+
+# @see docs/host.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+[[ "$RSD_HOST_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/host.lib)
+
+RSD_C_INSTALL_SHORT_DESC="Dynamic Package Installer Subsystem"
+RSD_C_INSTALL_VERSION="0.1.0"
+
+# Install command is remote-aware (Mode A) to handle local/remote routing natively
+RSD_C_INSTALL_REMOTE_AWARE=1
+
+declare -g -A RSD_C_INSTALL_ARGS_PARAM=(
+    ["dry-run"]=0
+    ["n"]=0
+)
+
+# Help and usage action.
+# Intent: Display usage and options for the install command.
+#
+# @return void
+function rsd::c::install::help() {
+    echo -e "\n\tInstall Command Help:\n"
+    echo -e "\t\tUsage:"
+    echo -e "\t\t\trsd install <package> [options]"
+    echo -e "\n\t\tOptions:"
+    echo -e "\t\t\t--dry-run | -n         Simulate execution without performing actual installations"
+}
+
+# The main installer entry point.
+# Intent: Query target platform parameters, load the appropriate overridable OS library,
+#         check for custom installer scripts, and route package installations locally or remotely.
+#
+# @param string $1 The name of the package to install.
+# @return int exit code of the execution.
+# @throws 5 if no suitable OS library is resolved.
+# @throws 10 on platform identification failure.
+function rsd::c::install::command() {
+    local old_stop="${RSD_PARSE_CONFIG[stop-on-command]:-1}"
+    RSD_PARSE_CONFIG[stop-on-command]=0
+    rsd::parse_args "RSD_C_INSTALL_ARGS_PARAM" RSD_COMMAND_ARGS RSD_ARGS_UNPROCESSED "$@"
+    RSD_PARSE_CONFIG[stop-on-command]="$old_stop"
+    
+    local package="${RSD_COMMAND_ARGS[command]}"
+    if [[ -z "$package" ]]; then
+        rsd::arguments_or_usage 1
+    fi
+    
+    # Process dry-run options
+    local dry_run=0
+    if [[ -v RSD_COMMAND_ARGS[dry-run] || -v RSD_COMMAND_ARGS[n] ]]; then
+        dry_run=1
+    fi
+    export RSD_INSTALL_DRY_RUN="$dry_run"
+    
+    # Determine target host alias
+    local host_alias="localhost"
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        host_alias="${RSD_REMOTE_TARGET#@}"
+    fi
+    
+    # Resolve host metadata dynamically or from hosts.ini configuration
+    local os="" family="" distro="" version="" pkg_manager=""
+    if [[ "$host_alias" == "localhost" ]]; then
+        declare -A local_props
+        if ! rsd::l::host::identify local_props; then
+            rsd::warn "Error: Failed to identify local host properties."
+            return 10
+        fi
+        os="${local_props[os]}"
+        family="${local_props[family]}"
+        distro="${local_props[distro]}"
+        version="${local_props[version]}"
+        pkg_manager="${local_props[pkg_manager]}"
+    else
+        rsd::l::host::get_property "$host_alias" "os" os
+        rsd::l::host::get_property "$host_alias" "family" family
+        rsd::l::host::get_property "$host_alias" "distro" distro
+        rsd::l::host::get_property "$host_alias" "version" version
+        rsd::l::host::get_property "$host_alias" "pkg_manager" pkg_manager
+        
+        # Self-healing: if remote target is not configured yet, run dynamic remote discovery
+        if [[ -z "$os" ]]; then
+            rsd::warn "Warning: Target host '$host_alias' is not configured. Running zero-dependency discovery..."
+            local script_content
+            rsd::l::host::generate_standalone_script script_content
+            source "$(rsd::get_libdir_file lib/remote.lib)"
+            local remote_output
+            if remote_output=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "bash" "-s" <<< "$script_content" 2>/dev/null); then
+                local line
+                while IFS= read -r line; do
+                    [[ -z "$line" ]] && continue
+                    if [[ "$line" =~ ^([a-zA-Z0-9_]+)=(.*)$ ]]; then
+                        case "${BASH_REMATCH[1]}" in
+                            os) os="${BASH_REMATCH[2]}" ;;
+                            family) family="${BASH_REMATCH[2]}" ;;
+                            distro) distro="${BASH_REMATCH[2]}" ;;
+                            version) version="${BASH_REMATCH[2]}" ;;
+                            pkg_manager) pkg_manager="${BASH_REMATCH[2]}" ;;
+                        esac
+                    fi
+                done <<< "$remote_output"
+            else
+                rsd::warn "Error: Failed to auto-discover remote host properties."
+                return 10
+            fi
+        fi
+    fi
+    
+    # 1. Custom Command Override: check if command/<package> exists for custom pre/post setup routines
+    if rsd::check_command "$package" &>/dev/null; then
+        rsd::warn "Executing custom installer module for '$package'..."
+        local cmd_src
+        cmd_src=$(rsd::load_command_file "$package")
+        source "$cmd_src"
+        rsd::command "$package"
+        return $?
+    fi
+    
+    # 2. Sourcing-Inheritance Resolution: Load most specific overridable OS library sequence
+    local loaded=0
+    local paths=(
+        "lib/os/${os}/${family}/${distro}/${version}.lib"
+        "lib/os/${os}/${family}/${distro}.lib"
+        "lib/os/${os}/${family}.lib"
+        "lib/os/${os}.lib"
+    )
+    local p
+    for p in "${paths[@]}"; do
+        if rsd::check_libdir_file "$p"; then
+            source "$(rsd::get_libdir_file "$p")"
+            loaded=1
+            break
+        fi
+    done
+    
+    if [[ $loaded -eq 0 ]]; then
+        rsd::warn "Error: No suitable OS library found for target platform."
+        return 5
+    fi
+    
+    # 3. Perform package manager execution locally or remotely
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        source "$(rsd::get_libdir_file lib/remote.lib)"
+        
+        # Verify remote bootstrapper or fall back to raw system package execution directly
+        local rsd_bin="rsd"
+        if rsd::l::remote::bootstrap_check "$RSD_REMOTE_TARGET" rsd_bin 2>/dev/null; then
+            local -a remote_opts=()
+            ((dry_run)) && remote_opts+=("--dry-run")
+            rsd::warn "Delegating package installation to remote RSD..."
+            rsd::l::remote::execute "$RSD_REMOTE_TARGET" "$rsd_bin" "install" "$package" "${remote_opts[@]}"
+            return $?
+        else
+            local raw_cmd
+            case "$pkg_manager" in
+                apt)     raw_cmd="sudo apt-get install -y $package" ;;
+                pacman)  raw_cmd="sudo pacman -Sy --noconfirm $package" ;;
+                dnf)     raw_cmd="sudo dnf install -y $package" ;;
+                zypper)  raw_cmd="sudo zypper install -y $package" ;;
+                apk)     raw_cmd="sudo apk add $package" ;;
+                brew)    raw_cmd="brew install $package" ;;
+                *)       rsd::warn "Error: Unrecognized package manager '$pkg_manager' for raw remote execution."
+                         return 3 ;;
+            esac
+            
+            if ((dry_run)); then
+                echo "REMOTE_DRY_RUN: ssh $RSD_REMOTE_TARGET -> $raw_cmd"
+                return 0
+            fi
+            
+            rsd::warn "Executing raw package manager remotely: $raw_cmd"
+            rsd::l::remote::execute "$RSD_REMOTE_TARGET" $raw_cmd
+            return $?
+        fi
+    else
+        rsd::l::os::install_package "$package"
+        return $?
+    fi
+}
