@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Lazy-load required domain helper libraries
+[[ "$RSD_GPG_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/gpg.lib)
+[[ "$RSD_KPX_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/kpx.lib)
+[[ "$RSD_CONFIGLIB_VERSION" == "" ]] && $(rsd::source_lib_or_die lib/config.lib)
+
+RSD_C_INIT_SHORT_DESC="Initialize and Bootstrap RSD Environment"
+RSD_C_INIT_VERSION="0.1.0"
+
+# Main top-level entry point function for 'rsd init'
+# @return int 0 on success, non-zero on failure.
+function rsd::c::init() {
+    rsd::warn "=========================================================="
+    rsd::warn "            RSD CORE FRAMEWORK INITIALIZATION            "
+    rsd::warn "=========================================================="
+
+    # 1. Pre-flight checks: Verify essential host binaries
+    rsd::warn "1. Running pre-flight binary dependency checks..."
+    rsd::check_binaries_or_fail gpg keepassxc-cli openssl mktemp
+    rsd::warn "   [OK] System dependencies are met."
+    rsd::warn ""
+
+    # 2. GPG Keypair Preparation
+    rsd::warn "2. Checking GPG environment configuration..."
+    local gpg_ready=0
+    if rsd::l::gpg::check 1; then
+        rsd::warn "   [OK] GPG is active and configured correctly under ID: '$RSD_GPG_USER_ID'."
+        gpg_ready=1
+    else
+        rsd::warn "   [!] GPG secret key missing for User ID: '$RSD_GPG_USER_ID'."
+        rsd::warn "       Would you like to:"
+        rsd::warn "       [1] Generate a new dedicated GPG keypair for RSD usage."
+        rsd::warn "       [2] Bind an existing GPG key ID."
+        rsd::warn "       [q] Abort initialization."
+        
+        local choice
+        read -r -p "       Select option [1/2/q]: " choice
+        case "$choice" in
+            1)
+                # Sourcing gpg command module dynamically to reuse create-key logic
+                $(rsd::source_lib_or_die command/gpg)
+                if rsd::c::gpg::create-key; then
+                    rsd::warn "   [OK] GPG key generated successfully."
+                    gpg_ready=1
+                else
+                    rsd::warn "   [ERROR] Failed to generate GPG key."
+                    return 10
+                fi
+                ;;
+            2)
+                local existing_id
+                read -r -p "       Enter your existing GPG Key ID or email: " existing_id
+                if [[ -z "$existing_id" ]]; then
+                    rsd::warn "   [ERROR] Invalid GPG key ID entered."
+                    return 2
+                fi
+                
+                # Verify that the entered key actually exists in GPG keyring
+                if ! gpg --list-keys "$existing_id" &>/dev/null; then
+                    rsd::warn "   [ERROR] GPG key '$existing_id' not found in your system keyring."
+                    return 10
+                fi
+                
+                # Bind key using our configuration set writer
+                $(rsd::source_lib_or_die command/config)
+                if rsd::c::config::set "RSD_GPG_USER_ID" "$existing_id"; then
+                    # Force reload configs
+                    export RSD_GPG_USER_ID="$existing_id"
+                    rsd::warn "   [OK] Bound GPG key ID: '$RSD_GPG_USER_ID'."
+                    gpg_ready=1
+                else
+                    rsd::warn "   [ERROR] Failed to write config update."
+                    return 13
+                fi
+                ;;
+            *)
+                rsd::warn "   [ABORT] Initialization aborted by user."
+                return 0
+                ;;
+        esac
+    fi
+    rsd::warn ""
+
+    # Ensure GPG setup succeeded
+    if [[ $gpg_ready -ne 1 ]]; then
+        rsd::warn "   [ERROR] GPG setup could not be completed."
+        return 10
+    fi
+
+    # 3. KeePass Vault Setup
+    rsd::warn "3. Verifying KeePass Vault status..."
+    local vault_dir="${RSD_CONFIG_DIR:-$HOME/.config/rsd}"
+    local vault_key="$vault_dir/vault.key.gpg"
+    local vault_db="$vault_dir/vault.kdbx"
+
+    if [[ -f "$vault_key" && -f "$vault_db" ]]; then
+        rsd::warn "   [OK] KeePass credentials vault already exists."
+    else
+        rsd::warn "   [!] Vault not found. Initiating secure KeePass database..."
+        if rsd::l::kpx::init; then
+            rsd::warn "   [OK] KeePass Vault initialized atomically."
+        else
+            rsd::warn "   [ERROR] Failed to initialize KeePass Vault."
+            return 10
+        fi
+    fi
+    rsd::warn ""
+
+    # 4. Success status summary
+    rsd::warn "=========================================================="
+    rsd::warn "       RSD ENVIRONMENT INITIALIZED SUCCESSFULLY!         "
+    rsd::warn "=========================================================="
+    rsd::warn "   Configuration Scope : $vault_dir"
+    rsd::warn "   GPG User ID         : $RSD_GPG_USER_ID"
+    rsd::warn "   KeePass Vault DB    : $vault_db"
+    rsd::warn "=========================================================="
+    
+    return 0
+}
