@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+[[ "$RSD_CONFIGLIB_VERSION" == "" ]] && $(rsd::source_lib_or_die lib/config.lib)
+
+RSD_C_CONFIG_SHORT_DESC="Configuration Management Subsystem"
+RSD_C_CONFIG_VERSION="0.1.0"
+
+# Help and usage action
+function rsd::c::config::help() {
+    echo -e "\n\tConfiguration Command Help:\n"
+    echo -e "\t\tActions:"
+    echo -e "\t\t\tget <key>             Get a configuration value"
+    echo -e "\t\t\tset <key> <value>     Set a configuration value"
+    echo -e "\t\t\tlist                  List all resolved configurations"
+}
+
+# Get a configuration value
+# @param string $1 The key to retrieve (e.g. 'RSD_GPG_USER_ID' or 'remote.host1.user')
+# @return int 0 on success, 2 on bad usage, 10 if not found
+function rsd::c::config::get() {
+    rsd::arguments_or_usage 1 "$@"
+    local key="$1"
+
+    # Intent: Determine if key is a global .conf or standard INI value
+    if [[ "$key" =~ ^RSD_ ]]; then
+        # Resolve from active shell environment
+        if [[ -v "$key" ]]; then
+            echo "${!key}"
+            return 0
+        else
+            rsd::warn "Error: Global configuration '$key' is not set."
+            return 10
+        fi
+    elif [[ "$key" =~ \. ]]; then
+        # Parse module INI (e.g. remote.host1.user)
+        local module="${key%%.*}"
+        local subkey="${key#*.}"
+        local array_name="R_INI_${module}"
+
+        # Lazy-load INI if not present
+        if [[ ! -v "$array_name" ]]; then
+            eval "declare -gA $array_name"
+            local config_file
+            if config_file=$(rsd::config::get_file "$module" 2>/dev/null); then
+                # Sourcing get_file will execute the read_ini evaluator hook
+                eval "$config_file"
+            fi
+        fi
+
+        declare -n config_ref="$array_name"
+        if bash::key_exists "$subkey" in "$array_name"; then
+            echo "${config_ref[$subkey]}"
+            return 0
+        else
+            rsd::warn "Error: Configuration key '$subkey' not found in module '$module'."
+            return 10
+        fi
+    else
+        rsd::warn "Error: Invalid key format. Use 'RSD_VAR' or 'module.section.key'."
+        return 2
+    fi
+}
+
+# Set a configuration value
+# @param string $1 The key to set (e.g. 'RSD_GPG_USER_ID' or 'remote.host1.user')
+# @param string $2 The value to assign
+# @return int 0 on success, 2 on bad usage, 13 on write failure
+function rsd::c::config::set() {
+    rsd::arguments_or_usage 2 "$@"
+    local key="$1"
+    local value="$2"
+
+    local user_config_dir="${RSD_CONFIG_DIR:-$HOME/.config/rsd}"
+    
+    if [[ "$key" =~ ^RSD_ ]]; then
+        # Writing to rsd.conf
+        local rsd_conf="$user_config_dir/rsd.conf"
+        rsd::l::config::set_conf_value "$rsd_conf" "$key" "$value" || return $?
+        rsd::warn "Successfully set '$key' to '$value' in '$rsd_conf'."
+        return 0
+    elif [[ "$key" =~ \. ]]; then
+        # Writing to module.ini
+        local module="${key%%.*}"
+        local subkey="${key#*.}"
+        
+        if [[ ! "$subkey" =~ \. ]]; then
+            rsd::warn "Error: INI keys must be in 'module.section.key' format."
+            return 2
+        fi
+
+        local ini_file="$user_config_dir/${module}.ini"
+        local array_name="R_INI_${module}"
+
+        # 1. Initialize temporary empty array
+        eval "declare -gA $array_name"
+
+        # 2. Read existing values if the file exists
+        if [[ -f "$ini_file" ]]; then
+            rsd::config::read_ini "$ini_file" "$array_name" || return 13
+        fi
+
+        # 3. Update the entry
+        declare -n config_ref="$array_name"
+        config_ref["$subkey"]="$value"
+
+        # 4. Write back to INI file
+        rsd::config::write_ini "$ini_file" "$array_name" || return 13
+        rsd::warn "Successfully set '$subkey' to '$value' in '$ini_file'."
+        return 0
+    else
+        rsd::warn "Error: Invalid key format. Use 'RSD_VAR' or 'module.section.key'."
+        return 2
+    fi
+}
+
+# List all resolved configurations
+# @return int 0
+function rsd::c::config::list() {
+    rsd::warn "=== Resolved Global Configurations (Active Env) ==="
+    local var
+    for var in $(compgen -v | grep ^RSD_ | sort); do
+        echo "$var=${!var}"
+    done
+
+    # Find loaded INI modules
+    local active_inis
+    active_inis=$(compgen -v | grep ^R_INI_)
+    if [[ -n "$active_inis" ]]; then
+        rsd::warn -e "\n=== Loaded Module INI Settings ==="
+        local ini_var
+        for ini_var in $active_inis; do
+            local module="${ini_var#R_INI_}"
+            declare -n config_ref="$ini_var"
+            local key
+            for key in "${!config_ref[@]}"; do
+                echo "${module}.${key}=${config_ref[$key]}"
+            done
+        done
+    fi
+    return 0
+}
