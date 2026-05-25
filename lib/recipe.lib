@@ -22,6 +22,7 @@ declare -g -A RSD_TASKS_APPLY
 declare -g -A RSD_TASKS_POST
 declare -g -A RSD_TASKS_RECOVERY
 declare -g -A RSD_TASKS_ROLLBACK
+declare -g -A RSD_INCLUDED_RECIPES=()
 
 # Session stack tracking completed tasks
 declare -g -a RSD_COMPLETED_STACK=()
@@ -75,6 +76,17 @@ function rsd::recipe::register_task() {
 function rsd::recipe::include_recipe() {
     rsd::arguments_or_usage 1 "$@"
     local name="$1"
+
+    # Reset included registry if starting a completely fresh task stack compilation
+    if [[ ${#RSD_REGISTERED_TASKS[@]} -eq 0 ]]; then
+        RSD_INCLUDED_RECIPES=()
+    fi
+
+    # Double-inclusion guard prevents duplicate task registration
+    if [[ "${RSD_INCLUDED_RECIPES["$name"]}" == "1" ]]; then
+        return 0
+    fi
+    RSD_INCLUDED_RECIPES["$name"]=1
 
     if ! rsd::check_libdir_file "lib/recipe/${name}.recipe"; then
         rsd::warn "Error: Sub-recipe file '${name}' could not be resolved."

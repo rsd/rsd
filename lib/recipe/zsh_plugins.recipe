@@ -10,6 +10,9 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 function rsd::recipe::zsh_plugins::register() {
+    # Prerequisite: Zsh and Oh My Zsh base must be satisfied first
+    rsd::recipe::include_recipe "zsh_core"
+
     rsd::recipe::register_task \
         --name "zsh_plugins::clone_autosuggestions" \
         --pre-check "rsd::recipe::zsh_plugins::autosug_pre" \

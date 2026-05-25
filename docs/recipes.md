@@ -207,21 +207,52 @@ function rsd::recipe::my_app::config_rollback() {
 }
 ```
 
----
+## 6. Recipe Dependencies & Composition
 
-## 6. Composition: Master Recipes
+To build complex systems, the framework allows recipes to compose or depend on other upstream recipes. This is managed sequentially through `rsd::recipe::include_recipe`.
 
-To build compound orchestrations, write a master recipe that includes other sub-recipes sequentially:
+### A. Composing Master Recipes
+A master recipe aggregates multiple sub-recipes sequentially to compile a single unified stack:
 
 ```bash
 function rsd::recipe::my_dev_stack::register() {
-    # Include base utilities
+    # Include base shell utilities
     rsd::recipe::include_recipe "zsh_core"
 
-    # Include custom toolchain
+    # Include custom application configurations
     rsd::recipe::include_recipe "my_app"
 }
 ```
+
+### B. Declaring Recipe Prerequisites (Self-Healing Dependencies)
+If a sub-recipe depends on upstream configurations to function correctly (for example, `zsh_theme` or `zsh_plugins` requiring Zsh and Oh My Zsh base to be present), it must explicitly declare that dependency as a prerequisite at the very beginning of its registration hook:
+
+```bash
+function rsd::recipe::zsh_theme::register() {
+    # Prerequisite: Core Zsh and Oh My Zsh base must be satisfied first
+    rsd::recipe::include_recipe "zsh_core"
+
+    # Register theme configuration tasks
+    rsd::recipe::register_task \
+        --name "zsh_theme::clone_p10k" \
+        --pre-check "rsd::recipe::zsh_theme::theme_pre" \
+        --apply "rsd::recipe::zsh_theme::theme_apply" \
+        --recovery "forward"
+    # ...
+}
+```
+If a user runs the `zsh_theme` recipe directly (`./rsd recipe run zsh_theme`), the engine automatically detects and satisfy the prerequisite tasks from `zsh_core` first.
+
+### C. Double-Inclusion Protection
+To prevent task duplication when multiple sub-recipes declare the same prerequisite, the compiler implements a dynamic **Double-Inclusion Guard** using the global `RSD_INCLUDED_RECIPES` registry. 
+
+Each recipe name is recorded in the registry upon its first compile invocation:
+- When a recipe is included, the compiler checks if it has already been registered.
+- If it has, the compiler skips re-registration instantly.
+- This ensures that in master compositions like `zsh_dev_setup` (which includes `zsh_core` and then includes multiple sub-recipes that also depend on `zsh_core`), the `zsh_core` tasks are registered **exactly once**.
+
+### D. Necessity Check Efficiency
+Because every task in RSD defines a `--pre-check` necessity guard, resolving dependencies has zero performance penalty if they are already satisfied on the host system. The engine runs pre-checks, finds them satisfied, skips them instantly (taking less than a millisecond), and proceeds straight to the target payload.
 
 ---
 

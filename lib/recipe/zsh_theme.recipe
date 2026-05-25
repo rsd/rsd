@@ -10,6 +10,9 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 function rsd::recipe::zsh_theme::register() {
+    # Prerequisite: Zsh and Oh My Zsh base must be satisfied first
+    rsd::recipe::include_recipe "zsh_core"
+
     rsd::recipe::register_task \
         --name "zsh_theme::clone_p10k" \
         --pre-check "rsd::recipe::zsh_theme::theme_pre" \

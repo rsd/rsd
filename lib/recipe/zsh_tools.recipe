@@ -14,6 +14,9 @@ fi
 [[ "$RSD_SUDO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/sudo.lib)"
 
 function rsd::recipe::zsh_tools::register() {
+    # Prerequisite: Zsh and Oh My Zsh base must be satisfied first
+    rsd::recipe::include_recipe "zsh_core"
+
     rsd::recipe::register_task \
         --name "zsh_tools::install_companion_tools" \
         --pre-check "rsd::recipe::zsh_tools::companion_pre" \
