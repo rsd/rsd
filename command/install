@@ -159,25 +159,35 @@ function rsd::c::install::command() {
             rsd::l::remote::execute "$RSD_REMOTE_TARGET" "$rsd_bin" "install" "$package" "${remote_opts[@]}"
             return $?
         else
-            local raw_cmd
+            local -a install_cmd=()
+            local target_spec="$RSD_REMOTE_TARGET"
             case "$pkg_manager" in
-                apt)     raw_cmd="sudo apt-get install -y $package" ;;
-                pacman)  raw_cmd="sudo pacman -Sy --noconfirm $package" ;;
-                dnf)     raw_cmd="sudo dnf install -y $package" ;;
-                zypper)  raw_cmd="sudo zypper install -y $package" ;;
-                apk)     raw_cmd="sudo apk add $package" ;;
-                brew)    raw_cmd="brew install $package" ;;
+                apt)     install_cmd=("apt-get" "install" "-y" "$package")
+                         target_spec="${RSD_REMOTE_TARGET},sudo://root" ;;
+                pacman)  install_cmd=("pacman" "-Sy" "--noconfirm" "$package")
+                         target_spec="${RSD_REMOTE_TARGET},sudo://root" ;;
+                dnf)     install_cmd=("dnf" "install" "-y" "$package")
+                         target_spec="${RSD_REMOTE_TARGET},sudo://root" ;;
+                zypper)  install_cmd=("zypper" "install" "-y" "$package")
+                         target_spec="${RSD_REMOTE_TARGET},sudo://root" ;;
+                apk)     install_cmd=("apk" "add" "$package")
+                         target_spec="${RSD_REMOTE_TARGET},sudo://root" ;;
+                brew)    install_cmd=("brew" "install" "$package") ;;
                 *)       rsd::warn "Error: Unrecognized package manager '$pkg_manager' for raw remote execution."
                          return 3 ;;
             esac
             
             if ((dry_run)); then
-                echo "REMOTE_DRY_RUN: ssh $RSD_REMOTE_TARGET -> $raw_cmd"
+                if [[ "$target_spec" == *",sudo://"* ]]; then
+                    echo "REMOTE_DRY_RUN: ssh $RSD_REMOTE_TARGET -> sudo ${install_cmd[*]}"
+                else
+                    echo "REMOTE_DRY_RUN: ssh $RSD_REMOTE_TARGET -> ${install_cmd[*]}"
+                fi
                 return 0
             fi
             
-            rsd::warn "Executing raw package manager remotely: $raw_cmd"
-            rsd::l::remote::execute "$RSD_REMOTE_TARGET" $raw_cmd
+            rsd::warn "Executing raw package manager remotely: ${install_cmd[*]}"
+            rsd::l::remote::execute "$target_spec" "${install_cmd[@]}"
             return $?
         fi
     else

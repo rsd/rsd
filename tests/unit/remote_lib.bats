@@ -40,6 +40,16 @@ setup() {
     [ "$port" = "8080" ]
 }
 
+@test "rsd::l::remote::parse_spec splits sudo targets" {
+    local proto user host port
+    rsd::l::remote::parse_spec "sudo://root" proto user host port
+
+    [ "$proto" = "sudo" ]
+    [ "$user" = "root" ]
+    [ -z "$host" ]
+    [ -z "$port" ]
+}
+
 @test "rsd::l::remote::parse_spec defaults host-only targets to SSH" {
     local proto user host port
     rsd::l::remote::parse_spec "gateway.production" proto user host port
@@ -89,6 +99,25 @@ setup() {
     # Outer hop (SSH) should be executed locally, with the inner LXC hop compiled and nested inside
     [[ "$output" == *"CALLED_SSH: user= host=hostA port="* ]]
     [[ "$output" == *"payload=(lxc-attach -n containerB --clear-env --user root -- gpg check)"* ]]
+}
+
+@test "rsd::l::remote::delegate compiles and dispatches intermediate sudo hops" {
+    export RSD_MOCK_SUDO_PASSWORD="remote-sudo-pass"
+
+    # Mock the SSH execution runner
+    rsd::l::protocol::ssh::run() {
+        echo "CALLED_SSH: user=$1 host=$2 port=$3 payload=(${@:4})"
+        return 0
+    }
+
+    # Execute a pathway: hostA (SSH), sudo://root
+    run rsd::l::remote::delegate "hostA,sudo://root" "gpg" "check"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CALLED_SSH: user= host=hostA port="* ]]
+    [[ "$output" == *"payload=(sh -c echo 'remote-sudo-pass' | sudo -S -p '' -u root --  'gpg' 'check')"* ]]
+
+    unset RSD_MOCK_SUDO_PASSWORD
 }
 
 @test "rsd::l::remote::prompt_user correctly parses mock prompts" {

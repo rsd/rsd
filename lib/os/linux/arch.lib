@@ -11,6 +11,7 @@ fi
 
 # Upstream Recursive Sourcing Hook: Load base parent library
 [[ "$RSD_OS_LINUX_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/os/linux.lib)"
+[[ "$RSD_SUDO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/sudo.lib)"
 
 if [[ "$RSD_OS_ARCH_LIB" == "1" ]]; then
     return 0
@@ -20,7 +21,6 @@ RSD_OS_ARCH_LIB_VERSION="0.1.0"
 
 # Install a package dynamically using Pacman.
 # Intent: Overrides generic Linux package installation to use pacman.
-#         TODO/FIXME: Offload elevation and privilege validation to a dedicated sudo.lib later.
 #
 # @param string $1 The name of the package.
 # @return int exit code of execution.
@@ -34,7 +34,7 @@ function rsd::l::os::install_package() {
         return 0
     fi
     
-    sudo "${cmd[@]}"
+    rsd::l::sudo::run "" "${cmd[@]}"
     return $?
 }
 

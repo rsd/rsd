@@ -124,3 +124,63 @@ function rsd::l::protocol::lxc::run() {
     lxc-attach -n "$host" "${lxc_opts[@]}" -- "${payload[@]}"
     return $?
 }
+
+# ==============================================================================
+# Sudo Protocol Handler
+# ==============================================================================
+
+# Executes a command payload elevated via sudo (locally or remotely)
+# Arguments:
+#   $1 - user (optional, can be empty, e.g. root)
+#   $2 - host (optional, can be empty or localhost)
+#   $3 - port (ignored for sudo)
+#   $4..$* - Command payload to execute
+# Returns:
+#   Exit code of the sudo execution
+function rsd::l::protocol::sudo::run() {
+    rsd::arguments_or_usage 2 "$@"
+    
+    local user="$1"
+    local host="$2"
+    local port="$3"
+    shift 3
+    
+    # Sourcing-Inheritance hook for sudo.lib if not yet active
+    [[ "$RSD_SUDO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/sudo.lib)"
+
+    # If the execution target is localhost or empty, run locally
+    if [[ -z "$host" || "$host" == "localhost" ]]; then
+        rsd::l::sudo::run "$user" "$@"
+        return $?
+    fi
+
+    # Otherwise, if host is specified, it represents a remote execution over ssh fallback
+    source "$(rsd::get_libdir_file lib/remote.lib)"
+    
+    # Retrieve password for the host (remote host)
+    local password=""
+    rsd::l::sudo::get_password "$host" "$user" password
+    
+    local -a active_payload=("$@")
+    if [[ -n "$password" ]]; then
+        local escaped_pass
+        escaped_pass=$(printf '%s' "$password" | sed "s/'/'\\\\''/g")
+        
+        # Shell-escape the active payload arguments cleanly
+        local escaped_cmd=""
+        local item
+        for item in "${active_payload[@]}"; do
+            escaped_cmd="${escaped_cmd} '$(printf '%s' "$item" | sed "s/'/'\\\\''/g")'"
+        done
+        
+        # Execute using a secure piping subshell remotely
+        rsd::l::remote::execute "$host" "sh" "-c" "echo '${escaped_pass}' | sudo -S -p '' -u ${user:-root} -- ${escaped_cmd}"
+        return $?
+    else
+        # Run standard remote sudo (may prompt)
+        local -a sudo_opts=("-u" "${user:-root}")
+        rsd::l::remote::execute "$host" "sudo" "${sudo_opts[@]}" -- "${active_payload[@]}"
+        return $?
+    fi
+}
+

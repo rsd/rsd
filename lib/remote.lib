@@ -56,14 +56,19 @@ function rsd::l::remote::parse_spec() {
     if [[ "$spec" =~ ^([^@]+)@(.*)$ ]]; then
         _r_user="${BASH_REMATCH[1]}"
         spec="${BASH_REMATCH[2]}"
+    elif [[ "$_r_proto" == "sudo" ]]; then
+        _r_user="$spec"
+        spec=""
     fi
 
     # 3. Parse Port Map: host:port
-    if [[ "$spec" =~ ^([^:]+):([0-9]+)$ ]]; then
-        _r_host="${BASH_REMATCH[1]}"
-        _r_port="${BASH_REMATCH[2]}"
-    else
-        _r_host="$spec"
+    if [[ -n "$spec" ]]; then
+        if [[ "$spec" =~ ^([^:]+):([0-9]+)$ ]]; then
+            _r_host="${BASH_REMATCH[1]}"
+            _r_port="${BASH_REMATCH[2]}"
+        else
+            _r_host="$spec"
+        fi
     fi
 }
 
@@ -187,6 +192,33 @@ function rsd::l::remote::delegate() {
                     lxc_opts+=("--clear-env" "--user" "$user")
                 fi
                 active_payload=("lxc-attach" -n "$host" "${lxc_opts[@]}" -- "${active_payload[@]}")
+            elif [[ "$proto" == "sudo" ]]; then
+                # Sudo intermediate hop packaging:
+                # Find password of host reached in the previous hop (hops[i-1])
+                local prev_hop="${hops[i-1]}"
+                local p_proto p_user p_host p_port
+                rsd::l::remote::parse_spec "$prev_hop" p_proto p_user p_host p_port
+
+                # Sourcing-Inheritance hook for sudo.lib if not active
+                [[ "$RSD_SUDO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/sudo.lib)"
+
+                local password=""
+                rsd::l::sudo::get_password "${p_host:-localhost}" "$user" password
+
+                # Shell-escape the active payload arguments cleanly
+                local escaped_cmd=""
+                local item
+                for item in "${active_payload[@]}"; do
+                    escaped_cmd="${escaped_cmd} '$(printf '%s' "$item" | sed "s/'/'\\\\''/g")'"
+                done
+
+                if [[ -n "$password" ]]; then
+                    local escaped_pass
+                    escaped_pass=$(printf '%s' "$password" | sed "s/'/'\\\\''/g")
+                    active_payload=("sh" "-c" "echo '${escaped_pass}' | sudo -S -p '' -u ${user:-root} -- ${escaped_cmd}")
+                else
+                    active_payload=("sudo" "-u" "${user:-root}" "--" "${active_payload[@]}")
+                fi
             else
                 rsd::warn "Error: Protocol '$proto' does not support intermediate hop packaging."
                 exit 3
