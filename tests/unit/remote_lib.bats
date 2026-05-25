@@ -90,3 +90,74 @@ setup() {
     [[ "$output" == *"CALLED_SSH: user= host=hostA port="* ]]
     [[ "$output" == *"payload=(lxc-attach -n containerB --clear-env --user root -- gpg check)"* ]]
 }
+
+@test "rsd::l::remote::prompt_user correctly parses mock prompts" {
+    # 1. User accepts (Mock Y)
+    export RSD_MOCK_PROMPT_REPLY="Y"
+    run rsd::l::remote::prompt_user "Mock prompt?"
+    [ "$status" -eq 0 ]
+    
+    # 2. User declines (Mock N)
+    export RSD_MOCK_PROMPT_REPLY="N"
+    run rsd::l::remote::prompt_user "Mock prompt?"
+    [ "$status" -eq 1 ]
+}
+
+@test "rsd::l::remote::bootstrap_check handles remote targets with framework already installed" {
+    # Mock dynamic ssh probe command execution
+    rsd::l::remote::execute() {
+        local target="$1"
+        local cmd="$2"
+        if [[ "$cmd" == "rsd" && "$3" == "--version" ]]; then
+            echo "1.9.11"
+            return 0
+        fi
+        return 1
+    }
+    
+    local rsd_bin=""
+    rsd::l::remote::bootstrap_check "mock-host" rsd_bin
+    
+    [ "$?" -eq 0 ]
+    [ "$rsd_bin" = "rsd" ]
+}
+
+@test "rsd::l::remote::bootstrap_check aborts if framework is missing and user declines installation" {
+    # Mock probe failure (RSD missing remotely)
+    rsd::l::remote::execute() {
+        return 127
+    }
+    
+    # Mock user declining installation
+    rsd::l::remote::prompt_user() {
+        return 1
+    }
+    
+    local rsd_bin=""
+    run rsd::l::remote::bootstrap_check "mock-host" rsd_bin
+    [ "$status" -eq 1 ]
+}
+
+@test "rsd::l::remote::bootstrap_check warns but continues if remote is older and user declines upgrade" {
+    # Mock probe returning an older remote version
+    rsd::l::remote::execute() {
+        local cmd="$2"
+        if [[ "$cmd" == "rsd" && "$3" == "--version" ]]; then
+            echo "1.8.0"
+            return 0
+        fi
+        return 1
+    }
+    
+    # Mock user declining upgrade
+    rsd::l::remote::prompt_user() {
+        return 1
+    }
+    
+    local rsd_bin=""
+    rsd::l::remote::bootstrap_check "mock-host" rsd_bin
+    
+    [ "$?" -eq 0 ]
+    [ "$rsd_bin" = "rsd" ]
+}
+

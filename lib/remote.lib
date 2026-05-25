@@ -213,3 +213,149 @@ function rsd::l::remote::execute() {
     rsd::l::remote::delegate "$remote_spec" "${command_payload[@]}"
     return $?
 }
+
+# Securely prompt the user for interactive confirmations via /dev/tty.
+# Intent: Hook into the controlling terminal device so that redirected stdin pipelines
+#         do not bypass or break input queries.
+#
+# @param string $1 The prompt message to show.
+# @return int 0 if the user replied Yes/Y, 1 if the user declined.
+function rsd::l::remote::prompt_user() {
+    rsd::arguments_or_usage 1 "$@"
+    local prompt_msg="$1"
+    local reply
+    
+    # Prompt the user on stderr and read from /dev/tty
+    echo -n "$prompt_msg " >&2
+    if read -n 1 -r reply < /dev/tty 2>/dev/null; then
+        echo >&2 # line break
+        if [[ "$reply" =~ ^[Yy]$ ]]; then
+            return 0
+        fi
+    else
+        # Fallback if /dev/tty is not available (e.g. non-interactive or bats test mocks)
+        if [[ "${RSD_MOCK_PROMPT_REPLY}" == "Y" ]]; then
+            echo "(Mocked Y)" >&2
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Packages the local RSD tree into a tar stream, dispatches it, and installs it user-space.
+# Intent: Performs a zero-dependency remote bootstrap installation. Automatically cleans up
+#         temporary files on the destination target on completion.
+#
+# @param string $1 The target remote specification.
+# @return int 0 on success, 13 on write failure, 14 on temp directory failure.
+function rsd::l::remote::bootstrap_install() {
+    rsd::arguments_or_usage 1 "$@"
+    local remote_spec="$1"
+    
+    rsd::check_binaries_or_fail tar
+    
+    rsd::warn "Bootstrapping RSD on remote target '$remote_spec'..."
+    
+    # Intent: Create a unique temporary directory name remotely to avoid collisions
+    #         e.g., /tmp/rsd-bootstrap.XXXXXX. Since mktemp might vary on remote systems,
+    #         we can use a random suffix compiled locally.
+    local rand_suffix
+    rand_suffix=$(openssl rand -hex 6 2>/dev/null || echo "123456789")
+    local remote_tmp="/tmp/rsd-bootstrap-${rand_suffix}"
+    
+    # 1. Dispatch tarball and unpack remotely
+    rsd::warn "Streaming local RSD files to remote target..."
+    if ! tar -cf - -C "$RSD_RUN_DIR" rsd lib command config data 2>/dev/null | \
+         rsd::l::remote::execute "$remote_spec" "mkdir" "-p" "$remote_tmp" "&&" "tar" "-xf" "-" "-C" "$remote_tmp" >/dev/null; then
+        rsd::warn "Error: Failed to stream and unpack RSD on remote host."
+        # Clean up in case directory was created
+        rsd::l::remote::execute "$remote_spec" "rm" "-rf" "$remote_tmp" 2>/dev/null
+        return 13
+    fi
+    
+    # 2. Run remote user installer
+    rsd::warn "Executing remote user-space installer..."
+    if ! rsd::l::remote::execute "$remote_spec" "bash" "${remote_tmp}/rsd" "--install" "user" >/dev/null; then
+        rsd::warn "Error: Remote framework installer failed."
+        rsd::l::remote::execute "$remote_spec" "rm" "-rf" "$remote_tmp" 2>/dev/null
+        return 13
+    fi
+    
+    # 3. Clean up remote temp directory
+    rsd::l::remote::execute "$remote_spec" "rm" "-rf" "$remote_tmp" >/dev/null
+    
+    rsd::warn "Successfully bootstrapped RSD on remote target '$remote_spec'."
+    return 0
+}
+
+# Coordinate remote pre-flight framework validation.
+# Intent: Probes for remote RSD presence, guides self-healing copy-install bootstrap
+#         on target hosts, and compares version parity for compliance sync-upgrades.
+#
+# @param string $1 The target remote specification.
+# @param string& $2 nameref output variable for resolved remote binary string (e.g. 'rsd' or '$HOME/.local/bin/rsd').
+# @return int 0 on success, 1 on failure.
+function rsd::l::remote::bootstrap_check() {
+    rsd::arguments_or_usage 2 "$@"
+    local remote_spec="$1"
+    local _out_bin="$2"
+    declare -n _r_bin="$_out_bin"
+    
+    _r_bin="rsd"
+    
+    # 1. Probe for framework presence
+    local remote_ver=""
+    rsd::debug "Probing remote framework on '$remote_spec' via raw 'rsd --version'..." 15
+    remote_ver=$(rsd::l::remote::execute "$remote_spec" "rsd" "--version" 2>/dev/null)
+    local probe_status=$?
+    
+    if [[ $probe_status -ne 0 ]]; then
+        # Try local user-space path fallback
+        rsd::debug "Raw probe failed. Probing via '\$HOME/.local/bin/rsd'..." 15
+        remote_ver=$(rsd::l::remote::execute "$remote_spec" "\$HOME/.local/bin/rsd" "--version" 2>/dev/null)
+        probe_status=$?
+        if [[ $probe_status -eq 0 ]]; then
+            _r_bin="\$HOME/.local/bin/rsd"
+        fi
+    fi
+    
+    # 2. Trigger bootstrapper if missing
+    if [[ $probe_status -ne 0 ]]; then
+        if rsd::l::remote::prompt_user "RSD is not installed on remote target '$remote_spec'. Would you like to bootstrap the installation now? [Y/n]"; then
+            if ! rsd::l::remote::bootstrap_install "$remote_spec"; then
+                rsd::warn "Error: Failed to bootstrap remote target."
+                return 1
+            fi
+            
+            # Re-verify and set resolved binary
+            remote_ver=$(rsd::l::remote::execute "$remote_spec" "\$HOME/.local/bin/rsd" "--version" 2>/dev/null)
+            if [[ $? -eq 0 ]]; then
+                _r_bin="\$HOME/.local/bin/rsd"
+            else
+                rsd::warn "Error: Bootstrapper completed but framework remains unresolvable on target."
+                return 1
+            fi
+        else
+            rsd::warn "Abort: Command delegation declined because remote framework is missing."
+            return 1
+        fi
+    fi
+    
+    # 3. Parity & Version Compliance check
+    # Trim leading/trailing whitespace
+    remote_ver="${remote_ver#"${remote_ver%%[![:space:]]*}"}"
+    remote_ver="${remote_ver%"${remote_ver%%[![:space:]]*}"}"
+    
+    if rsd::version_gt "$RSD_VERSION" "$remote_ver"; then
+        rsd::warn "Warning: Remote framework version ($remote_ver) is older than your local version ($RSD_VERSION)."
+        if rsd::l::remote::prompt_user "Would you like to sync-upgrade remote target '$remote_spec' to $RSD_VERSION? [Y/n]"; then
+            if ! rsd::l::remote::bootstrap_install "$remote_spec"; then
+                rsd::warn "Error: Failed to upgrade remote target. Executing with existing version $remote_ver."
+            else
+                _r_bin="\$HOME/.local/bin/rsd"
+            fi
+        fi
+    fi
+    
+    return 0
+}
