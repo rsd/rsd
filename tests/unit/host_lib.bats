@@ -163,3 +163,12 @@ EOF
     [ "$?" -eq 0 ]
     [ "$local_family" = "arch" ]
 }
+
+@test "rsd::l::host::generate_standalone_script generates non-empty bash script" {
+    local script=""
+    rsd::l::host::generate_standalone_script script
+    [ "$?" -eq 0 ]
+    [ -n "$script" ]
+    [[ "$script" == *"os="* ]]
+    [[ "$script" == *"pkg_manager="* ]]
+}

@@ -177,3 +177,88 @@ function rsd::l::host::get_property() {
     _r_val=""
     return 1
 }
+
+# Generates a standalone, self-contained Bash script for platform discovery.
+# Intent: Construct a zero-dependency platform detection snippet that can be executed
+#         directly by bash -s on a remote system via standard input redirection.
+#
+# @param string& $1 nameref output variable for script contents.
+# @return int 0.
+function rsd::l::host::generate_standalone_script() {
+    rsd::arguments_or_usage 1 "$@"
+    local _out_script="$1"
+    declare -n _r_script="$_out_script"
+    
+    _r_script=$(cat << 'EOF'
+os=$(uname -s | tr '[:upper:]' '[:lower:]')
+arch=$(uname -m | tr '[:upper:]' '[:lower:]')
+distro="unknown"
+family="unknown"
+version="unknown"
+pkg_manager="unknown"
+
+if [[ "$os" == "linux" ]]; then
+    os_release_file="/etc/os-release"
+    if [[ ! -f "$os_release_file" && -f "/usr/lib/os-release" ]]; then
+        os_release_file="/usr/lib/os-release"
+    fi
+    if [[ -f "$os_release_file" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [[ -z "$line" || "$line" =~ ^# ]] && continue
+            if [[ "$line" =~ ^([A-Za-z0-9_]+)=(.*)$ ]]; then
+                key="${BASH_REMATCH[1]}"
+                value="${BASH_REMATCH[2]}"
+                if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
+                    value="${BASH_REMATCH[1]}"
+                fi
+                case "$key" in
+                    ID) raw_id="$value" ;;
+                    ID_LIKE) raw_id_like="$value" ;;
+                    VERSION_ID) raw_version_id="$value" ;;
+                esac
+            fi
+        done < "$os_release_file"
+        
+        if [[ -n "$raw_id" ]]; then
+            distro=$(echo "$raw_id" | tr '[:upper:]' '[:lower:]')
+        fi
+        if [[ -n "$raw_version_id" ]]; then
+            version=$(echo "$raw_version_id" | tr '[:upper:]' '[:lower:]')
+        else
+            version="rolling"
+        fi
+        if [[ -n "$raw_id_like" ]]; then
+            read -r family_cand _ <<< "$raw_id_like"
+            family=$(echo "$family_cand" | tr '[:upper:]' '[:lower:]')
+        else
+            family="$distro"
+        fi
+        case "$family" in
+            debian)  pkg_manager="apt" ;;
+            arch)    pkg_manager="pacman" ;;
+            fedora|rhel|centos) pkg_manager="dnf" ;;
+            suse|opensuse)      pkg_manager="zypper" ;;
+            alpine)  pkg_manager="apk" ;;
+        esac
+    fi
+elif [[ "$os" == "darwin" ]]; then
+    distro="macos"
+    family="darwin"
+    pkg_manager="brew"
+    if hash sw_vers 2>/dev/null; then
+        version=$(sw_vers -productVersion)
+    fi
+fi
+
+echo "os=$os"
+echo "arch=$arch"
+echo "distro=$distro"
+echo "family=$family"
+echo "version=$version"
+echo "pkg_manager=$pkg_manager"
+EOF
+)
+    return 0
+}

@@ -901,7 +901,7 @@ if [[ "${RSD_ARGS[command]}" ]]; then
             else
                 rsd::debug "Command $RSD_COMMAND is remote-naive (Mode B Remote Delegation fallback)." 15
                 source "$(rsd::get_libdir_file lib/remote.lib)"
-                rsd::l::remote::execute "$RSD_REMOTE_TARGET" "$RSD_COMMAND" "${RSD_ARGS_UNPROCESSED[@]}"
+                rsd::l::remote::execute "$RSD_REMOTE_TARGET" "rsd" "$RSD_COMMAND" "${RSD_ARGS_UNPROCESSED[@]}"
                 exit $?
             fi
         else

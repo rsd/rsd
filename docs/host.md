@@ -81,12 +81,13 @@ Performs dynamic identification on the target machine and saves all properties t
 ```
 
 ### C. Remote Execution Integration
-Since the `host` command module is remote-naive (`RSD_C_HOST_REMOTE_AWARE=0`), executing the command with a remote spec automatically delegates it to run on the destination host via SSH/LXC:
+The `host` command module is **remote-aware** (`RSD_C_HOST_REMOTE_AWARE=1`). This triggers the local engine to orchestrate remote platform scans by compiling a lightweight standalone platform discovery script and piping it dynamically to the remote target over SSH/LXC:
+
 ```bash
-# Safely runs discovery on server1 and returns its properties locally
+# Performs zero-dependency discovery on server1 and displays properties locally (no RSD required on server1)
 rsd @server1 host identify
 
-# Identifies server1 and saves the profile to hosts.ini on server1's config path
+# Identifies server1 and saves its discovered profile into the LOCAL hosts.ini config under section [server1]
 rsd @server1 host save
 ```
 

@@ -14,8 +14,8 @@ fi
 RSD_C_HOST_SHORT_DESC="Host Platform Identification Subsystem"
 RSD_C_HOST_VERSION="0.1.1"
 
-# Host command is remote-naive to support automatic delegation (Mode B)
-RSD_C_HOST_REMOTE_AWARE=0
+# Host command is remote-aware (Mode A) to orchestrate local/remote discovery natively
+RSD_C_HOST_REMOTE_AWARE=1
 
 # Help and usage action.
 # Intent: Display sub-commands and description for the host module.
@@ -30,27 +30,46 @@ function rsd::c::host::help() {
 
 # Discover and display host properties.
 # Intent: Query platform attributes dynamically and print them to stdout as key=value lines.
+#         If a remote target is specified, pipes a zero-dependency Bash script remotely.
 #
 # @return int 0 on success.
 # @throws 10 on platform identification failure.
 function rsd::c::host::identify() {
-    declare -A props
-    if ! rsd::l::host::identify props; then
-        rsd::warn "Error: Failed to identify host properties."
-        return 10
-    fi
-    
-    local key
-    for key in os arch distro family version pkg_manager; do
-        if [[ -v props[$key] ]]; then
-            echo "${key}=${props[$key]}"
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        local script_content
+        [[ "$RSD_HOST_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/host.lib)
+        rsd::l::host::generate_standalone_script script_content
+        
+        # Intent: Source remote library dynamically to invoke delegation protocol
+        source "$(rsd::get_libdir_file lib/remote.lib)"
+        
+        local remote_output
+        if ! remote_output=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "bash" "-s" <<< "$script_content" 2>/dev/null); then
+            rsd::warn "Error: Failed to identify remote host properties over transport."
+            return 10
         fi
-    done
-    return 0
+        echo "$remote_output"
+        return 0
+    else
+        declare -A props
+        if ! rsd::l::host::identify props; then
+            rsd::warn "Error: Failed to identify host properties."
+            return 10
+        fi
+        
+        local key
+        for key in os arch distro family version pkg_manager; do
+            if [[ -v props[$key] ]]; then
+                echo "${key}=${props[$key]}"
+            fi
+        done
+        return 0
+    fi
 }
 
 # Save host configuration to hosts.ini.
-# Intent: Discovers host properties and writes them atomically into hosts.ini config file.
+# Intent: Discovers host properties and writes them atomically into the local hosts.ini file.
+#         Pipes standalone script when executing against remote targets to avoid RSD dependencies.
 #
 # @param string $1 Optional host alias override. Defaults to 'localhost' or remote target spec.
 # @return int 0 on success.
@@ -67,9 +86,32 @@ function rsd::c::host::save() {
     fi
     
     declare -A props
-    if ! rsd::l::host::identify props; then
-        rsd::warn "Error: Failed to identify host properties."
-        return 10
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        local script_content
+        [[ "$RSD_HOST_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/host.lib)
+        rsd::l::host::generate_standalone_script script_content
+        
+        source "$(rsd::get_libdir_file lib/remote.lib)"
+        
+        local remote_output
+        if ! remote_output=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "bash" "-s" <<< "$script_content" 2>/dev/null); then
+            rsd::warn "Error: Failed to identify remote host properties over transport."
+            return 10
+        fi
+        
+        # Intent: Parse the remote key=value output lines into the local props array
+        local line key val
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            if [[ "$line" =~ ^([a-zA-Z0-9_]+)=(.*)$ ]]; then
+                props["${BASH_REMATCH[1]}"]="${BASH_REMATCH[2]}"
+            fi
+        done <<< "$remote_output"
+    else
+        if ! rsd::l::host::identify props; then
+            rsd::warn "Error: Failed to identify host properties."
+            return 10
+        fi
     fi
     
     local prop
