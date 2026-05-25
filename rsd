@@ -885,7 +885,7 @@ if [[ "${RSD_ARGS[command]}" ]]; then
         source "$command_source" "${RSD_ARGS_UNPROCESSED[@]}"
 
         # Route dynamically depending on command's remote awareness
-        local is_aware="RSD_C_${RSD_COMMAND^^}_REMOTE_AWARE"
+        is_aware="RSD_C_${RSD_COMMAND^^}_REMOTE_AWARE"
         if [[ "${!is_aware}" -eq 1 ]]; then
             rsd::debug "Command $RSD_COMMAND is remote-aware (Mode A Local Orchestration)." 15
             rsd::command "$RSD_COMMAND"
