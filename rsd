@@ -851,29 +851,77 @@ if [[ -z "${RSD_ARGS[command]}" && ! ${RSD_ARGS[completion]} ]]; then
 fi
 
 if [[ "${RSD_ARGS[command]}" ]]; then
-	RSD_COMMAND="${RSD_ARGS[command]}"
-	rsd::debug "Using command $RSD_COMMAND" 15
+    # Check if target is a remote target spec (starts with @ or matches user@host)
+    if [[ "${RSD_ARGS[command]}" =~ ^@ || "${RSD_ARGS[command]}" =~ .@. ]]; then
+        RSD_REMOTE_TARGET="${RSD_ARGS[command]}"
 
-	# import the calling command script
-	if ! command_source=$(rsd::load_command_file "$RSD_COMMAND"); then
-	    rsd::debug2 20 "Could not load command $RSD_COMMAND"
-	    if [[ $RSD_PASS_THRU -eq 1 ]]; then
-            rsd::debug "Command '$RSD_COMMAND' not found!" 10
-            rsd::debug "Passing through to the shell." 10
-            rsd::passthru "$RSD_COMMAND" "${RSD_ARGS_UNPROCESSED[@]}"
-            exit 0
-        else
-            rsd::warn "Command '$RSD_COMMAND' not found!" 0
-            RSD_COMMAND=
+        # real command is the first unprocessed argument
+        if [[ ${#RSD_ARGS_UNPROCESSED[@]} -eq 0 ]]; then
+            rsd::warn "Error: Remote target specified, but no command provided."
             rsd::usage
             exit 2
         fi
-	fi
 
-    source "$command_source" "${RSD_ARGS_UNPROCESSED[@]}"
-	rsd::command "$RSD_COMMAND"
+        RSD_COMMAND="${RSD_ARGS_UNPROCESSED[0]}"
+        RSD_ARGS_UNPROCESSED=("${RSD_ARGS_UNPROCESSED[@]:1}")
 
-	exit 0
+        rsd::debug "Remote execution target: $RSD_REMOTE_TARGET, command payload: $RSD_COMMAND" 15
+
+        # import the calling command script
+        if ! command_source=$(rsd::load_command_file "$RSD_COMMAND"); then
+            rsd::debug2 20 "Could not load command $RSD_COMMAND"
+            if [[ $RSD_PASS_THRU -eq 1 ]]; then
+                rsd::debug "Command '$RSD_COMMAND' not found! Passing through to the remote shell." 10
+                source "$(rsd::get_libdir_file lib/remote.lib)"
+                rsd::l::remote::execute "$RSD_REMOTE_TARGET" "$RSD_COMMAND" "${RSD_ARGS_UNPROCESSED[@]}"
+                exit $?
+            else
+                rsd::warn "Command '$RSD_COMMAND' not found!" 0
+                rsd::usage
+                exit 2
+            fi
+        fi
+
+        source "$command_source" "${RSD_ARGS_UNPROCESSED[@]}"
+
+        # Route dynamically depending on command's remote awareness
+        local is_aware="RSD_C_${RSD_COMMAND^^}_REMOTE_AWARE"
+        if [[ "${!is_aware}" -eq 1 ]]; then
+            rsd::debug "Command $RSD_COMMAND is remote-aware (Mode A Local Orchestration)." 15
+            rsd::command "$RSD_COMMAND"
+            exit $?
+        else
+            rsd::debug "Command $RSD_COMMAND is remote-naive (Mode B Remote Delegation fallback)." 15
+            source "$(rsd::get_libdir_file lib/remote.lib)"
+            rsd::l::remote::execute "$RSD_REMOTE_TARGET" "$RSD_COMMAND" "${RSD_ARGS_UNPROCESSED[@]}"
+            exit $?
+        fi
+    else
+        # Standard Local Execution
+        RSD_COMMAND="${RSD_ARGS[command]}"
+        rsd::debug "Using command $RSD_COMMAND" 15
+
+        # import the calling command script
+        if ! command_source=$(rsd::load_command_file "$RSD_COMMAND"); then
+            rsd::debug2 20 "Could not load command $RSD_COMMAND"
+            if [[ $RSD_PASS_THRU -eq 1 ]]; then
+                rsd::debug "Command '$RSD_COMMAND' not found!" 10
+                rsd::debug "Passing through to the shell." 10
+                rsd::passthru "$RSD_COMMAND" "${RSD_ARGS_UNPROCESSED[@]}"
+                exit 0
+            else
+                rsd::warn "Command '$RSD_COMMAND' not found!" 0
+                RSD_COMMAND=
+                rsd::usage
+                exit 2
+            fi
+        fi
+
+        source "$command_source" "${RSD_ARGS_UNPROCESSED[@]}"
+        rsd::command "$RSD_COMMAND"
+
+        exit 0
+    fi
 fi
 
 # Should not get here

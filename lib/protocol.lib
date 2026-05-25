@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+RSD_PROTOCOL_LIB=1
+RSD_PROTOCOL_LIB_VERSION="0.1.0"
+
+# Unified Protocol Interface (UPI) Library
+# All protocol handlers are prefixed using rsd::l::protocol::<scheme>::
+
+# ==============================================================================
+# SSH Protocol Handler
+# ==============================================================================
+
+# Executes a command payload remotely via SSH
+# Arguments:
+#   $1 - user (optional, can be empty)
+#   $2 - host/address (mandatory)
+#   $3 - port (optional, can be empty)
+#   $4..$* - Command payload to execute
+# Returns:
+#   Exit code of the remote command execution
+function rsd::l::protocol::ssh::run() {
+    rsd::arguments_or_usage 2 "$@"
+    rsd::check_binaries_or_fail ssh mktemp chmod
+
+    local user="$1"
+    local host="$2"
+    local port="$3"
+    shift 3
+    local payload=("$@")
+
+    # Build SSH connection target and options
+    local connection_target
+    if [[ -n "$user" ]]; then
+        connection_target="${user}@${host}"
+    else
+        connection_target="$host"
+    fi
+
+    local -a ssh_opts=()
+    if [[ -n "$port" ]]; then
+        ssh_opts+=("-p" "$port")
+    fi
+
+    # Retrieve credentials from KeePassXC if available
+    local password=""
+    local askpass_tmp=""
+    
+    # Check if kpx.lib is available and loaded
+    if [[ "$RSD_KPX_LIB" == "1" ]]; then
+        # Try retrieving password under RemoteHosts/<host>
+        rsd::debug "Checking vault credentials for RemoteHosts/$host..." 15
+        rsd::l::kpx::get_password "RemoteHosts/$host" password 2>/dev/null
+    fi
+
+    # Set up secure in-memory SSH_ASKPASS pipeline if credential found
+    if [[ -n "$password" ]]; then
+        rsd::debug "Secure credential found in vault. Configuring SSH_ASKPASS..." 12
+        askpass_tmp=$(mktemp -t rsd-sshpass.XXXXXX)
+        
+        # Write secure helper script that outputs the password variable from environment
+        cat << 'EOF' > "$askpass_tmp"
+#!/usr/bin/env bash
+echo "$RSD_SSH_PASS"
+EOF
+        chmod +x "$askpass_tmp"
+
+        # Export active pipeline environment securely
+        export RSD_SSH_PASS="$password"
+        export SSH_ASKPASS="$askpass_tmp"
+        export SSH_ASKPASS_REQUIRE="force"
+        export DISPLAY=":0.0" # Force dummy display to trigger SSH_ASKPASS
+    fi
+
+    # Execute remote command securely in subshell
+    rsd::debug "Executing remote SSH command: ssh ${ssh_opts[*]} $connection_target ${payload[*]}" 10
+    
+    ssh "${ssh_opts[@]}" "$connection_target" "${payload[@]}"
+    local exit_status=$?
+
+    # Secure Cleanup of memory credentials and temporary files
+    if [[ -n "$askpass_tmp" ]]; then
+        rm -f "$askpass_tmp"
+        unset RSD_SSH_PASS SSH_ASKPASS SSH_ASKPASS_REQUIRE DISPLAY
+    fi
+
+    return $exit_status
+}
+
+# ==============================================================================
+# LXC Protocol Handler
+# ==============================================================================
+
+# Executes a command payload inside an LXC container locally
+# Arguments:
+#   $1 - user (optional, can be empty, e.g., root)
+#   $2 - container_name (mandatory)
+#   $3 - port (ignored for LXC attach)
+#   $4..$* - Command payload to execute
+# Returns:
+#   Exit code of the container command execution
+function rsd::l::protocol::lxc::run() {
+    rsd::arguments_or_usage 2 "$@"
+    rsd::check_binaries_or_fail lxc-attach
+
+    local user="$1"
+    local host="$2" # host is the container name
+    local port="$3" # ignored
+    shift 3
+    local payload=("$@")
+
+    local -a lxc_opts=()
+    if [[ -n "$user" ]]; then
+        lxc_opts+=("--clear-env" "--user" "$user")
+    fi
+
+    rsd::debug "Executing container LXC command: lxc-attach -n $host ${lxc_opts[*]} -- ${payload[*]}" 10
+    
+    lxc-attach -n "$host" "${lxc_opts[@]}" -- "${payload[@]}"
+    return $?
+}

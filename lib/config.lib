@@ -95,13 +95,10 @@ function rsd::config::get_file() {
 			    echo source "$path/$command.conf"
             fi
 
-            # .ini files are processed
+            # .ini files are processed (echoed to be evaluated in parent process scope)
             if [[ -f "$path/$command.ini" ]]; then
                 rsd::debug2 9 "rsd::config::get_file: Found as $path/$command.ini"
-                if [[ ! -v "R::INI::$command" ]]; then
-                    declare -gA "R::INI::$command"
-                fi
-                rsd::config::read_ini "$path/$command.ini" "R::INI::$command"
+                echo "if [[ ! -v \"R_INI_$command\" ]]; then declare -gA \"R_INI_$command\"; fi; rsd::config::read_ini '$path/$command.ini' 'R_INI_$command'"
             fi
         done
 	done
@@ -124,8 +121,8 @@ function rsd::config::read_ini() {
     local key
     local value
     local line
-    local section_re='^\[([^\]]+)\]$'
-    local key_re='^\s*([^=]+?)\s*=\s*(.*)$'
+    local section_re='^\[([^]]+)\]$'
+    local key_re='^[[:space:]]*([^=]*[^=[:space:]])[[:space:]]*=[[:space:]]*(.*)$'
 
     if [[ ! -f "$file" ]]; then
         rsd::warn "Error: File does not exist."

@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+RSD_REMOTE_LIB=1
+RSD_REMOTE_LIB_VERSION="0.1.2"
+
+# Load necessary static libraries with short-circuit evaluation
+[[ "$RSD_PROTOCOL_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/protocol.lib)"
+
+# Load remote.ini configuration if configuration library is present
+if bash::is_function rsd::config::get_file; then
+    eval "$(rsd::config::get_file remote)"
+fi
+
+# ==============================================================================
+# Pathway & Connection Parsing Engine
+# ==============================================================================
+
+# Parses a single remote target string into scheme, user, host, and port components
+# Arguments:
+#   $1 - remote target string (e.g., ssh://admin@10.0.0.1:2222)
+#   $2 - nameref output variable for protocol
+#   $3 - nameref output variable for user
+#   $4 - nameref output variable for host
+#   $5 - nameref output variable for port
+function rsd::l::remote::parse_spec() {
+    local spec="$1"
+    
+    # Use highly unique, prefixed local names to prevent nameref circular reference shadowing
+    local _out_proto="$2";  declare -n _r_proto="$_out_proto"
+    local _out_user="$3";   declare -n _r_user="$_out_user"
+    local _out_host="$4";   declare -n _r_host="$_out_host"
+    local _out_port="$5";   declare -n _r_port="$_out_port"
+
+    # Trim leading '@'
+    spec="${spec#@}"
+
+    # Set default values
+    _r_proto="ssh"
+    _r_user=""
+    _r_host=""
+    _r_port=""
+
+    # 1. Parse Protocol Scheme: scheme://
+    if [[ "$spec" =~ ^([a-zA-Z0-9]+)://(.*)$ ]]; then
+        _r_proto="${BASH_REMATCH[1]}"
+        spec="${BASH_REMATCH[2]}"
+    fi
+
+    # 2. Parse User Spec: user@host
+    if [[ "$spec" =~ ^([^@]+)@(.*)$ ]]; then
+        _r_user="${BASH_REMATCH[1]}"
+        spec="${BASH_REMATCH[2]}"
+    fi
+
+    # 3. Parse Port Map: host:port
+    if [[ "$spec" =~ ^([^:]+):([0-9]+)$ ]]; then
+        _r_host="${BASH_REMATCH[1]}"
+        _r_port="${BASH_REMATCH[2]}"
+    else
+        _r_host="$spec"
+    fi
+}
+
+# Recursively resolves aliases and comma-delimited pathways into clean hop specifications
+# Arguments:
+#   $1 - target pathway or host spec
+#   $2 - nameref output array to accumulate resolved hops
+function rsd::l::remote::resolve_pathway() {
+    local spec="$1"
+    
+    # Avoid circular reference shadowing: declare nameref to the outer variable name passed
+    local _out_array="$2"; declare -n _r_resolved_hops="$_out_array"
+
+    # Trim leading '@'
+    spec="${spec#@}"
+
+    local pathway_key="pathways.${spec}"
+    local host_key="hosts.${spec}"
+
+    # Use R_INI_ namespace rather than R::INI:: to ensure compatibility with Bash parser rules
+    if [[ -n "${R_INI_remote[$pathway_key]}" ]]; then
+        # Segment matches pathway configuration alias
+        local expanded_pathway="${R_INI_remote[$pathway_key]}"
+        rsd::debug "Resolving pathway alias '$spec' -> '$expanded_pathway'" 15
+
+        local hop
+        local IFS=$',@'
+        local -a raw_hops
+        read -r -a raw_hops <<< "$expanded_pathway"
+
+        for hop in "${raw_hops[@]}"; do
+            [[ -z "$hop" ]] && continue
+            # CRITICAL: Pass the original parent scope variable name down the recursion stack
+            # to prevent circular nameref references to the local '_r_resolved_hops' shadow.
+            rsd::l::remote::resolve_pathway "$hop" "$_out_array"
+        done
+    elif [[ -n "${R_INI_remote[$host_key]}" ]]; then
+        # Segment matches individual host alias
+        local expanded_host="${R_INI_remote[$host_key]}"
+        rsd::debug "Resolving host alias '$spec' -> '$expanded_host'" 15
+        rsd::l::remote::resolve_pathway "$expanded_host" "$_out_array"
+    else
+        # Literal segment or comma-separated raw values
+        if [[ "$spec" == *","* ]]; then
+            local hop
+            local IFS=$','
+            local -a raw_hops
+            read -r -a raw_hops <<< "$spec"
+            for hop in "${raw_hops[@]}"; do
+                [[ -z "$hop" ]] && continue
+                rsd::l::remote::resolve_pathway "$hop" "$_out_array"
+            done
+        else
+            _r_resolved_hops+=("$spec")
+        fi
+    fi
+}
+
+# ==============================================================================
+# Dynamic Command Orchestration & Tunneling
+# ==============================================================================
+
+# Orchestrates and executes the delegated command payload recursively through resolved hops
+# Arguments:
+#   $1 - target remote specification
+#   $2..$* - Command payload to execute
+# Returns:
+#   Exit code of the execution pipeline
+function rsd::l::remote::delegate() {
+    rsd::arguments_or_usage 2 "$@"
+    local remote_spec="$1"
+    local command_payload=("${@:2}")
+
+    # 1. Resolve target pathway recursively
+    local -a hops=()
+    rsd::l::remote::resolve_pathway "$remote_spec" hops
+
+    if [[ ${#hops[@]} -eq 0 ]]; then
+        rsd::warn "Error: Failed to resolve remote target spec '$remote_spec'."
+        exit 20
+    fi
+
+    # 2. Compile execution blocks right-to-left (backwards)
+    local -a active_payload=("${command_payload[@]}")
+
+    local i
+    for (( i=${#hops[@]}-1; i>=0; i-- )); do
+        local hop="${hops[i]}"
+        local proto user host port
+        rsd::l::remote::parse_spec "$hop" proto user host port
+
+        local run_func="rsd::l::protocol::${proto}::run"
+        if ! bash::is_function "$run_func"; then
+            rsd::warn "Error: Protocol transport '$proto' is unsupported or missing handler."
+            exit 3
+        fi
+
+        # For nested jumps (i > 0), wrap the active command block for outer shell environments
+        if (( i > 0 )); then
+            if [[ "$proto" == "ssh" ]]; then
+                local target
+                if [[ -n "$user" ]]; then
+                    target="${user}@${host}"
+                else
+                    target="$host"
+                fi
+                local port_opt=""
+                [[ -n "$port" ]] && port_opt="-p $port"
+
+                # Shell-escape the active payload arguments cleanly
+                local escaped_cmd=""
+                local item
+                for item in "${active_payload[@]}"; do
+                    escaped_cmd="${escaped_cmd} '$(printf '%s' "$item" | sed "s/'/'\\\\''/g")'"
+                done
+
+                active_payload=("ssh" $port_opt "$target" "$escaped_cmd")
+            elif [[ "$proto" == "lxc" ]]; then
+                local -a lxc_opts=()
+                if [[ -n "$user" ]]; then
+                    lxc_opts+=("--clear-env" "--user" "$user")
+                fi
+                active_payload=("lxc-attach" -n "$host" "${lxc_opts[@]}" -- "${active_payload[@]}")
+            else
+                rsd::warn "Error: Protocol '$proto' does not support intermediate hop packaging."
+                exit 3
+            fi
+        else
+            # Outermost hop (index 0) is executed locally
+            "$run_func" "$user" "$host" "$port" "${active_payload[@]}"
+            return $?
+        fi
+    done
+}
+
+# Orchestrates local-aware execution (Mode A) or remote-delegation fallback (Mode B)
+# Arguments:
+#   $1 - target remote specification
+#   $2..$* - Command payload to execute
+function rsd::l::remote::execute() {
+    rsd::arguments_or_usage 2 "$@"
+    local remote_spec="$1"
+    local command_payload=("${@:2}")
+
+    # Check if remote target has been verified and resolved
+    # Sourced library delegates execution natively
+    rsd::l::remote::delegate "$remote_spec" "${command_payload[@]}"
+    return $?
+}

@@ -54,12 +54,11 @@ EOF
     rsd::config::read_ini "$ini_file" test_config
     
     [ "$?" -eq 0 ]
-    # Due to POSIX bracket expressions matching constraints on section_re,
-    # section names are empty, matching the production framework prefix of "."
-    [ "${test_config[".host"]}" = "localhost" ]
-    [ "${test_config[".port"]}" = "3306" ]
-    [ "${test_config[".url"]}" = "https://api.test/v1" ]
-    [ "${test_config[".timeout"]}" = "30" ]
+    # Section matching correctly parses host and api sections using standard POSIX compliance.
+    [ "${test_config["database.host"]}" = "localhost" ]
+    [ "${test_config["database.port"]}" = "3306" ]
+    [ "${test_config["api.url"]}" = "https://api.test/v1" ]
+    [ "${test_config["api.timeout"]}" = "30" ]
 }
 
 @test "rsd::config::read_ini returns error for non-existent file" {
@@ -86,10 +85,9 @@ EOF
     
     [ "$?" -eq 0 ]
     # Note: write_ini serializes with spaces around the equals sign (e.g. "host = 127.0.0.1").
-    # When read back by read_ini, the POSIX ERE non-greedy parsing limits capture the key
-    # with a trailing space (e.g. ".host "), which we assert precisely below.
-    [ "${verified_config[".host "]}" = "127.0.0.1" ]
-    [ "${verified_config[".port "]}" = "8080" ]
+    # The parser correctly resolves keys without trailing spaces.
+    [ "${verified_config[".host"]}" = "127.0.0.1" ]
+    [ "${verified_config[".port"]}" = "8080" ]
 }
 
 @test "rsd::config::get_file respects priority order: CLI override > workspace > user > system" {
