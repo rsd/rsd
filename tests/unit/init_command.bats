@@ -17,6 +17,32 @@ setup() {
         return 0
     }
     
+    # Mock dynamic gpg command with filesystem-backed sequential state tracking
+    local state_file="/tmp/rsd_test_gpg_calls"
+    echo "0" > "$state_file"
+    gpg() {
+        local state_file="/tmp/rsd_test_gpg_calls"
+        local count=0
+        if [[ -f "$state_file" ]]; then
+            count=$(cat "$state_file")
+        fi
+        if [[ "$*" == *"--list-keys"* || "$*" == *"--list-secret-keys"* ]]; then
+            ((count++))
+            echo "$count" > "$state_file"
+            if [[ $count -le 1 ]]; then
+                # Call 1: Key does not exist yet (pre-creation check)
+                return 1
+            else
+                # Call 2+: Key exists (post-creation verify)
+                echo "pub:u:2048:1:D8A3C4E5F67890AB:2026-05-24::::::esc:"
+                echo "fpr:::::::::2B9D4C7E8A0F1E2D3C4B5A6F7E8D9C0B1A2C3D4E:"
+                return 0
+            fi
+        fi
+        return 0
+    }
+    export -f gpg
+    
     # Source core libraries and our command files
     source "${BATS_TEST_DIRNAME}/../../lib/rsd.lib"
     source "${BATS_TEST_DIRNAME}/../../lib/config.lib"
@@ -63,14 +89,7 @@ setup() {
     }
     export -f rsd::check_binaries_or_fail
     
-    # Mock user input to choose 'q' (abort)
-    read() {
-        local var_name="${@: -1}"
-        eval "$var_name=\"q\""
-        return 0
-    }
-    
-    run rsd::c::init
+    run rsd::c::init <<< "q"
     echo "STATUS: $status"
     echo "OUTPUT: $output"
     [ "$status" -eq 0 ]
@@ -107,14 +126,7 @@ setup() {
     }
     export -f rsd::l::kpx::init
     
-    # Mock user choosing option 1
-    read() {
-        local var_name="${@: -1}"
-        eval "$var_name=\"1\""
-        return 0
-    }
-    
-    run rsd::c::init
+    run rsd::c::init <<< "1"
     echo "STATUS: $status"
     echo "OUTPUT: $output"
     [ "$status" -eq 0 ]
@@ -158,22 +170,7 @@ setup() {
     }
     export -f rsd::l::kpx::init
     
-    # Mock sequential reads:
-    # First read (choice) -> "2"
-    # Second read (key ID) -> "existing@key.com"
-    local read_count=0
-    read() {
-        ((read_count++))
-        local var_name="${@: -1}"
-        if [ "$read_count" -eq 1 ]; then
-            eval "$var_name=\"2\""
-        else
-            eval "$var_name=\"existing@key.com\""
-        fi
-        return 0
-    }
-    
-    run rsd::c::init
+    run rsd::c::init <<< $'2\nexisting@key.com'
     echo "STATUS: $status"
     echo "OUTPUT: $output"
     [ "$status" -eq 0 ]
