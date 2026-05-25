@@ -25,3 +25,17 @@ setup() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"Teste: arg1 arg2"* ]]
 }
+
+@test "rsd @gateway -- gpg check outputs double-dash skip logs" {
+    run "$RSD_BIN" --debug 20 @gateway -- gpg check
+    
+    # Bypasses custom command checks and triggers direct pass-through
+    [[ "$output" == *"Double-dash skip detected. Direct remote pass-through for 'gpg'"* ]]
+}
+
+@test "rsd @gateway gpgg check outputs raw pass-through fallback logs" {
+    run "$RSD_BIN" --debug 20 @gateway gpgg check
+    
+    # Fallback triggers since gpgg doesn't exist in command/
+    [[ "$output" == *"No custom RSD script found for 'gpgg'. Triggering raw remote pass-through."* ]]
+}

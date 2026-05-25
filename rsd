@@ -411,6 +411,12 @@ function rsd::parse_args() {
 	while [ $# -gt 0 ]; do
 	    [[ "$RSD_DEBUG" -gt 0 ]] && rsd::warn "rsd::parse_args: Processing: $1"
 
+        # If a command has been found and stop-on-command is enabled, terminate option parsing immediately
+        if [[ $count -gt 0 && "${RSD_PARSE_CONFIG[stop-on-command]}" -eq 1 ]]; then
+            unprocessed+=("$@")
+            break
+        fi
+
 		case "$1" in
 		--)
             shift
