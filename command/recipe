@@ -12,7 +12,7 @@ fi
 [[ "$RSD_RECIPE_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/recipe.lib)
 
 RSD_C_RECIPE_SHORT_DESC="Idempotent Recipe Provisioning Subsystem"
-RSD_C_RECIPE_VERSION="0.1.0"
+RSD_C_RECIPE_VERSION="0.1.1"
 
 # Recipe command is remote-aware (Mode A) to manage local/remote context dynamically
 RSD_C_RECIPE_REMOTE_AWARE=1
@@ -29,11 +29,38 @@ function rsd::c::recipe::help() {
     echo -e "\n\tRecipe Command Help:\n"
     echo -e "\t\tUsage:"
     echo -e "\t\t\trsd recipe run <name> [options]"
+    echo -e "\t\t\trsd recipe list"
     echo -e "\n\t\tActions:"
     echo -e "\t\t\trun                 Execute a declarative recipe stack"
+    echo -e "\t\t\tlist                List all available recipes in the search paths"
     echo -e "\n\t\tOptions:"
     echo -e "\t\t\t--dry-run | -n         Simulate actions without executing payloads"
     echo -e "\t\t\t--verbose | -v         Output verbose pre-flight and post-flight log assertions"
+}
+
+# List all available recipes in the framework search paths
+# @return int 0
+function rsd::c::recipe::list() {
+    rsd::warn "=== Available Recipes ==="
+    
+    local libdir recipe_path recipe_name
+    local -A seen_recipes
+    
+    for libdir in "${RSD_LIBRARY_SEARCH_PATH[@]}"; do
+        local recipe_dir="$libdir/lib/recipe"
+        if [[ -d "$recipe_dir" ]]; then
+            # Use shell globbing safely
+            for recipe_path in "$recipe_dir"/*.recipe; do
+                [[ ! -e "$recipe_path" ]] && continue
+                recipe_name=$(basename "$recipe_path" .recipe)
+                if [[ -z "${seen_recipes[$recipe_name]}" ]]; then
+                    seen_recipes[$recipe_name]=1
+                    echo -e "  $recipe_name"
+                fi
+            done
+        fi
+    done
+    return 0
 }
 
 # The main recipe execution entry point
