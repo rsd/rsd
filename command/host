@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+
+# @see docs/config.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+[[ "$RSD_HOST_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/host.lib)
+
+RSD_C_HOST_SHORT_DESC="Host Platform Identification Subsystem"
+RSD_C_HOST_VERSION="0.1.0"
+
+# Host command is remote-naive to support automatic delegation (Mode B)
+RSD_C_HOST_REMOTE_AWARE=0
+
+# Help and usage action
+function rsd::c::host::help() {
+    echo -e "\n\tHost Command Help:\n"
+    echo -e "\t\tActions:"
+    echo -e "\t\t\tidentify              Discover and display host properties"
+    echo -e "\t\t\tsave [alias]          Identify and save host properties to hosts.ini"
+}
+
+# Discover and display host properties
+# @return int 0 on success, 10 on identification failure
+function rsd::c::host::identify() {
+    declare -A props
+    if ! rsd::l::host::identify props; then
+        rsd::warn "Error: Failed to identify host properties."
+        return 10
+    fi
+    
+    local key
+    for key in os arch distro family version pkg_manager; do
+        if [[ -v props[$key] ]]; then
+            echo "${key}=${props[$key]}"
+        fi
+    done
+    return 0
+}
+
+# Save host configuration to hosts.ini
+# @param string $1 Optional host alias. Defaults to 'localhost'.
+# @return int 0 on success, 10 on identification failure, 13 on write failure
+function rsd::c::host::save() {
+    local alias="$1"
+    if [[ -z "$alias" ]]; then
+        if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+            alias="${RSD_REMOTE_TARGET#@}"
+        else
+            alias="localhost"
+        fi
+    fi
+    
+    declare -A props
+    if ! rsd::l::host::identify props; then
+        rsd::warn "Error: Failed to identify host properties."
+        return 10
+    fi
+    
+    local prop
+    local user_config_dir="${RSD_CONFIG_DIR:-$HOME/.config/rsd}"
+    local ini_file="$user_config_dir/hosts.ini"
+    local array_name="R_INI_hosts"
+    
+    eval "declare -gA $array_name"
+    if [[ -f "$ini_file" ]]; then
+        rsd::config::read_ini "$ini_file" "$array_name" || return 13
+    fi
+    
+    declare -n config_ref="$array_name"
+    for prop in "${!props[@]}"; do
+        config_ref["${alias}.${prop}"]="${props[$prop]}"
+    done
+    
+    rsd::config::write_ini "$ini_file" "$array_name" || return 13
+    rsd::warn "Successfully saved host properties for '$alias' to '$ini_file'."
+    return 0
+}
