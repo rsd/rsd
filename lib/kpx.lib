@@ -96,7 +96,7 @@ function rsd::l::kpx::init() {
         return 10
     fi
     
-    if ! echo "$master_secret" | keepassxc-cli db-create "$temp_dir/vault.kdbx" &>/dev/null; then
+    if ! printf "%s\n%s\n" "$master_secret" "$master_secret" | keepassxc-cli db-create -p "$temp_dir/vault.kdbx" &>/dev/null; then
         rsd::warn "Failed to create KeePass database."
         return 10
     fi
