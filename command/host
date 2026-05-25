@@ -58,7 +58,7 @@ function rsd::c::host::identify() {
         fi
         
         local key
-        for key in os arch distro family version pkg_manager; do
+        for key in os arch distro family version pkg_manager writable_bins; do
             if [[ -v props[$key] ]]; then
                 echo "${key}=${props[$key]}"
             fi

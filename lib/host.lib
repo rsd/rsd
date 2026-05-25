@@ -58,6 +58,7 @@ function rsd::l::host::identify() {
     _r_props[family]="unknown"
     _r_props[version]="unknown"
     _r_props[pkg_manager]="unknown"
+    _r_props[writable_bins]="none"
     
     if [[ "$os" == "linux" ]]; then
         local os_release_file="${RSD_MOCK_OS_RELEASE:-/etc/os-release}"
@@ -137,6 +138,31 @@ function rsd::l::host::identify() {
         fi
     fi
     
+    # Detect all user-writable directories in PATH plus standard home bin targets
+    local -a local_list=()
+    local path_dir
+    local IFS=":"
+    for path_dir in $PATH; do
+        if [[ -d "$path_dir" && -w "$path_dir" ]]; then
+            local_list+=("$path_dir")
+        fi
+    done
+    local candidate
+    for candidate in "$HOME/.local/bin" "$HOME/bin"; do
+        if [[ -d "$candidate" && -w "$candidate" ]]; then
+            local exists=0
+            local item
+            for item in "${local_list[@]}"; do
+                [[ "$item" == "$candidate" ]] && exists=1 && break
+            done
+            [[ $exists -eq 0 ]] && local_list+=("$candidate")
+        fi
+    done
+    if [[ ${#local_list[@]} -gt 0 ]]; then
+        local IFS=","
+        _r_props[writable_bins]="${local_list[*]}"
+    fi
+    
     return 0
 }
 
@@ -196,6 +222,7 @@ distro="unknown"
 family="unknown"
 version="unknown"
 pkg_manager="unknown"
+writable_bins="none"
 
 if [[ "$os" == "linux" ]]; then
     os_release_file="/etc/os-release"
@@ -252,12 +279,34 @@ elif [[ "$os" == "darwin" ]]; then
     fi
 fi
 
+local_list=()
+IFS=":"
+for p_dir in $PATH; do
+    if [[ -d "$p_dir" && -w "$p_dir" ]]; then
+        local_list+=("$p_dir")
+    fi
+done
+for cand in "$HOME/.local/bin" "$HOME/bin"; do
+    if [[ -d "$cand" && -w "$cand" ]]; then
+        dup=0
+        for it in "${local_list[@]}"; do
+            [[ "$it" == "$cand" ]] && dup=1 && break
+        done
+        [[ $dup -eq 0 ]] && local_list+=("$cand")
+    fi
+done
+if [[ ${#local_list[@]} -gt 0 ]]; then
+    IFS=","
+    writable_bins="${local_list[*]}"
+fi
+
 echo "os=$os"
 echo "arch=$arch"
 echo "distro=$distro"
 echo "family=$family"
 echo "version=$version"
 echo "pkg_manager=$pkg_manager"
+echo "writable_bins=$writable_bins"
 EOF
 )
     return 0
