@@ -138,24 +138,13 @@ function rsd::l::host::identify() {
         fi
     fi
     
-    # Detect all user-writable directories in PATH plus standard home bin targets
+    # Detect all user-writable directories in PATH
     local -a local_list=()
     local path_dir
     local IFS=":"
     for path_dir in $PATH; do
         if [[ -d "$path_dir" && -w "$path_dir" ]]; then
             local_list+=("$path_dir")
-        fi
-    done
-    local candidate
-    for candidate in "$HOME/.local/bin" "$HOME/bin"; do
-        if [[ -d "$candidate" && -w "$candidate" ]]; then
-            local exists=0
-            local item
-            for item in "${local_list[@]}"; do
-                [[ "$item" == "$candidate" ]] && exists=1 && break
-            done
-            [[ $exists -eq 0 ]] && local_list+=("$candidate")
         fi
     done
     if [[ ${#local_list[@]} -gt 0 ]]; then
@@ -284,15 +273,6 @@ IFS=":"
 for p_dir in $PATH; do
     if [[ -d "$p_dir" && -w "$p_dir" ]]; then
         local_list+=("$p_dir")
-    fi
-done
-for cand in "$HOME/.local/bin" "$HOME/bin"; do
-    if [[ -d "$cand" && -w "$cand" ]]; then
-        dup=0
-        for it in "${local_list[@]}"; do
-            [[ "$it" == "$cand" ]] && dup=1 && break
-        done
-        [[ $dup -eq 0 ]] && local_list+=("$cand")
     fi
 done
 if [[ ${#local_list[@]} -gt 0 ]]; then
