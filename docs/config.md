@@ -102,3 +102,38 @@ rsd::l::config::set_conf_value "/path/to/rsd.conf" "RSD_GPG_USER_ID" "my_new_id"
   * `$2` (string): Key name.
   * `$3` (string): New value.
 * **Safety Details**: Automatically escapes slashes, backslashes, and ampersands using sed before writing, protecting configuration values from breaking shell evaluations.
+
+---
+
+## 5. Security: Configuration Trust Boundary
+
+### Overview
+
+RSD `.conf` files are **sourced as executable Bash code** during framework boot. This is an intentional design tradeoff that enables powerful configuration (conditional assignments, computed paths, environment expansion), but creates a trust boundary that users must understand.
+
+### Trust Model
+
+The config subsystem trusts that all directories in `RSD_CONFIGLIB_SEARCH_PATH` are owned by the running user or root. Specifically:
+
+| Search Path | Owner | Trust Level |
+|---|---|---|
+| `/etc/rsd/`, `/usr/local/etc/rsd/` | root | System-level trusted |
+| `$HOME/.config/rsd/`, `$HOME/.rsd/` | user | User-level trusted |
+| `$(pwd)/config/` | varies | **Workspace-level — user must verify** |
+| CLI overrides (`--config-dir`) | user-specified | **Explicit — highest priority** |
+
+### Known Vectors
+
+1. **Working Directory Inclusion**: Running `rsd` from a directory containing a crafted `config/rsd.conf` will execute its contents. This is the same class of risk as `direnv`'s `.envrc` or `git`'s per-repo hooks. **Mitigation**: Only run `rsd` from directories you own and trust.
+
+2. **Priority Shadowing**: Higher-priority config paths override lower ones. An attacker controlling `$HOME/.config/rsd/` can shadow system defaults. **Mitigation**: Standard Unix user-space security — protect your home directory.
+
+3. **INI Files**: `.ini` files are safely parsed via `rsd::config::read_ini`, which uses line-by-line regex matching — no shell expansion occurs. INI files are the safer configuration format.
+
+### Recommendations
+
+* Use `.ini` files for module-specific settings (safer, no code execution).
+* Reserve `.conf` files for framework-wide variables that genuinely need shell evaluation.
+* Never run `rsd` from untrusted or shared directories without inspecting `config/` first.
+
+> See also: `AGENTS.md` Section 9 (Configuration Sourcing Trust Boundary) for agent-facing rules.

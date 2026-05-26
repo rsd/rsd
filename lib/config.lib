@@ -69,6 +69,17 @@ function rsd::config::get_file() {
     if [[ $RSD_MODE == "devel" ]]; then
         RSD_CONFIGLIB_SEARCH_PATH+=("$RSD_RUN_DIR/config")
     fi
+    # TRUST BOUNDARY: The current working directory is included in the config
+    # search path. A .conf file in $(pwd)/config/ is SOURCED as executable Bash
+    # code into the running process. This means running `rsd` from a directory
+    # containing a crafted config/rsd.conf will execute arbitrary shell code.
+    #
+    # This is an intentional design tradeoff (similar to direnv's .envrc or
+    # git's .gitconfig). The feature enables per-project configuration overrides
+    # (e.g., RSD_CONFIG_DIR pointing to a project-specific config tree).
+    #
+    # Mitigation: Users should only run `rsd` from directories they own and trust.
+    # @see AGENTS.md Section 9 (Configuration Sourcing Trust Boundary)
     RSD_CONFIGLIB_SEARCH_PATH+=("$(pwd)/config")
 
     # 4. Sourced Configurations (only populated after first conf load)
