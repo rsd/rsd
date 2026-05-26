@@ -102,7 +102,7 @@ setup() {
         local target="$1"
         local cmd="$2"
         if [[ "$cmd" == "\$HOME/.local/bin/rsd" && "$3" == "--version" ]]; then
-            echo "1.9.11"
+            echo "1.9.12"
             return 0
         fi
         return 1
@@ -110,7 +110,7 @@ setup() {
     
     run rsd::c::remote::verify
     [ "$status" -eq 0 ]
-    [[ "$output" == *"RSD is responsive at \$HOME/.local/bin/rsd (v1.9.11)"* ]]
+    [[ "$output" == *"RSD is responsive at \$HOME/.local/bin/rsd (v1.9.12)"* ]]
     
     unset RSD_REMOTE_TARGET
 }

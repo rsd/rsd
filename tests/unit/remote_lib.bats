@@ -138,7 +138,7 @@ setup() {
         local target="$1"
         local cmd="$2"
         if [[ "$cmd" == "rsd" && "$3" == "--version" ]]; then
-            echo "1.9.11"
+            echo "1.9.12"
             return 0
         fi
         return 1

@@ -10,7 +10,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_PROTOCOL_LIB=1
-RSD_PROTOCOL_LIB_VERSION="0.1.0"
+RSD_PROTOCOL_LIB_VERSION="0.1.1"
 
 # Unified Protocol Interface (UPI) Library
 # All protocol handlers are prefixed using rsd::l::protocol::<scheme>::
@@ -48,6 +48,11 @@ function rsd::l::protocol::ssh::run() {
     local -a ssh_opts=()
     if [[ -n "$port" ]]; then
         ssh_opts+=("-p" "$port")
+    fi
+    # Force pseudo-terminal allocation if local session is interactive (stdin is a terminal)
+    # This allows remote prompts (such as sudo passwords) to securely disable character echo
+    if [[ -t 0 ]]; then
+        ssh_opts+=("-t")
     fi
 
     # Retrieve credentials from KeePassXC if available
