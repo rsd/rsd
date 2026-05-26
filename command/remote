@@ -27,6 +27,7 @@ function rsd::c::remote::help() {
     echo -e "\t\t\tcheck       Verify if target has dependencies to install RSD"
     echo -e "\t\t\tinstall     Stream and bootstrap install RSD on the target host"
     echo -e "\t\t\tverify      Perform post-install framework verification"
+    echo -e "\t\t\tsetup-path  Append ~/.local/bin to remote target PATH in ~/.bashrc"
 }
 
 # Pre-flight remote target validation.
@@ -213,14 +214,122 @@ function rsd::c::remote::verify() {
     return 3
 }
 
+# Add ~/.local/bin to the remote target's PATH in ~/.bashrc.
+#
+# @return int exit code.
+function rsd::c::remote::setup_path() {
+    if [[ -z "$RSD_REMOTE_TARGET" ]]; then
+        rsd::warn "Error: No remote target specified. Usage: rsd @target remote setup-path"
+        return 2
+    fi
+
+    local yes_flag=0
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "-y" || "$arg" == "--yes" ]]; then
+            yes_flag=1
+        fi
+    done
+
+    rsd::warn "Checking remote path configuration on '$RSD_REMOTE_TARGET'..."
+
+    # Probe if PATH already has ~/.local/bin or if ~/.bashrc contains the configuration
+    local probe_script
+    probe_script=$(cat << 'EOF'
+        in_path=0
+        local p
+        local IFS=":"
+        for p in $PATH; do
+            if [[ "$p" == "$HOME/.local/bin" || "$p" == "$HOME/.local/bin/" ]]; then
+                in_path=1
+                break
+            fi
+        done
+        
+        in_bashrc=0
+        if [[ -f "$HOME/.bashrc" ]]; then
+            if grep -Fq ".local/bin" "$HOME/.bashrc"; then
+                in_bashrc=1
+            fi
+        fi
+        
+        echo "${in_path}:${in_bashrc}"
+        exit 0
+EOF
+    )
+
+    local probe_output
+    probe_output=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "bash" "-s" <<< "$probe_script" 2>/dev/null)
+    local status=$?
+
+    if [[ $status -ne 0 ]]; then
+        rsd::warn "   [FAIL] Target '$RSD_REMOTE_TARGET' is unresponsive or failed to query environment."
+        return 3
+    fi
+
+    local in_path=0
+    local in_bashrc=0
+
+    if [[ "$probe_output" =~ ^([01]):([01])$ ]]; then
+        in_path="${BASH_REMATCH[1]}"
+        in_bashrc="${BASH_REMATCH[2]}"
+    fi
+
+    if [[ "$in_bashrc" -eq 1 ]]; then
+        rsd::warn "   [OK] Remote ~/.bashrc already contains a ~/.local/bin path configuration."
+        if [[ "$in_path" -eq 0 ]]; then
+            rsd::warn "   [Notice] ~/.local/bin is configured in ~/.bashrc, but not active in this session."
+            rsd::warn "            Please run 'source ~/.bashrc' or reconnect to apply changes."
+        fi
+        return 0
+    fi
+
+    if [[ "$in_path" -eq 1 ]]; then
+        rsd::warn "   [OK] ~/.local/bin is already in the remote PATH (possibly via system-wide or other profiles)."
+        return 0
+    fi
+
+    rsd::warn "   [WARNING] ~/.local/bin is NOT configured in remote ~/.bashrc."
+
+    local confirm=0
+    if [[ $yes_flag -eq 1 ]]; then
+        confirm=1
+    else
+        if rsd::l::remote::prompt_user "Would you like to append ~/.local/bin to remote ~/.bashrc now? [Y/n]"; then
+            confirm=1
+        fi
+    fi
+
+    if [[ $confirm -eq 1 ]]; then
+        rsd::warn "Appending ~/.local/bin to remote ~/.bashrc..."
+        local append_cmd
+        append_cmd=$(cat << 'EOF'
+echo -e "\n# Added by RSD\nexport PATH=\"\$HOME/.local/bin:\$PATH\"" >> "$HOME/.bashrc"
+EOF
+        )
+        if rsd::l::remote::execute "$RSD_REMOTE_TARGET" "bash" "-c" "$append_cmd"; then
+            rsd::warn "   [SUCCESS] Successfully added PATH configuration to remote ~/.bashrc."
+            rsd::warn "   [Notice] Please run 'source ~/.bashrc' or restart your terminal session on the remote host."
+            return 0
+        else
+            rsd::warn "   [ERROR] Failed to modify remote ~/.bashrc."
+            return 13
+        fi
+    else
+        rsd::warn "Abort: Path setup declined by user."
+        return 1
+    fi
+}
+
 # Route actions dynamically
 function rsd::c::remote::command() {
     local action="$1"
     shift
     case "$action" in
-        check)   rsd::c::remote::check "$@" ;;
-        install) rsd::c::remote::install "$@" ;;
-        verify)  rsd::c::remote::verify "$@" ;;
-        *)       rsd::c::remote::help ;;
+        check)      rsd::c::remote::check "$@" ;;
+        install)    rsd::c::remote::install "$@" ;;
+        verify)     rsd::c::remote::verify "$@" ;;
+        setup-path) rsd::c::remote::setup_path "$@" ;;
+        *)          rsd::c::remote::help ;;
     esac
 }

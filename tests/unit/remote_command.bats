@@ -205,3 +205,132 @@ setup() {
     
     unset RSD_REMOTE_TARGET
 }
+
+@test "rsd::c::remote::setup_path fails if RSD_REMOTE_TARGET is empty" {
+    unset RSD_REMOTE_TARGET
+    run rsd::c::remote::setup_path
+    [ "$status" -eq 2 ]
+}
+
+@test "rsd::c::remote::setup_path skips if already configured in remote ~/.bashrc" {
+    export RSD_REMOTE_TARGET="mock-target"
+    
+    rsd::l::remote::execute() {
+        local target="$1"
+        local cmd="$2"
+        if [[ "$cmd" == "bash" && "$3" == "-s" ]]; then
+            # in_path:in_bashrc -> 0:1 (in bashrc but not active in path)
+            echo "0:1"
+            return 0
+        fi
+        return 1
+    }
+    
+    run rsd::c::remote::setup_path
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Remote ~/.bashrc already contains a ~/.local/bin path configuration."* ]]
+    [[ "$output" == *"configured in ~/.bashrc, but not active in this session"* ]]
+    
+    unset RSD_REMOTE_TARGET
+}
+
+@test "rsd::c::remote::setup_path skips if already in remote PATH" {
+    export RSD_REMOTE_TARGET="mock-target"
+    
+    rsd::l::remote::execute() {
+        local target="$1"
+        local cmd="$2"
+        if [[ "$cmd" == "bash" && "$3" == "-s" ]]; then
+            # in_path:in_bashrc -> 1:0 (in path but not bashrc)
+            echo "1:0"
+            return 0
+        fi
+        return 1
+    }
+    
+    run rsd::c::remote::setup_path
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"is already in the remote PATH"* ]]
+    
+    unset RSD_REMOTE_TARGET
+}
+
+@test "rsd::c::remote::setup_path appends to remote ~/.bashrc if missing and -y flag is passed" {
+    export RSD_REMOTE_TARGET="mock-target"
+    
+    rsd::l::remote::execute() {
+        local target="$1"
+        local cmd="$2"
+        if [[ "$cmd" == "bash" && "$3" == "-s" ]]; then
+            # in_path:in_bashrc -> 0:0
+            echo "0:0"
+            return 0
+        elif [[ "$cmd" == "bash" && "$3" == "-c" && "$4" == *"export PATH="* ]]; then
+            echo "APPEND_SUCCESS"
+            return 0
+        fi
+        return 1
+    }
+    
+    run rsd::c::remote::setup_path "-y"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"APPEND_SUCCESS"* ]]
+    [[ "$output" == *"Successfully added PATH configuration"* ]]
+    
+    unset RSD_REMOTE_TARGET
+}
+
+@test "rsd::c::remote::setup_path appends to remote ~/.bashrc if missing and user confirms interactive prompt" {
+    export RSD_REMOTE_TARGET="mock-target"
+    
+    rsd::l::remote::execute() {
+        local target="$1"
+        local cmd="$2"
+        if [[ "$cmd" == "bash" && "$3" == "-s" ]]; then
+            # in_path:in_bashrc -> 0:0
+            echo "0:0"
+            return 0
+        elif [[ "$cmd" == "bash" && "$3" == "-c" && "$4" == *"export PATH="* ]]; then
+            echo "APPEND_SUCCESS"
+            return 0
+        fi
+        return 1
+    }
+    
+    rsd::l::remote::prompt_user() {
+        return 0  # User confirms
+    }
+    
+    run rsd::c::remote::setup_path
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"APPEND_SUCCESS"* ]]
+    [[ "$output" == *"Successfully added PATH configuration"* ]]
+    
+    unset RSD_REMOTE_TARGET
+}
+
+@test "rsd::c::remote::setup_path aborts if missing and user declines interactive prompt" {
+    export RSD_REMOTE_TARGET="mock-target"
+    
+    rsd::l::remote::execute() {
+        local target="$1"
+        local cmd="$2"
+        if [[ "$cmd" == "bash" && "$3" == "-s" ]]; then
+            # in_path:in_bashrc -> 0:0
+            echo "0:0"
+            return 0
+        fi
+        return 1
+    }
+    
+    rsd::l::remote::prompt_user() {
+        return 1  # User declines
+    }
+    
+    run rsd::c::remote::setup_path
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Abort: Path setup declined by user."* ]]
+    
+    unset RSD_REMOTE_TARGET
+}
+
