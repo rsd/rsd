@@ -51,11 +51,29 @@ function rsd::c::remote::check() {
                 missing+=("$bin")
             fi
         done
-        if [[ ${#missing[@]} -gt 0 ]]; then
-            echo "FAILED:${missing[*]}"
-            exit 1
+        
+        # Check user bin directory status
+        bin_dir_status="EXISTS"
+        if [[ ! -d "$HOME/.local/bin" ]]; then
+            bin_dir_status="MISSING"
         fi
-        echo "OK"
+
+        # Check if user bin is in remote PATH
+        in_path="NO"
+        local p
+        local IFS=":"
+        for p in $PATH; do
+            if [[ "$p" == "$HOME/.local/bin" ]]; then
+                in_path="YES"
+                break
+            fi
+        done
+        
+        if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "FAILED:${missing[*]}:${bin_dir_status}:${in_path}"
+            exit 0
+        fi
+        echo "OK:${bin_dir_status}:${in_path}"
         exit 0
 EOF
     )
@@ -64,13 +82,46 @@ EOF
     check_output=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "bash" "-s" <<< "$probe_script" 2>/dev/null)
     local status=$?
 
-    if [[ $status -ne 0 || "$check_output" != "OK" ]]; then
-        local missing_bins="${check_output#FAILED:}"
-        rsd::warn "   [FAIL] Target '$RSD_REMOTE_TARGET' is missing required installer binaries: $missing_bins"
+    if [[ $status -ne 0 ]]; then
+        rsd::warn "   [FAIL] Target '$RSD_REMOTE_TARGET' is unresponsive or failed to execute dependency check."
         return 3
     fi
 
-    rsd::warn "   [OK] Remote dependencies are met. Host is ready for RSD."
+    local result=""
+    local bins=""
+    local bin_status=""
+    local path_status=""
+    
+    if [[ "$check_output" =~ ^([^:]+):([^:]+):([^:]+)$ ]]; then
+        result="${BASH_REMATCH[1]}"
+        bin_status="${BASH_REMATCH[2]}"
+        path_status="${BASH_REMATCH[3]}"
+    elif [[ "$check_output" =~ ^FAILED:([^:]+):([^:]+):([^:]+)$ ]]; then
+        result="FAILED"
+        bins="${BASH_REMATCH[1]}"
+        bin_status="${BASH_REMATCH[2]}"
+        path_status="${BASH_REMATCH[3]}"
+    fi
+
+    if [[ "$result" == "FAILED" ]]; then
+        rsd::warn "   [FAIL] Target '$RSD_REMOTE_TARGET' is missing required installer binaries: $bins"
+        return 3
+    fi
+
+    rsd::warn "   [OK] Remote binary dependencies are met."
+
+    if [[ "$bin_status" == "MISSING" ]]; then
+        rsd::warn "   [WARNING] Installation directory \$HOME/.local/bin does not exist on remote target."
+    else
+        rsd::warn "   [OK] Installation directory \$HOME/.local/bin exists."
+    fi
+
+    if [[ "$path_status" == "NO" ]]; then
+        rsd::warn "   [WARNING] \$HOME/.local/bin is NOT in the remote PATH environment variable!"
+    else
+        rsd::warn "   [OK] \$HOME/.local/bin is in the remote PATH."
+    fi
+
     return 0
 }
 
@@ -79,12 +130,54 @@ EOF
 # @param string $1 Optional install mode ('user' or 'local'). Defaults to 'user'.
 # @return int exit code of the installer.
 function rsd::c::remote::install() {
-    local mode="${1:-user}"
+    local mode="user"
+    local auto_create=0
+    
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "-y" || "$arg" == "--yes" || "$arg" == "--create-dir" ]]; then
+            auto_create=1
+        elif [[ "$arg" != -* ]]; then
+            mode="$arg"
+        fi
+    done
 
     # 1. Force pre-flight validation check
     rsd::c::remote::check || return $?
 
-    # 2. Run remote bootstrapping
+    # 2. Check and handle bin folder existence for user installations
+    if [[ "$mode" == "user" ]]; then
+        rsd::debug "Verifying if remote user bin directory exists..." 15
+        
+        # Probe remote directory presence cleanly
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "[ -d \$HOME/.local/bin ]" 2>/dev/null
+        local dir_exists=$?
+        
+        if [[ $dir_exists -ne 0 ]]; then
+            rsd::warn "Notice: Installation directory \$HOME/.local/bin does not exist on remote target."
+            local create=0
+            if [[ $auto_create -eq 1 ]]; then
+                create=1
+            else
+                if rsd::l::remote::prompt_user "Would you like to create ~/.local/bin on target host now? [Y/n]"; then
+                    create=1
+                fi
+            fi
+            
+            if [[ $create -eq 1 ]]; then
+                rsd::warn "Creating remote directory \$HOME/.local/bin..."
+                if ! rsd::l::remote::execute "$RSD_REMOTE_TARGET" "mkdir" "-p" "\$HOME/.local/bin"; then
+                    rsd::warn "Error: Failed to create remote directory."
+                    return 13
+                fi
+            else
+                rsd::warn "Abort: Remote installation declined because user bin directory is missing."
+                return 1
+            fi
+        fi
+    fi
+
+    # 3. Run remote bootstrapping
     rsd::warn "Proceeding with remote streaming bootstrap installation ($mode)..."
     if ! rsd::l::remote::bootstrap_install "$RSD_REMOTE_TARGET" "$mode"; then
         rsd::warn "   [ERROR] Bootstrap installation failed."

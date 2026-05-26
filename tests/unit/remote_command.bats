@@ -35,7 +35,7 @@ setup() {
         local target="$1"
         local cmd="$2"
         if [[ "$cmd" == "bash" && "$3" == "-s" ]]; then
-            echo "OK"
+            echo "OK:EXISTS:YES"
             return 0
         fi
         return 1
@@ -50,13 +50,13 @@ setup() {
 @test "rsd::c::remote::check fails and outputs missing programs when dependencies are not met" {
     export RSD_REMOTE_TARGET="mock-target"
     
-    # Mock remote execution returning dependency failures
+    # Mock remote execution returning dependency failures (successfully executed, return 0)
     rsd::l::remote::execute() {
         local target="$1"
         local cmd="$2"
         if [[ "$cmd" == "bash" && "$3" == "-s" ]]; then
-            echo "FAILED:tar openssl"
-            return 1
+            echo "FAILED:tar openssl:MISSING:NO"
+            return 0
         fi
         return 1
     }
@@ -111,6 +111,97 @@ setup() {
     run rsd::c::remote::verify
     [ "$status" -eq 0 ]
     [[ "$output" == *"RSD is responsive at \$HOME/.local/bin/rsd (v1.9.11)"* ]]
+    
+    unset RSD_REMOTE_TARGET
+}
+
+@test "rsd::c::remote::install auto-creates ~/.local/bin if missing and -y flag is passed" {
+    export RSD_REMOTE_TARGET="mock-target"
+    
+    rsd::c::remote::check() {
+        return 0
+    }
+    
+    rsd::l::remote::execute() {
+        local target="$1"
+        local cmd="$2"
+        if [[ "$cmd" == "[ -d \$HOME/.local/bin ]" ]]; then
+            return 1  # folder does not exist
+        elif [[ "$cmd" == "mkdir" && "$3" == "-p" && "$4" == "\$HOME/.local/bin" ]]; then
+            echo "MKDIR_AUTO_SUCCESS"
+            return 0
+        fi
+        return 0
+    }
+    
+    rsd::l::remote::bootstrap_install() {
+        return 0
+    }
+    
+    run rsd::c::remote::install "user" "-y"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"MKDIR_AUTO_SUCCESS"* ]]
+    
+    unset RSD_REMOTE_TARGET
+}
+
+@test "rsd::c::remote::install prompts and creates ~/.local/bin if missing and user confirms" {
+    export RSD_REMOTE_TARGET="mock-target"
+    
+    rsd::c::remote::check() {
+        return 0
+    }
+    
+    rsd::l::remote::execute() {
+        local target="$1"
+        local cmd="$2"
+        if [[ "$cmd" == "[ -d \$HOME/.local/bin ]" ]]; then
+            return 1  # folder does not exist
+        elif [[ "$cmd" == "mkdir" && "$3" == "-p" && "$4" == "\$HOME/.local/bin" ]]; then
+            echo "MKDIR_PROMPTED_SUCCESS"
+            return 0
+        fi
+        return 0
+    }
+    
+    rsd::l::remote::prompt_user() {
+        return 0  # User accepts
+    }
+    
+    rsd::l::remote::bootstrap_install() {
+        return 0
+    }
+    
+    run rsd::c::remote::install "user"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"MKDIR_PROMPTED_SUCCESS"* ]]
+    
+    unset RSD_REMOTE_TARGET
+}
+
+@test "rsd::c::remote::install aborts if ~/.local/bin is missing and user declines" {
+    export RSD_REMOTE_TARGET="mock-target"
+    
+    rsd::c::remote::check() {
+        return 0
+    }
+    
+    rsd::l::remote::execute() {
+        local target="$1"
+        local cmd="$2"
+        if [[ "$cmd" == "[ -d \$HOME/.local/bin ]" ]]; then
+            return 1  # folder does not exist
+        fi
+        return 0
+    }
+    
+    rsd::l::remote::prompt_user() {
+        return 1  # User declines
+    }
+    
+    run rsd::c::remote::install "user"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Abort: Remote installation declined because user bin directory is missing."* ]]
     
     unset RSD_REMOTE_TARGET
 }

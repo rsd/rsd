@@ -694,8 +694,39 @@ function rsd::install() {
             rsd::warn "Installalling in custom directory: $install."
             cp -r "$TEMP_DIR/"* "$install"
             chmod +x "$install/rsd"
-            ;;
         esac
+
+        # Verify if binary destination is in current PATH
+        local bin_path=""
+        if [[ "$install" == "/usr/local" ]]; then
+            bin_path="/usr/local/bin"
+        elif [[ "$install" == "$HOME" ]]; then
+            bin_path="$HOME/.local/bin"
+        else
+            bin_path="$install"
+        fi
+
+        local in_path=0
+        local p
+        local IFS=":"
+        for p in $PATH; do
+            if [[ "$p" == "$bin_path" ]]; then
+                in_path=1
+                break
+            fi
+        done
+
+        if [[ $in_path -eq 0 ]]; then
+            rsd::warn "=========================================================="
+            rsd::warn "WARNING: Installation path '$bin_path' is not in your PATH!"
+            rsd::warn "To execute 'rsd' seamlessly, please add it to your shell profile."
+            rsd::warn "   For Bash (~/.bashrc):"
+            rsd::warn "      echo 'export PATH=\"$bin_path:\$PATH\"' >> ~/.bashrc"
+            rsd::warn "   For Zsh (~/.zshrc):"
+            rsd::warn "      echo 'export PATH=\"$bin_path:\$PATH\"' >> ~/.zshrc"
+            rsd::warn "=========================================================="
+        fi
+
         exit 0
     fi
 }
