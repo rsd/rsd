@@ -185,3 +185,66 @@ EOF
     [[ "$output" == *"Necessity Check: mock_pre_1"* ]]
     [[ "$output" == *"On Failure:      forward"* ]]
 }
+
+@test "rsd::c::recipe::list outputs relative paths for recipes in subfolders" {
+    # 1. Create an isolated mock recipe library directory
+    local mock_libdir
+    mock_libdir=$(mktemp -d -t rsd-recipe-subfolders-test.XXXXXX)
+    mkdir -p "${mock_libdir}/lib/recipe/category"
+    touch "${mock_libdir}/lib/recipe/category/test_recipe_C.recipe"
+
+    # 2. Configure path array
+    local -a old_path
+    old_path=("${RSD_LIBRARY_SEARCH_PATH[@]}")
+    RSD_LIBRARY_SEARCH_PATH=("${mock_libdir}")
+
+    # Load recipe command
+    source "${BATS_TEST_DIRNAME}/../../command/recipe"
+
+    run rsd::c::recipe::list
+
+    # Restore path array and cleanup
+    RSD_LIBRARY_SEARCH_PATH=("${old_path[@]}")
+    rm -rf "$mock_libdir"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"category/test_recipe_C"* ]]
+}
+
+@test "rsd::recipe::include_recipe resolves subfolder recipes and calls their hook functions" {
+    # 1. Create an isolated mock recipe library directory
+    local mock_libdir
+    mock_libdir=$(mktemp -d -t rsd-recipe-include.XXXXXX)
+    mkdir -p "${mock_libdir}/lib/recipe/utils"
+    
+    # Write mock recipe file content
+    cat << 'EOF' > "${mock_libdir}/lib/recipe/utils/sub_task.recipe"
+function rsd::recipe::utils_sub_task::register() {
+    rsd::recipe::register_task \
+        --name "subfolder_task" \
+        --apply "echo 'SUBFOLDER'"
+}
+EOF
+
+    # 2. Configure path array
+    local -a old_path
+    old_path=("${RSD_LIBRARY_SEARCH_PATH[@]}")
+    RSD_LIBRARY_SEARCH_PATH=("${mock_libdir}")
+
+    # Reset registers
+    RSD_REGISTERED_TASKS=()
+    declare -g -A RSD_TASKS_APPLY
+
+    # Load recipe command
+    source "${BATS_TEST_DIRNAME}/../../command/recipe"
+
+    rsd::recipe::include_recipe "utils/sub_task"
+
+    # Restore path array and cleanup
+    RSD_LIBRARY_SEARCH_PATH=("${old_path[@]}")
+    rm -rf "$mock_libdir"
+
+    [ "${#RSD_REGISTERED_TASKS[@]}" -eq 1 ]
+    [ "${RSD_REGISTERED_TASKS[0]}" = "subfolder_task" ]
+    [ "${RSD_TASKS_APPLY["subfolder_task"]}" = "echo 'SUBFOLDER'" ]
+}

@@ -11,14 +11,14 @@ fi
 
 function rsd::recipe::zsh_dev_setup::register() {
     # 1. Include core Zsh setup
-    rsd::recipe::include_recipe "zsh_core"
+    rsd::recipe::include_recipe "zsh/core"
 
     # 2. Include P10k theme configuration
-    rsd::recipe::include_recipe "zsh_theme"
+    rsd::recipe::include_recipe "zsh/theme"
 
     # 3. Include plugins and custom settings block
-    rsd::recipe::include_recipe "zsh_plugins"
+    rsd::recipe::include_recipe "zsh/plugins"
 
     # 4. Include companion packages and source compilers
-    rsd::recipe::include_recipe "zsh_tools"
+    rsd::recipe::include_recipe "zsh/tools"
 }

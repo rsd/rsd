@@ -90,21 +90,20 @@ function rsd::c::recipe::help() {
 function rsd::c::recipe::list() {
     rsd::warn "=== Available Recipes ==="
     
-    local libdir recipe_path recipe_name
+    local libdir recipe_relative
     local -A seen_recipes
     
     for libdir in "${RSD_LIBRARY_SEARCH_PATH[@]}"; do
         local recipe_dir="$libdir/lib/recipe"
         if [[ -d "$recipe_dir" ]]; then
-            # Use shell globbing safely
-            for recipe_path in "$recipe_dir"/*.recipe; do
-                [[ ! -e "$recipe_path" ]] && continue
-                recipe_name=$(basename "$recipe_path" .recipe)
-                if [[ -z "${seen_recipes[$recipe_name]}" ]]; then
-                    seen_recipes[$recipe_name]=1
-                    echo -e "  $recipe_name"
+            # Discover nested recipes recursively
+            while read -r recipe_relative; do
+                [[ -z "$recipe_relative" ]] && continue
+                if [[ -z "${seen_recipes[$recipe_relative]}" ]]; then
+                    seen_recipes[$recipe_relative]=1
+                    echo -e "  $recipe_relative"
                 fi
-            done
+            done < <(rsd::l::recipe::find_recursive "$recipe_dir" "")
         fi
     done
     return 0

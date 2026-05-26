@@ -85,11 +85,14 @@ function rsd::recipe::include_recipe() {
         RSD_INCLUDED_RECIPES=()
     fi
 
+    # Normalize name to get a valid function identifier (slash becomes underscore)
+    local clean_name="${name//\//_}"
+
     # Double-inclusion guard prevents duplicate task registration
-    if [[ "${RSD_INCLUDED_RECIPES["$name"]}" == "1" ]]; then
+    if [[ "${RSD_INCLUDED_RECIPES["$clean_name"]}" == "1" ]]; then
         return 0
     fi
-    RSD_INCLUDED_RECIPES["$name"]=1
+    RSD_INCLUDED_RECIPES["$clean_name"]=1
 
     if ! rsd::check_libdir_file "lib/recipe/${name}.recipe"; then
         rsd::warn "Error: Sub-recipe file '${name}' could not be resolved."
@@ -100,7 +103,7 @@ function rsd::recipe::include_recipe() {
     source "$(rsd::get_libdir_file "lib/recipe/${name}.recipe")"
 
     # Invoke the registration hook
-    local reg_func="rsd::recipe::${name}::register"
+    local reg_func="rsd::recipe::${clean_name}::register"
     if bash::is_function "$reg_func"; then
         "$reg_func"
     else
@@ -267,4 +270,35 @@ function rsd::l::recipe::install_pkg() {
     local package="$1"
     source "$(rsd::get_libdir_file command/install)"
     rsd::c::install::command "$package"
+}
+
+# Finds all *.recipe files recursively under a base directory.
+# This function is pure-Bash and does not call external binaries like find.
+#
+# @param string $1 The absolute base directory path.
+# @param string $2 The current subfolder relative path (empty for root).
+# @return stdout Relative paths of found recipes (without .recipe extension).
+function rsd::l::recipe::find_recursive() {
+    local base_dir="$1"
+    local sub_dir="$2"
+    local path="${base_dir}/${sub_dir}"
+    local item
+
+    [[ ! -d "$path" ]] && return 0
+
+    for item in "$path"/*; do
+        [[ ! -e "$item" ]] && continue
+        if [[ -d "$item" ]]; then
+            local next_sub
+            if [[ -z "$sub_dir" ]]; then
+                next_sub="$(basename "$item")"
+            else
+                next_sub="${sub_dir}/$(basename "$item")"
+            fi
+            rsd::l::recipe::find_recursive "$base_dir" "$next_sub"
+        elif [[ -f "$item" && "$item" == *.recipe ]]; then
+            local relative_file="${item#$base_dir/}"
+            echo "${relative_file%.recipe}"
+        fi
+    done
 }
