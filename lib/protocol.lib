@@ -68,13 +68,22 @@ function rsd::l::protocol::ssh::run() {
 #!/usr/bin/env bash
 echo "$RSD_SSH_PASS"
 EOF
-        chmod +x "$askpass_tmp"
+        # Owner-only permissions (rwx------).
+        # Prevents other local users from reading the askpass script, which
+        # would reveal the credential environment variable name (CWE-377 defense).
+        chmod 0700 "$askpass_tmp"
 
         # Export active pipeline environment securely
         export RSD_SSH_PASS="$password"
         export SSH_ASKPASS="$askpass_tmp"
         export SSH_ASKPASS_REQUIRE="force"
         export DISPLAY=":0.0" # Force dummy display to trigger SSH_ASKPASS
+
+        # Trap-guarded cleanup: ensures askpass file and credential variables
+        # are removed even if SSH is interrupted by SIGINT/SIGTERM (e.g. Ctrl+C).
+        # Without this, an interrupted session would leave a credential-bearing
+        # temp file in /tmp/ indefinitely.
+        trap 'rm -f "$askpass_tmp"; unset RSD_SSH_PASS SSH_ASKPASS SSH_ASKPASS_REQUIRE DISPLAY; trap - EXIT INT TERM' EXIT INT TERM
     fi
 
     # Execute remote command securely in subshell
@@ -83,10 +92,12 @@ EOF
     ssh "${ssh_opts[@]}" "$connection_target" "${payload[@]}"
     local exit_status=$?
 
-    # Secure Cleanup of memory credentials and temporary files
+    # Secure Cleanup of memory credentials and temporary files.
+    # Also runs via the trap above on signal interruption.
     if [[ -n "$askpass_tmp" ]]; then
         rm -f "$askpass_tmp"
         unset RSD_SSH_PASS SSH_ASKPASS SSH_ASKPASS_REQUIRE DISPLAY
+        trap - EXIT INT TERM
     fi
 
     return $exit_status

@@ -39,16 +39,25 @@ function bash::is_associative_array() {
 
 
 # Checks if the key exists in an associative array
+# Check if a key exists in an associative array.
+# Intent: Uses declare -n (nameref) to avoid eval-based array access.
+#
 # from bash_extensions.lib
 # Usage:
 #  bash::key_exists {key} in {array}
+#
+# @param string $1 The key to look up.
+# @param string $2 Must be the literal word "in".
+# @param string $3 The name of the associative array (unquoted variable name).
+# @return int 0 if key exists, 1 if not.
 function bash::key_exists() {
 	if [[ "$2" != "in" ]]; then
 		rsd::warn "Abort! Incorrect usage of bash::key_exists."
 		rsd::warn "Correct usage: bash::key_exists {key} in {array}"
 		exit 11
 	fi
-	eval '[ ${'$3'[$1]+muahaha} ]'
+	declare -n _kex_arr="$3"
+	[[ -v "_kex_arr[$1]" ]]
 }
 
 
