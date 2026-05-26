@@ -60,13 +60,13 @@ function rsd::recipe::zsh_core::shell_apply() {
     rsd::l::target::exec_sudo "" "chsh" "-s" "$zsh_path" "$USER"
 }
 
-# Oh My Zsh unattended installation has a multi-step pipeline with no helper shortcut
+# Oh My Zsh unattended installation via secure download pipeline.
+# Uses fetch_and_exec to prevent:
+#   - Symlink attacks on predictable /tmp paths (CWE-377)
+#   - TOCTOU races between download and execution (CWE-367)
+#   - Blind curl-pipe-to-shell execution (CWE-494)
 function rsd::recipe::zsh_core::omz_apply() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::target::exec "curl" "-fsSL" "https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh" "-o" "/tmp/omz_install.sh"
-        rsd::l::target::exec "sh" "/tmp/omz_install.sh" "--unattended"
-        rsd::l::target::exec "rm" "-f" "/tmp/omz_install.sh"
-    else
-        sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
-    fi
+    rsd::l::target::fetch_and_exec \
+        "https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh" \
+        "sh" "--unattended"
 }

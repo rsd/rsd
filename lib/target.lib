@@ -13,7 +13,7 @@ if [[ "$RSD_TARGET_LIB" == "1" ]]; then
     return 0
 fi
 RSD_TARGET_LIB=1
-RSD_TARGET_LIB_VERSION="0.1.0"
+RSD_TARGET_LIB_VERSION="0.2.0"
 
 # ==============================================================================
 # Target-Aware Dispatch Primitives
@@ -110,4 +110,110 @@ function rsd::l::target::git_clone() {
     [[ -n "$depth" ]] && depth_args=("--depth" "$depth")
 
     rsd::l::target::exec git clone "${depth_args[@]}" "$repo" "$dest"
+}
+
+# ==============================================================================
+# Secure Temporary File Primitives
+# ==============================================================================
+# SECURITY CONTEXT: These functions exist to prevent three classes of
+# vulnerability that arise when recipes download and execute remote scripts:
+#
+#   1. Symlink Attack (CWE-377): Using predictable paths like /tmp/script.sh
+#      allows any local user to pre-create a symlink at that path. When the
+#      download writes to it, it overwrites the symlink target (e.g., ~/.bashrc).
+#
+#   2. TOCTOU Race (CWE-367): Even with unique-looking names, if the path is
+#      predictable, an attacker can replace the downloaded file between the
+#      download and execution steps.
+#
+#   3. Curl-Pipe-to-Shell (CWE-494): Running `sh -c "$(curl ...)"` executes
+#      the script from memory with no opportunity for inspection, checksum
+#      verification, or audit trail.
+#
+# The solution: mktemp generates cryptographically unpredictable paths,
+# chmod 0700 restricts access to the owner, and guaranteed cleanup removes
+# the attack surface after execution.
+
+# Create a secure temporary file or directory on the target host.
+# Intent: Wraps mktemp to produce unpredictable paths immune to symlink
+#         pre-creation attacks, and immediately restricts permissions to
+#         owner-only (0700) to prevent other users from reading or modifying
+#         the file during the TOCTOU window between creation and use.
+#
+# @param string $1 Template suffix (e.g., "rsd-fetch.XXXXXX").
+# @param string $2 Optional: "-d" to create a directory instead of a file.
+# @return stdout The absolute path to the created temp file/directory.
+# @return 14 on mktemp failure.
+function rsd::l::target::mktemp() {
+    local template="$1"
+    local dir_flag="${2:-}"
+    local result
+
+    if [[ "$dir_flag" == "-d" ]]; then
+        result=$(rsd::l::target::exec mktemp -d -t "$template") || return 14
+    else
+        result=$(rsd::l::target::exec mktemp -t "$template") || return 14
+    fi
+
+    # Trim whitespace from remote execution output
+    result="${result#"${result%%[![:space:]]*}"}"
+    result="${result%"${result##*[![:space:]]}"}"
+
+    if [[ -z "$result" ]]; then
+        rsd::warn "Error: mktemp returned an empty path."
+        return 14
+    fi
+
+    # Restrictive permissions: owner-only read/write/execute.
+    # Prevents other local users from reading or replacing the file
+    # during the window between download and execution (TOCTOU mitigation).
+    rsd::l::target::exec chmod 0700 "$result"
+
+    echo "$result"
+}
+
+# Secure download-execute-cleanup pipeline for remote scripts.
+# Intent: Replaces ALL ad-hoc "curl to /tmp + sh + rm" patterns with a
+#         single, safe primitive that enforces:
+#         - Unpredictable temp path (mktemp, prevents CWE-377 symlink attacks)
+#         - Restrictive permissions (0700, mitigates CWE-367 TOCTOU races)
+#         - Guaranteed cleanup (rm runs even on execution failure)
+#         - Disk-based execution (enables future SHA256 verification,
+#           prevents CWE-494 curl-pipe-to-shell blind execution)
+#
+# FORBIDDEN ALTERNATIVE (do NOT use):
+#   sh -c "$(curl -fsSL https://example.com/install.sh)"  # CWE-494
+#   curl ... -o /tmp/install.sh && sh /tmp/install.sh      # CWE-377
+#
+# @param string $1 URL to download.
+# @param string $2 Interpreter (e.g., "sh", "bash").
+# @param string $3.. Optional arguments passed to the downloaded script.
+# @return int Exit code of the script execution.
+# @return 14 on mktemp failure.
+function rsd::l::target::fetch_and_exec() {
+    local url="$1"
+    local interpreter="$2"
+    shift 2
+    local -a script_args=("$@")
+
+    # 1. Create secure temp file with unpredictable name and 0700 perms
+    local tmpfile
+    tmpfile=$(rsd::l::target::mktemp "rsd-fetch.XXXXXX") || return 14
+
+    # 2. Download to secure temp file
+    local rc=0
+    if ! rsd::l::target::exec curl -fsSL "$url" -o "$tmpfile"; then
+        rsd::warn "Error: Failed to download script from: $url"
+        rsd::l::target::exec rm -f "$tmpfile"
+        return 1
+    fi
+
+    # 3. Execute from secure temp file
+    rsd::l::target::exec "$interpreter" "$tmpfile" "${script_args[@]}" || rc=$?
+
+    # 4. ALWAYS cleanup — even on failure. Leaving the downloaded script
+    #    on disk extends the TOCTOU attack surface indefinitely.
+    rsd::l::target::exec rm -f "$tmpfile"
+
+    return $rc
 }

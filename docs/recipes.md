@@ -86,14 +86,10 @@ Users should not need to explicitly specify administrative paths or sudo hops (e
 ```bash
 function rsd::recipe::zsh_core::shell_apply() {
     local zsh_path=$(which zsh 2>/dev/null)
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        # Dynamically append sudo protocol hop for remote execution
-        local elevated_target="${RSD_REMOTE_TARGET},sudo://root"
-        rsd::l::remote::execute "$elevated_target" "chsh" "-s" "$zsh_path" "$USER"
-    else
-        # Dynamically elevate locally using sudo askpass
-        rsd::l::sudo::run "" "chsh" "-s" "$zsh_path" "$USER"
-    fi
+    # rsd::l::target::exec_sudo transparently handles:
+    #   - Local: sudo.lib askpass pipeline
+    #   - Remote: appends ,sudo://root to target string
+    rsd::l::target::exec_sudo "" "chsh" "-s" "$zsh_path" "$USER"
 }
 ```
 
@@ -148,64 +144,41 @@ fi
 ```
 
 ### Step 2: Declare the Registration Hook
-Every recipe file must implement `rsd::recipe::<basename>::register` to define its steps:
+Every recipe file must implement `rsd::recipe::<basename>::register` to define its steps.
+Use `rsd::l::target::` helpers for inline hooks and `rsd::l::recipe::install_pkg` for package installation:
 
 ```bash
 # @param none
 # @return none
 function rsd::recipe::my_app::register() {
+    # Simple tasks can be fully declarative using target:: helpers
     rsd::recipe::register_task \
         --name "my_app::install_packages" \
-        --pre-check "rsd::recipe::my_app::install_pre" \
-        --apply "rsd::recipe::my_app::install_apply" \
+        --pre-check "rsd::l::target::has_bin my-app" \
+        --apply "rsd::l::recipe::install_pkg my-app" \
         --recovery "forward"
 
+    # Complex tasks use custom callbacks
     rsd::recipe::register_task \
         --name "my_app::configure_settings" \
-        --pre-check "rsd::recipe::my_app::config_pre" \
+        --pre-check "rsd::l::target::file_exists \$HOME/.myapp.conf" \
         --apply "rsd::recipe::my_app::config_apply" \
         --recovery "rollback" \
-        --rollback "rsd::recipe::my_app::config_rollback"
+        --rollback "rsd::l::target::exec rm -f \$HOME/.myapp.conf"
 }
 ```
 
-### Step 3: Implement Hook Callbacks
-Implement callbacks that respect local vs remote execution routes (`$RSD_REMOTE_TARGET` checks).
+### Step 3: Implement Custom Hook Callbacks
+Callbacks are only needed for complex logic that cannot be expressed as a single `rsd::l::target::` inline call. Use `rsd::l::target::exec` to route commands transparently:
 
 ```bash
-# Sudo-implied installation hook
-function rsd::recipe::my_app::install_apply() {
-    source "$(rsd::get_libdir_file command/install)"
-    rsd::c::install::command "my-package"
-}
-
-# Config check hook
-function rsd::recipe::my_app::config_pre() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "test" "-f" "\$HOME/.myapp.conf"
-    else
-        [[ -f "$HOME/.myapp.conf" ]]
-    fi
-}
-
-# Config apply hook
+# Config apply: uses target::exec for transparent local/remote routing
 function rsd::recipe::my_app::config_apply() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "echo" "'theme=dark'" ">" "\$HOME/.myapp.conf"
-    else
-        echo "theme=dark" > "$HOME/.myapp.conf"
-    fi
-}
-
-# Rollback cleanup hook
-function rsd::recipe::my_app::config_rollback() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "rm" "-f" "\$HOME/.myapp.conf"
-    else
-        rm -f "$HOME/.myapp.conf"
-    fi
+    rsd::l::target::exec sh -c "echo 'theme=dark' > \$HOME/.myapp.conf"
 }
 ```
+
+> **Note**: You should NOT manually branch on `$RSD_REMOTE_TARGET`. Use `rsd::l::target::exec` and its derived helpers instead. See `lib/target.lib` for the full API.
 
 ## 6. Recipe Dependencies & Composition
 
@@ -289,3 +262,62 @@ Write tests using the BATS framework under `tests/unit/` to assert task registra
     [[ "$output" != *"EXEC"* ]]
 }
 ```
+
+---
+
+## 8. Security: Download and Execute
+
+Recipes that download and execute remote scripts must follow strict security protocols to prevent three classes of vulnerability:
+
+### Threat Model
+
+| CWE | Vulnerability | Attack Vector |
+| :--- | :--- | :--- |
+| **CWE-377** | Predictable Temp File | Attacker pre-creates a symlink at `/tmp/known_name.sh` pointing to a sensitive file. When `curl -o` writes to it, the symlink target is overwritten. |
+| **CWE-367** | TOCTOU Race | Attacker replaces the downloaded file between the download step and the execution step. |
+| **CWE-494** | Download of Code Without Integrity Check | `sh -c "$(curl ...)"` executes code from memory with no inspection, checksum verification, or audit trail. |
+
+### Forbidden Patterns
+
+```bash
+# FORBIDDEN: Predictable path — symlink attack (CWE-377)
+curl -o /tmp/install.sh https://example.com/install.sh
+sh /tmp/install.sh
+
+# FORBIDDEN: Pipe to shell — no verification possible (CWE-494)
+sh -c "$(curl -fsSL https://example.com/install.sh)"
+curl -fsSL https://example.com/install.sh | sh
+```
+
+### Required Pattern
+
+Use `rsd::l::target::fetch_and_exec` for all download-and-execute workflows:
+
+```bash
+# SECURE: Unpredictable temp path + restrictive perms + guaranteed cleanup
+rsd::l::target::fetch_and_exec \
+    "https://example.com/install.sh" \
+    "sh" "--unattended"
+```
+
+This function enforces:
+1. **`mktemp`-generated paths**: Cryptographically unpredictable, immune to pre-creation attacks.
+2. **`chmod 0700`**: Owner-only access prevents other users from modifying the file.
+3. **Guaranteed cleanup**: The temp file is deleted after execution, even on failure.
+4. **Disk-based execution**: The script touches disk, enabling future SHA256 verification.
+
+### Manual Temp File Usage
+
+If you need to create temp files for non-download purposes, use `rsd::l::target::mktemp`:
+
+```bash
+# Create a secure temp file
+tmpfile=$(rsd::l::target::mktemp "rsd-mydata.XXXXXX")
+
+# ... use the file ...
+
+# ALWAYS clean up, even on failure paths
+rsd::l::target::exec rm -f "$tmpfile"
+```
+
+> See also: `AGENTS.md` Section 8 (Secure Temporary File Protocol) for the mandatory agent rules.

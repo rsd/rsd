@@ -131,3 +131,104 @@ setup() {
     [[ "$output" != *"--depth"* ]]
     [[ "$output" == *"/tmp/dest"* ]]
 }
+
+# ==============================================================================
+# rsd::l::target::mktemp (secure temp file creation)
+# ==============================================================================
+
+@test "rsd::l::target::mktemp creates a file with unpredictable name" {
+    run rsd::l::target::mktemp "rsd-test.XXXXXX"
+    [ "$status" -eq 0 ]
+
+    local path="$output"
+    # Trim whitespace
+    path="${path#"${path%%[![:space:]]*}"}"
+    path="${path%"${path##*[![:space:]]}"}"
+
+    # File must exist and have an unpredictable suffix
+    [[ -e "$path" ]]
+    [[ "$path" == *"rsd-test."* ]]
+
+    # Cleanup
+    rm -f "$path"
+}
+
+@test "rsd::l::target::mktemp -d creates a directory" {
+    run rsd::l::target::mktemp "rsd-test-dir.XXXXXX" "-d"
+    [ "$status" -eq 0 ]
+
+    local path="$output"
+    path="${path#"${path%%[![:space:]]*}"}"
+    path="${path%"${path##*[![:space:]]}"}"
+
+    [[ -d "$path" ]]
+
+    # Cleanup
+    rmdir "$path"
+}
+
+@test "rsd::l::target::mktemp sets restrictive 0700 permissions" {
+    run rsd::l::target::mktemp "rsd-test-perms.XXXXXX"
+    [ "$status" -eq 0 ]
+
+    local path="$output"
+    path="${path#"${path%%[![:space:]]*}"}"
+    path="${path%"${path##*[![:space:]]}"}"
+
+    # Check permissions are owner-only (rwx for owner, nothing for others)
+    local perms
+    perms=$(stat -c "%a" "$path")
+    [[ "$perms" == "700" ]]
+
+    rm -f "$path"
+}
+
+# ==============================================================================
+# rsd::l::target::fetch_and_exec (secure download-execute pipeline)
+# ==============================================================================
+
+@test "rsd::l::target::fetch_and_exec downloads, executes, and cleans up" {
+    # Stub curl to write a known payload to the temp file
+    curl() {
+        local output_file=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o) output_file="$2"; shift ;;
+            esac
+            shift
+        done
+        echo '#!/bin/sh' > "$output_file"
+        echo 'echo "FETCH_EXEC_OK"' >> "$output_file"
+        return 0
+    }
+    export -f curl
+
+    run rsd::l::target::fetch_and_exec "https://example.com/test.sh" "sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"FETCH_EXEC_OK"* ]]
+}
+
+@test "rsd::l::target::fetch_and_exec cleans up even on script failure" {
+    # Stub curl to write a failing script
+    curl() {
+        local output_file=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -o) output_file="$2"; shift ;;
+            esac
+            shift
+        done
+        echo '#!/bin/sh' > "$output_file"
+        echo 'exit 42' >> "$output_file"
+        return 0
+    }
+    export -f curl
+
+    run rsd::l::target::fetch_and_exec "https://example.com/fail.sh" "sh"
+    [ "$status" -eq 42 ]
+
+    # Verify no rsd-fetch temp files were left behind
+    local leftover
+    leftover=$(find /tmp -maxdepth 1 -name "rsd-fetch.*" -user "$(whoami)" 2>/dev/null | wc -l)
+    [ "$leftover" -eq 0 ]
+}

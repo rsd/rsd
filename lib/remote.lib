@@ -292,12 +292,23 @@ function rsd::l::remote::bootstrap_install() {
     
     rsd::warn "Bootstrapping RSD on remote target '$remote_spec'..."
     
-    # Intent: Create a unique temporary directory name remotely to avoid collisions
-    #         e.g., /tmp/rsd-bootstrap.XXXXXX. Since mktemp might vary on remote systems,
-    #         we can use a random suffix compiled locally.
-    local rand_suffix
-    rand_suffix=$(openssl rand -hex 6 2>/dev/null || echo "123456789")
-    local remote_tmp="/tmp/rsd-bootstrap-${rand_suffix}"
+    # Intent: Create a secure temporary directory on the remote host using mktemp.
+    #         The old approach used `openssl rand -hex 6` locally to generate a suffix,
+    #         which prevented collisions but NOT symlink attacks (CWE-377) — an attacker
+    #         watching /tmp could race the mkdir-to-tar window (CWE-367).
+    #         Using remote mktemp -d atomically creates an unpredictable directory.
+    #
+    # NOTE: Cannot use rsd::l::target::mktemp here because bootstrap operates on
+    #       $remote_spec (a parameter), not $RSD_REMOTE_TARGET (a global).
+    local remote_tmp
+    remote_tmp=$(rsd::l::remote::execute "$remote_spec" "mktemp" "-d" "-t" "rsd-bootstrap.XXXXXX" 2>/dev/null)
+    # Trim whitespace from remote output
+    remote_tmp="${remote_tmp#"${remote_tmp%%[![:space:]]*}"}"
+    remote_tmp="${remote_tmp%"${remote_tmp##*[![:space:]]}"}"
+    if [[ -z "$remote_tmp" ]]; then
+        rsd::warn "Error: Failed to create secure temp directory on remote host."
+        return 14
+    fi
     local rsd_bin_dir="$RSD_RUN_DIR"
     local rsd_share_dir="$RSD_RUN_DIR"
     if [[ "$RSD_MODE" != "devel" ]]; then
