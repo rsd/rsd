@@ -311,7 +311,7 @@ function rsd::l::remote::bootstrap_install() {
     
     # 2. Run remote installer
     rsd::warn "Executing remote framework installer..."
-    if ! rsd::l::remote::execute "$remote_spec" "bash" "${remote_tmp}/rsd" "--install" "$mode" >/dev/null; then
+    if ! rsd::l::remote::execute "$remote_spec" "env" "RSD_INSTALLATION_STEP=2" "TEMP_DIR=${remote_tmp}" "bash" "${remote_tmp}/rsd" "--install" "$mode" >/dev/null; then
         rsd::warn "Error: Remote framework installer failed."
         rsd::l::remote::execute "$remote_spec" "rm" "-rf" "$remote_tmp" 2>/dev/null
         return 13

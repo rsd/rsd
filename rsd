@@ -600,7 +600,11 @@ function rsd::find_mode() {
 #   $1 - The path or mode to install
 function rsd::install() {
     local install=$1
-	rsd::check_binaries_or_fail mktemp git mkdir cp chmod
+    if [[ -v RSD_INSTALLATION_STEP && $RSD_INSTALLATION_STEP -eq 2 ]]; then
+        rsd::check_binaries_or_fail mktemp mkdir cp chmod
+    else
+        rsd::check_binaries_or_fail mktemp git mkdir cp chmod
+    fi
 
     if [[ $install == "local" || $install =~ ^/usr/local ]]; then
         install="/usr/local"
