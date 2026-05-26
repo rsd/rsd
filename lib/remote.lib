@@ -298,10 +298,15 @@ function rsd::l::remote::bootstrap_install() {
     local rand_suffix
     rand_suffix=$(openssl rand -hex 6 2>/dev/null || echo "123456789")
     local remote_tmp="/tmp/rsd-bootstrap-${rand_suffix}"
+    local rsd_bin_dir="$RSD_RUN_DIR"
+    local rsd_share_dir="$RSD_RUN_DIR"
+    if [[ "$RSD_MODE" != "devel" ]]; then
+        rsd_share_dir="$(dirname "$RSD_RUN_DIR")/share/rsd"
+    fi
     
     # 1. Dispatch tarball and unpack remotely
     rsd::warn "Streaming local RSD files to remote target..."
-    if ! tar -cf - -C "$RSD_RUN_DIR" rsd lib command config data 2>/dev/null | \
+    if ! tar -cf - -C "$rsd_bin_dir" rsd -C "$rsd_share_dir" lib command config data 2>/dev/null | \
          rsd::l::remote::execute "$remote_spec" "mkdir" "-p" "$remote_tmp" "&&" "tar" "-xf" "-" "-C" "$remote_tmp" >/dev/null; then
         rsd::warn "Error: Failed to stream and unpack RSD on remote host."
         # Clean up in case directory was created
