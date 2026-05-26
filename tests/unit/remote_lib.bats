@@ -236,4 +236,31 @@ setup() {
     [ "$rsd_bin" = "rsd" ]
 }
 
+@test "rsd::l::remote::bootstrap_check handles trailing carriage returns and CRLF in version string correctly" {
+    export RSD_VERSION="1.9.12"
+    # Mock probe returning an older remote version with trailing carriage return and newline
+    rsd::l::remote::execute() {
+        local cmd="$2"
+        if [[ "$cmd" == "rsd" && "$3" == "--version" ]]; then
+            printf "1.8.0\r\n"
+            return 0
+        fi
+        return 1
+    }
+    
+    # Mock user declining upgrade
+    rsd::l::remote::prompt_user() {
+        return 1
+    }
+    
+    local rsd_bin=""
+    run rsd::l::remote::bootstrap_check "mock-host" rsd_bin
+    
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Warning: Remote framework version (1.8.0) is"* ]]
+    # Assert that no carriage return carriage remains in output to prevent line overwrites
+    [[ "$output" != *$'\r'* ]]
+}
+
+
 

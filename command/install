@@ -152,7 +152,7 @@ function rsd::c::install::command() {
         
         # Verify remote bootstrapper or fall back to raw system package execution directly
         local rsd_bin="rsd"
-        if rsd::l::remote::bootstrap_check "$RSD_REMOTE_TARGET" rsd_bin 2>/dev/null; then
+        if rsd::l::remote::bootstrap_check "$RSD_REMOTE_TARGET" rsd_bin; then
             local -a remote_opts=()
             ((dry_run)) && remote_opts+=("--dry-run")
             rsd::warn "Delegating package installation to remote RSD..."

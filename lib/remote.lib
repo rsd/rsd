@@ -431,7 +431,7 @@ function rsd::l::remote::bootstrap_check() {
     # 3. Parity & Version Compliance check
     # Trim leading/trailing whitespace
     remote_ver="${remote_ver#"${remote_ver%%[![:space:]]*}"}"
-    remote_ver="${remote_ver%"${remote_ver%%[![:space:]]*}"}"
+    remote_ver="${remote_ver%"${remote_ver##*[![:space:]]}"}"
     
     if rsd::version_gt "$RSD_VERSION" "$remote_ver"; then
         rsd::warn "Warning: Remote framework version ($remote_ver) is older than your local version ($RSD_VERSION)."
