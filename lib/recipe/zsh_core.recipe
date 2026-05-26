@@ -12,8 +12,8 @@ fi
 function rsd::recipe::zsh_core::register() {
     rsd::recipe::register_task \
         --name "zsh_core::install_zsh" \
-        --pre-check "rsd::l::recipe::helper::has_bin zsh" \
-        --apply "rsd::l::recipe::helper::install_pkg zsh" \
+        --pre-check "rsd::l::target::has_bin zsh" \
+        --apply "rsd::l::recipe::install_pkg zsh" \
         --recovery "forward"
 
     rsd::recipe::register_task \
@@ -21,11 +21,11 @@ function rsd::recipe::zsh_core::register() {
         --pre-check "rsd::recipe::zsh_core::shell_pre" \
         --apply "rsd::recipe::zsh_core::shell_apply" \
         --recovery "rollback" \
-        --rollback "rsd::l::recipe::helper::run_sudo '' chsh -s /bin/bash $USER"
+        --rollback "rsd::l::target::exec_sudo '' chsh -s /bin/bash $USER"
 
     rsd::recipe::register_task \
         --name "zsh_core::install_oh_my_zsh" \
-        --pre-check "rsd::l::recipe::helper::dir_exists \$HOME/.oh-my-zsh" \
+        --pre-check "rsd::l::target::dir_exists \$HOME/.oh-my-zsh" \
         --apply "rsd::recipe::zsh_core::omz_apply" \
         --recovery "forward"
 }
@@ -53,22 +53,19 @@ function rsd::recipe::zsh_core::shell_apply() {
             rsd::warn "Error: Zsh binary was not found on remote target."
             return 3
         fi
-
-        local elevated_target="${RSD_REMOTE_TARGET},sudo://root"
-        rsd::l::remote::execute "$elevated_target" "chsh" "-s" "$zsh_path" "$USER"
     else
         zsh_path=$(which zsh 2>/dev/null)
-        [[ "$RSD_SUDO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/sudo.lib)"
-        rsd::l::sudo::run "" "chsh" "-s" "$zsh_path" "$USER"
     fi
+
+    rsd::l::target::exec_sudo "" "chsh" "-s" "$zsh_path" "$USER"
 }
 
 # Oh My Zsh unattended installation has a multi-step pipeline with no helper shortcut
 function rsd::recipe::zsh_core::omz_apply() {
     if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "curl" "-fsSL" "https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh" "-o" "/tmp/omz_install.sh"
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "sh" "/tmp/omz_install.sh" "--unattended"
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "rm" "-f" "/tmp/omz_install.sh"
+        rsd::l::target::exec "curl" "-fsSL" "https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh" "-o" "/tmp/omz_install.sh"
+        rsd::l::target::exec "sh" "/tmp/omz_install.sh" "--unattended"
+        rsd::l::target::exec "rm" "-f" "/tmp/omz_install.sh"
     else
         sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
     fi

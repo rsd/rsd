@@ -15,89 +15,32 @@ function rsd::recipe::zsh_theme::register() {
 
     rsd::recipe::register_task \
         --name "zsh_theme::clone_p10k" \
-        --pre-check "rsd::recipe::zsh_theme::theme_pre" \
-        --apply "rsd::recipe::zsh_theme::theme_apply" \
+        --pre-check "rsd::l::target::dir_exists \${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/themes/powerlevel10k" \
+        --apply "rsd::l::target::git_clone https://github.com/romkatv/powerlevel10k.git \${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/themes/powerlevel10k 1" \
         --recovery "forward"
 
     rsd::recipe::register_task \
         --name "zsh_theme::configure_p10k" \
-        --pre-check "rsd::recipe::zsh_theme::config_pre" \
+        --pre-check "rsd::l::target::file_contains '^ZSH_THEME=\"powerlevel10k/powerlevel10k\"' \$HOME/.zshrc" \
         --apply "rsd::recipe::zsh_theme::config_apply" \
         --recovery "rollback" \
-        --rollback "rsd::recipe::zsh_theme::config_rollback"
+        --rollback "rsd::l::target::exec mv \$HOME/.zshrc.theme.bak \$HOME/.zshrc"
 
     rsd::recipe::register_task \
         --name "zsh_theme::adjust_p10k_context" \
         --pre-check "rsd::recipe::zsh_theme::p10k_pre" \
-        --apply "rsd::recipe::zsh_theme::p10k_apply" \
+        --apply "rsd::l::target::exec perl -pi -e 's@^\\s+(typeset -g POWERLEVEL9K_CONTEXT_{DEFAULT,SUDO}_{CONTENT,VISUAL_IDENTIFIER}_EXPANSION=)@# \$1@' \$HOME/.p10k.zsh" \
         --recovery "ignore"
 }
 
-# 1. P10k theme clone pre-check
-function rsd::recipe::zsh_theme::theme_pre() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "test" "-d" "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
-    else
-        [[ -d "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k" ]]
-    fi
-}
-
-# 2. P10k theme clone execution
-function rsd::recipe::zsh_theme::theme_apply() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "git" "clone" "--depth=1" "https://github.com/romkatv/powerlevel10k.git" "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
-    else
-        git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
-    fi
-}
-
-# 3. Zsh theme config pre-check
-function rsd::recipe::zsh_theme::config_pre() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "grep" "-q" '^ZSH_THEME="powerlevel10k/powerlevel10k"' "\$HOME/.zshrc"
-    else
-        grep -q '^ZSH_THEME="powerlevel10k/powerlevel10k"' ~/.zshrc
-    fi
-}
-
-# 4. Zsh theme config execution
+# Zsh theme config execution (backup + sed replacement)
 function rsd::recipe::zsh_theme::config_apply() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        # Backup .zshrc
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "cp" "\$HOME/.zshrc" "\$HOME/.zshrc.theme.bak"
-        # Edit using perl
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "perl" "-pi" "-e" "'s@^ZSH_THEME=.*\$@ZSH_THEME=\"powerlevel10k/powerlevel10k\"@'" "\$HOME/.zshrc"
-    else
-        cp ~/.zshrc ~/.zshrc.theme.bak
-        perl -pi -e 's@^ZSH_THEME=.*$@ZSH_THEME="powerlevel10k/powerlevel10k"@' ~/.zshrc
-    fi
+    rsd::l::target::exec cp "\$HOME/.zshrc" "\$HOME/.zshrc.theme.bak"
+    rsd::l::target::exec perl -pi -e "'s@^ZSH_THEME=.*\$@ZSH_THEME=\"powerlevel10k/powerlevel10k\"@'" "\$HOME/.zshrc"
 }
 
-# 5. Zsh theme config rollback
-function rsd::recipe::zsh_theme::config_rollback() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "mv" "\$HOME/.zshrc.theme.bak" "\$HOME/.zshrc"
-    else
-        mv ~/.zshrc.theme.bak ~/.zshrc
-    fi
-}
-
-# 6. P10k context adjustment pre-check
+# P10k context adjustment pre-check (compound: file must exist AND contain uncommented lines)
 function rsd::recipe::zsh_theme::p10k_pre() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        # Must have p10k config file, and context must not be commented out yet
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "test" "-f" "\$HOME/.p10k.zsh" && \
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "grep" "-q" '^# typeset -g POWERLEVEL9K_CONTEXT_' "\$HOME/.p10k.zsh"
-    else
-        [[ -f ~/.p10k.zsh ]] && grep -q '^# typeset -g POWERLEVEL9K_CONTEXT_' ~/.p10k.zsh
-    fi
-}
-
-# 7. P10k context adjustment execution
-function rsd::recipe::zsh_theme::p10k_apply() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "perl" "-pi" "-e" "'s@^\\s+(typeset -g POWERLEVEL9K_CONTEXT_{DEFAULT,SUDO}_{CONTENT,VISUAL_IDENTIFIER}_EXPANSION=)@# \$1@'" "\$HOME/.p10k.zsh"
-    else
-        perl -pi -e 's@^\s+(typeset -g POWERLEVEL9K_CONTEXT_{DEFAULT,SUDO}_{CONTENT,VISUAL_IDENTIFIER}_EXPANSION=)@# $1@' ~/.p10k.zsh
-    fi
+    rsd::l::target::file_exists "\$HOME/.p10k.zsh" && \
+    rsd::l::target::file_contains '^# typeset -g POWERLEVEL9K_CONTEXT_' "\$HOME/.p10k.zsh"
 }

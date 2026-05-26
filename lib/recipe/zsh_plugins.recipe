@@ -15,96 +15,37 @@ function rsd::recipe::zsh_plugins::register() {
 
     rsd::recipe::register_task \
         --name "zsh_plugins::clone_autosuggestions" \
-        --pre-check "rsd::recipe::zsh_plugins::autosug_pre" \
-        --apply "rsd::recipe::zsh_plugins::autosug_apply" \
+        --pre-check "rsd::l::target::dir_exists \${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions" \
+        --apply "rsd::l::target::git_clone https://github.com/zsh-users/zsh-autosuggestions \${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions" \
         --recovery "forward"
 
     rsd::recipe::register_task \
         --name "zsh_plugins::clone_fzf" \
-        --pre-check "rsd::recipe::zsh_plugins::fzf_pre" \
+        --pre-check "rsd::l::target::dir_exists \$HOME/.fzf" \
         --apply "rsd::recipe::zsh_plugins::fzf_apply" \
         --recovery "forward"
 
     rsd::recipe::register_task \
         --name "zsh_plugins::clone_fzf_zsh_plugin" \
-        --pre-check "rsd::recipe::zsh_plugins::fzf_plugin_pre" \
-        --apply "rsd::recipe::zsh_plugins::fzf_plugin_apply" \
+        --pre-check "rsd::l::target::dir_exists \${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/fzf-zsh-plugin" \
+        --apply "rsd::l::target::git_clone https://github.com/unixorn/fzf-zsh-plugin.git \${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/fzf-zsh-plugin 1" \
         --recovery "forward"
 
     rsd::recipe::register_task \
         --name "zsh_plugins::inject_zshrc_settings" \
-        --pre-check "rsd::recipe::zsh_plugins::settings_pre" \
+        --pre-check "rsd::l::target::file_contains '# --- BEGIN RSD CUSTOM CONFIG ---' \$HOME/.zshrc" \
         --apply "rsd::recipe::zsh_plugins::settings_apply" \
         --recovery "rollback" \
         --rollback "rsd::recipe::zsh_plugins::settings_rollback"
 }
 
-# 1. Autosuggestions pre-check
-function rsd::recipe::zsh_plugins::autosug_pre() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "test" "-d" "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions"
-    else
-        [[ -d "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions" ]]
-    fi
-}
-
-# 2. Autosuggestions execution
-function rsd::recipe::zsh_plugins::autosug_apply() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "git" "clone" "https://github.com/zsh-users/zsh-autosuggestions" "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions"
-    else
-        git clone https://github.com/zsh-users/zsh-autosuggestions "${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions"
-    fi
-}
-
-# 3. FZF binary pre-check
-function rsd::recipe::zsh_plugins::fzf_pre() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "test" "-d" "\$HOME/.fzf"
-    else
-        [[ -d "$HOME/.fzf" ]]
-    fi
-}
-
-# 4. FZF binary and keybinding installation (Unattended)
+# FZF binary and keybinding installation (Unattended, requires two-step clone + install)
 function rsd::recipe::zsh_plugins::fzf_apply() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "git" "clone" "--depth" "1" "https://github.com/junegunn/fzf.git" "\$HOME/.fzf"
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "\$HOME/.fzf/install" "--all"
-    else
-        git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf
-        ~/.fzf/install --all
-    fi
+    rsd::l::target::git_clone "https://github.com/junegunn/fzf.git" "\$HOME/.fzf" "1"
+    rsd::l::target::exec "\$HOME/.fzf/install" "--all"
 }
 
-# 5. FZF Zsh Plugin pre-check
-function rsd::recipe::zsh_plugins::fzf_plugin_pre() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "test" "-d" "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/fzf-zsh-plugin"
-    else
-        [[ -d "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/fzf-zsh-plugin" ]]
-    fi
-}
-
-# 6. FZF Zsh Plugin execution
-function rsd::recipe::zsh_plugins::fzf_plugin_apply() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "git" "clone" "--depth" "1" "https://github.com/unixorn/fzf-zsh-plugin.git" "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/plugins/fzf-zsh-plugin"
-    else
-        git clone --depth 1 https://github.com/unixorn/fzf-zsh-plugin.git "${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/fzf-zsh-plugin"
-    fi
-}
-
-# 7. Zshrc settings pre-check
-function rsd::recipe::zsh_plugins::settings_pre() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "grep" "-q" '"# --- BEGIN RSD CUSTOM CONFIG ---"' "\$HOME/.zshrc"
-    else
-        grep -q "# --- BEGIN RSD CUSTOM CONFIG ---" ~/.zshrc
-    fi
-}
-
-# 8. Zshrc settings injection using block delimiters
+# Zshrc settings injection using block delimiters
 function rsd::recipe::zsh_plugins::settings_apply() {
     local block
     block=$(cat << 'EOF'
@@ -158,17 +99,13 @@ export PATH="$PATH:/home/raul/.cargo/bin"
 EOF
 )
     if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "printf" "%s\n" "$block" ">>" "\$HOME/.zshrc"
+        rsd::l::target::exec "printf" "%s\n" "$block" ">>" "\$HOME/.zshrc"
     else
         printf "%s\n" "$block" >> ~/.zshrc
     fi
 }
 
-# 9. Zshrc settings rollback using sed block removal
+# Zshrc settings rollback using sed block removal
 function rsd::recipe::zsh_plugins::settings_rollback() {
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "sed" "-i" "'/# --- BEGIN RSD CUSTOM CONFIG ---/,/# --- END RSD CUSTOM CONFIG ---/d'" "\$HOME/.zshrc"
-    else
-        sed -i '/# --- BEGIN RSD CUSTOM CONFIG ---/,/# --- END RSD CUSTOM CONFIG ---/d' ~/.zshrc
-    fi
+    rsd::l::target::exec sed -i '/# --- BEGIN RSD CUSTOM CONFIG ---/,/# --- END RSD CUSTOM CONFIG ---/d' "\$HOME/.zshrc"
 }
