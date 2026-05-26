@@ -8,10 +8,10 @@ Instead of cluttering systems with loose script files, RSD structures automation
 
 ## 1. Core Architectural Pillars
 
-* **Zero-Dependency CLI Routing**: Maps top-level commands directly to cohesive physical files (e.g. `command/gpg`), lazy-sourcing bash functions inside on-demand.
-* **GPG-Hardened Credentials Vault**: Integrates dynamically with `keepassxc-cli`. Vault master keys are encrypted asymmetric GPG payloads, decoded session keys reside strictly in kernel memory, and passwords are piped via secure standard input streams (no command-line arg exposures).
-* **Multi-Hop Remote Target Delegation**: Executes operations seamlessly over standard target pathways (configured in `config/remote.ini` or user `hosts.ini`). Automatically builds nested intermediate hops (e.g. `@gateway,target,sudo://root`) and escapes command lines recursively.
-* **Declarative & Idempotent Recipes**: A recursive provisioning task engine. Compiles nested prerequisite steps into flat, dry-runnable chronological execution stacks that support reverse chronological backward rollbacks.
+* **Zero-Dependency CLI Routing**: Maps top-level commands directly to cohesive physical files (e.g. `command/gpg`), lazy-sourcing bash functions inside on-demand. See the [RSD Core Specification & Architecture](docs/rsd_specification.md) for execution cycles and routing maps.
+* **GPG-Hardened Credentials Vault**: Integrates dynamically with `keepassxc-cli`. Vault master keys are encrypted asymmetric GPG payloads, decoded session keys reside strictly in kernel memory, and passwords are piped via secure standard input streams (no command-line arg exposures). See the [KeePassXC Subsystem Reference](docs/kpx.md) for the complete security model and GPG key integrations.
+* **Multi-Hop Remote Target Delegation**: Executes operations seamlessly over standard target pathways (configured in `config/remote.ini` or user `hosts.ini`). Automatically builds nested intermediate hops (e.g. `@gateway,target,sudo://root`) and escapes command lines recursively. Details on configuration resolutions can be found in the [Configuration Management Subsystem](docs/config.md).
+* **Declarative & Idempotent Recipes**: A recursive provisioning task engine. Compiles nested prerequisite steps into flat, dry-runnable chronological execution stacks that support reverse chronological backward rollbacks. Read the [Recipes Provisioning Guide](docs/recipes.md) for advanced composition and rollback guidelines.
 
 ---
 
@@ -46,11 +46,13 @@ RSD features E2E integration and unit test suites written using **Bats-core** (t
   docker run --rm -v "$(pwd):/workspace" -w /workspace rsd-test-runner bats tests/
   ```
 
+For deep-dives into GPG sandbox mocking, isolated directory configurations, and coverage tracing, see the [RSD Test Execution & Integration Guide](docs/testing_guide.md).
+
 ---
 
 ## 3. Remote Bootstrapping & Setup
 
-RSD features a **self-healing remote bootstrap protocol**. You do *not* need to pre-install RSD or configure files manually on target machines. 
+RSD features a **self-healing remote bootstrap protocol**. You do *not* need to pre-install RSD or configure files manually on target machines. Details on the standalone discovery and execution lifecycle can be found in the [Host Identification Guide](docs/host.md) and [RSD Core Specification](docs/rsd_specification.md).
 
 ### Step 1: Pre-Flight Dependency Scan
 Verify if the target machine contains the minimal binaries required for streaming bootstrapping (`bash`, `tar`, `openssl`, etc.):
@@ -82,7 +84,7 @@ rsd [global options] COMMAND [sub-command/action] [arguments]
 ```
 
 ### A. Host Platform Identification
-Query operating system, architecture, release version, and package installer schemas locally or remotely:
+Query operating system, architecture, release version, and package installer schemas locally or remotely. See the [Host Identification Guide](docs/host.md) for kernel schemas and distro family aggregation details.
 ```bash
 # Display local platform properties
 rsd host identify
@@ -95,7 +97,7 @@ rsd @server1 host save
 ```
 
 ### B. KeePassXC Hardened Vault
-Configure and interact with a GPG-secured credential database:
+Configure and interact with a GPG-secured credential database. See the [KeePassXC Subsystem Reference](docs/kpx.md) for setup details, key rotation, and the library API reference.
 ```bash
 # Setup the encrypted database, GPG keys, and backups
 rsd kpx init
@@ -109,7 +111,7 @@ rsd kpx show "RemoteHosts/server1"
 ```
 
 ### C. Idempotent Task & Recipe Provisioning
-Declaratively compile and execute multi-stage configurations declared in `.recipe` files (stored under `lib/recipe/`):
+Declaratively compile and execute multi-stage configurations declared in `.recipe` files (stored under `lib/recipe/`). Read the [Recipes Provisioning Guide](docs/recipes.md) for task cycles, composition, prerequisites, and testing details.
 
 #### 1. Composable Task Architecture
 * **Flat Stack Compilation**: Nested sub-recipes included via `rsd::recipe::include_recipe "zsh_core"` compile recursively into a single, flat chronological stack of tasks. This avoids context thread splits and enables dry-runs across all dependencies.
