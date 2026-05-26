@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# Host properties and asset discovery utilities.
+# namespace rsd::l::host::
+
 # @see docs/host.md
 # @see AGENTS.md
 

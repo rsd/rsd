@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# Target-aware execution routing and system query primitives.
+# namespace rsd::l::target::
+
 # @see docs/recipes.md
 # @see AGENTS.md
 

@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+# Declarative recipe provisioning engine.
+# namespace rsd::recipe::
+# namespace rsd::l::recipe::
+
 # @see docs/recipes.md
 # @see AGENTS.md
 

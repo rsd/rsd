@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+# Configuration loading, parsing, and management utilities.
+# namespace rsd::config::
+# namespace rsd::l::config::
+
 if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
     echo "This is a RSD library file. It should not be executed directly."
     echo "Please call 'rsd' to use it."

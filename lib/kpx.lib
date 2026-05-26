@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# KeePassXC password vault integration library.
+# namespace rsd::l::kpx::
+
 if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
     echo "This is a RSD library file. It should not be executed directly."
     echo "Please call 'rsd' to use it."
