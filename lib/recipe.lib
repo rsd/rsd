@@ -13,7 +13,7 @@ if [[ "$RSD_RECIPE_LIB" == "1" ]]; then
     return 0
 fi
 RSD_RECIPE_LIB=1
-RSD_RECIPE_LIB_VERSION="0.1.0"
+RSD_RECIPE_LIB_VERSION="0.2.0"
 
 # Scoped task definitions
 declare -g -a RSD_REGISTERED_TASKS=()
@@ -107,6 +107,18 @@ function rsd::recipe::include_recipe() {
     return 0
 }
 
+# Dispatches a registered hook string through eval for argument support.
+# Intent: Enables hooks like "rsd::l::recipe::helper::has_bin zsh" where the
+#         string contains both the function name and its arguments, separated
+#         by whitespace. Bare function names (legacy style) work identically.
+#
+# @param string $1 The hook string stored in RSD_TASKS_* associative arrays.
+# @return int Exit code of the dispatched function.
+function rsd::l::recipe::eval_hook() {
+    local hook="$1"
+    eval "$hook"
+}
+
 # Executes the compiled flat task stack
 # Arguments:
 #   $1 - dry_run (0 or 1, default 0)
@@ -133,7 +145,7 @@ function rsd::l::recipe::execute_engine() {
             if ((verbose)); then
                 rsd::warn "  [CHECKING] Task '$name'..."
             fi
-            if "$pre" &>/dev/null; then
+            if rsd::l::recipe::eval_hook "$pre" &>/dev/null; then
                 rsd::warn "  [SKIPPED] Task '$name' is already satisfied."
                 continue
             fi
@@ -147,7 +159,7 @@ function rsd::l::recipe::execute_engine() {
 
         # 3. Execution Phase
         rsd::warn "  [APPLYING] Executing task '$name'..."
-        if ! "$apply"; then
+        if ! rsd::l::recipe::eval_hook "$apply"; then
             if [[ "$recovery" == "ignore" ]]; then
                 rsd::warn "  [WARNING] Task '$name' failed. Skipping optional step."
                 continue
@@ -162,7 +174,7 @@ function rsd::l::recipe::execute_engine() {
             if ((verbose)); then
                 rsd::warn "  [VERIFYING] Task '$name'..."
             fi
-            if ! "$post" &>/dev/null; then
+            if ! rsd::l::recipe::eval_hook "$post" &>/dev/null; then
                 if [[ "$recovery" == "ignore" ]]; then
                     rsd::warn "  [WARNING] Task '$name' verification failed. Skipping optional step."
                     continue
@@ -201,7 +213,7 @@ function rsd::l::recipe::handle_failure() {
             rollback="${RSD_TASKS_ROLLBACK["$completed"]}"
             if [[ -n "$rollback" ]]; then
                 rsd::warn "  [ROLLBACK] Undoing changes for task '$completed'..."
-                if ! "$rollback"; then
+                if ! rsd::l::recipe::eval_hook "$rollback"; then
                     rsd::warn "  [CRITICAL] Rollback failed for task '$completed'! Manual cleanup required."
                 fi
             fi
@@ -212,5 +224,130 @@ function rsd::l::recipe::handle_failure() {
         rsd::warn "Please resolve the environmental issue, then run the recipe again."
         rsd::warn "Already satisfied steps will be automatically skipped."
         exit 10
+    fi
+}
+
+# ==============================================================================
+# Recipe Helpers: Remote-Aware Abstractions for Common Task Primitives
+# ==============================================================================
+# Intent: Eliminate local/remote branching boilerplate from individual .recipe
+#         files. Each helper transparently routes via $RSD_REMOTE_TARGET when
+#         non-empty, or executes locally otherwise.
+
+# Check if a binary exists in $PATH on the target host.
+#
+# @param string $1 The binary name (e.g., "zsh", "cargo").
+# @return int 0 if found, 1 if missing.
+function rsd::l::recipe::helper::has_bin() {
+    local bin="$1"
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "which" "$bin" &>/dev/null
+    else
+        hash "$bin" 2>/dev/null
+    fi
+}
+
+# Check if a directory exists on the target host.
+#
+# @param string $1 The directory path (supports remote shell expansions like \$HOME).
+# @return int 0 if exists, 1 if missing.
+function rsd::l::recipe::helper::dir_exists() {
+    local dir="$1"
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "test" "-d" "$dir"
+    else
+        [[ -d "$dir" ]]
+    fi
+}
+
+# Check if a file exists on the target host.
+#
+# @param string $1 The file path (supports remote shell expansions).
+# @return int 0 if exists, 1 if missing.
+function rsd::l::recipe::helper::file_exists() {
+    local file="$1"
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "test" "-f" "$file"
+    else
+        [[ -f "$file" ]]
+    fi
+}
+
+# Check if a file contains a matching pattern on the target host.
+#
+# @param string $1 The grep pattern.
+# @param string $2 The file path.
+# @return int 0 if matched, 1 if no match.
+function rsd::l::recipe::helper::file_contains() {
+    local pattern="$1"
+    local file="$2"
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "grep" "-q" "$pattern" "$file"
+    else
+        grep -q "$pattern" "$file"
+    fi
+}
+
+# Install a package via the RSD install subsystem.
+# Intent: Sources `command/install` lazily and delegates to the native
+#         local/remote routing already built into `rsd::c::install::command`.
+#
+# @param string $1 The package name.
+# @return int Exit code of the install subsystem.
+function rsd::l::recipe::helper::install_pkg() {
+    local package="$1"
+    source "$(rsd::get_libdir_file command/install)"
+    rsd::c::install::command "$package"
+}
+
+# Clone a git repository on the target host.
+#
+# @param string $1 The repository URL.
+# @param string $2 The destination path (supports remote shell expansions).
+# @param string $3 Optional --depth value (e.g. "1" for shallow clone).
+# @return int Exit code of git clone.
+function rsd::l::recipe::helper::git_clone() {
+    local repo="$1"
+    local dest="$2"
+    local depth="${3:-}"
+    local -a depth_args=()
+    [[ -n "$depth" ]] && depth_args=("--depth" "$depth")
+
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "git" "clone" "${depth_args[@]}" "$repo" "$dest"
+    else
+        git clone "${depth_args[@]}" "$repo" "$dest"
+    fi
+}
+
+# Execute an arbitrary command on the target host.
+# Intent: Thin passthrough for commands that don't fit specialized helpers.
+#
+# @param string $@ The full command and arguments.
+# @return int Exit code of the command.
+function rsd::l::recipe::helper::run_cmd() {
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        rsd::l::remote::execute "$RSD_REMOTE_TARGET" "$@"
+    else
+        "$@"
+    fi
+}
+
+# Execute a command elevated via sudo on the target host.
+# Intent: Encapsulates local `sudo.lib` askpass and remote `,sudo://root`
+#         target appending in a single call.
+#
+# @param string $1 The target user (or empty string for root).
+# @param string $@ The command payload to elevate.
+# @return int Exit code of the elevated command.
+function rsd::l::recipe::helper::run_sudo() {
+    local user="$1"
+    shift
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        local elevated_target="${RSD_REMOTE_TARGET},sudo://${user:-root}"
+        rsd::l::remote::execute "$elevated_target" "$@"
+    else
+        [[ "$RSD_SUDO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/sudo.lib)"
+        rsd::l::sudo::run "$user" "$@"
     fi
 }
