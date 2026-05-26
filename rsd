@@ -709,8 +709,14 @@ function rsd::install() {
         local in_path=0
         local p
         local IFS=":"
+        local resolved_bin
+        resolved_bin=$(readlink -f "$bin_path" 2>/dev/null || echo "$bin_path")
         for p in $PATH; do
-            if [[ "$p" == "$bin_path" ]]; then
+            # Safely expand ~ to $HOME in PATH segment
+            local expanded_p="${p/#\~/$HOME}"
+            local resolved_p
+            resolved_p=$(readlink -f "$expanded_p" 2>/dev/null || echo "$expanded_p")
+            if [[ "$resolved_p" == "$resolved_bin" ]]; then
                 in_path=1
                 break
             fi
