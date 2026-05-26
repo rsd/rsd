@@ -27,6 +27,59 @@ rsd @server1 recipe run zsh_dev_setup
 
 ---
 
+## Getting Started: GPG, Vault, and Remote Host Initialization
+
+Follow these standard steps to configure your GPG identity, initialize the GPG-hardened KeePassXC credential vault, define a remote server alias, and bootstrap the RSD framework remotely:
+
+### Step 1: Export/Ensure Your GPG Recipient Key ID
+RSD utilizes GPG asymmetric encryption to secure your KeePassXC database master password. Ensure your local GPG environment is active and write your GPG Recipient key ID to your configuration:
+```bash
+# 1. View your active GPG keys to identify your Key ID or email
+gpg --list-secret-keys --keyid-format=long
+
+# 2. Write your GPG Key ID to your user configuration
+rsd config set RSD_GPG_USER_ID "your.email@example.com"
+```
+
+### Step 2: Initialize the KeePassXC Vault (`kpx`)
+Generate a new, secure database (`vault.kdbx`) and a GPG-encrypted master key (`vault.key.gpg`) targeting your GPG Recipient ID:
+```bash
+# 1. Initialize the vault
+rsd kpx init
+
+# 2. Store credentials for your target remote server and local sudo
+rsd kpx add "RemoteHosts/server1" "admin" "YourSSHPasswordHere"
+rsd kpx add "Sudo/localhost" "" "YourLocalSudoPassword"
+```
+
+### Step 3: Configure and Identify Your Remote Host (`@server1`)
+Define the remote server connection alias in your local `remote.ini` file and run platform discovery to cache its properties locally:
+```bash
+# 1. Define the connection URI for the @server1 alias
+rsd config set remote.hosts.server1 "ssh://admin@192.168.1.100:22"
+
+# 2. Run remote platform discovery and save server1's specifications to hosts.ini
+rsd @server1 host save
+```
+
+### Step 4: Bootstrap and Install RSD on the Remote Target
+Stream the local RSD framework to your remote server to install it automatically:
+```bash
+# 1. Stream the RSD code and execute remote installation
+rsd @server1 remote install
+
+# 2. Append the remote binary path (~/.local/bin) to the target's interactive shell PATH
+rsd @server1 remote setup-path
+```
+
+Now you are fully configured to run any automated setup, recipe, or library function locally or remotely:
+```bash
+# Run the Zsh developer environment provisioning recipe remotely on @server1
+rsd @server1 recipe run zsh/dev_setup
+```
+
+---
+
 ## 1. Core Architectural Pillars
 
 * **Zero-Dependency CLI Routing**: Maps top-level commands directly to cohesive physical files (e.g. `command/gpg`), lazy-sourcing bash functions inside on-demand. See the [RSD Core Specification & Architecture](docs/rsd_specification.md) for execution cycles and routing maps.
