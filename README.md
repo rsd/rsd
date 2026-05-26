@@ -6,6 +6,27 @@ Instead of cluttering systems with loose script files, RSD structures automation
 
 ---
 
+## Quick-Start Example: Provisioning a Zsh Environment
+
+RSD simplifies complex installations (like fully deploying and configuring a secure Zsh environment with themes, plugins, and dependencies) down to a single terminal call.
+
+To simulate or execute the `zsh_dev_setup` provisioning recipe:
+
+```bash
+# 1. Preview the compiled checklist (Necessity Checks & Task Dry-Run Simulation)
+rsd recipe run zsh_dev_setup --dry-run --verbose
+
+# 2. Provision locally (Installs Zsh, configures default shells via Sudo Askpass, and deploys Oh-My-Zsh)
+rsd recipe run zsh_dev_setup
+
+# 3. Or provision a remote server target natively over SSH with one call
+rsd @server1 recipe run zsh_dev_setup
+```
+
+*(Under the hood, RSD dynamically maps the host distribution's package manager, extracts target SSH/Sudo credentials securely from a GPG-encrypted KeePassXC database, and applies modifications idempotently so subsequent executions automatically skip completed steps).*
+
+---
+
 ## 1. Core Architectural Pillars
 
 * **Zero-Dependency CLI Routing**: Maps top-level commands directly to cohesive physical files (e.g. `command/gpg`), lazy-sourcing bash functions inside on-demand. See the [RSD Core Specification & Architecture](docs/rsd_specification.md) for execution cycles and routing maps.
