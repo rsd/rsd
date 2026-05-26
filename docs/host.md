@@ -80,7 +80,17 @@ Performs dynamic identification on the target machine and saves all properties t
 ./rsd host save my-server
 ```
 
-### C. Remote Execution Integration
+### C. Display Saved Host Profile (`show`)
+Retrieves and displays the saved host properties for a given host alias from the `hosts.ini` configuration file:
+```bash
+# Displays saved properties for [localhost]
+./rsd host show
+
+# Displays saved properties for [my-server]
+./rsd host show my-server
+```
+
+### D. Remote Execution Integration
 The `host` command module is **remote-aware** (`RSD_C_HOST_REMOTE_AWARE=1`). This triggers the local engine to orchestrate remote platform scans by compiling a lightweight standalone platform discovery script and piping it dynamically to the remote target over SSH/LXC:
 
 ```bash
@@ -89,6 +99,9 @@ rsd @server1 host identify
 
 # Identifies server1 and saves its discovered profile into the LOCAL hosts.ini config under section [server1]
 rsd @server1 host save
+
+# Displays the local hosts.ini configuration properties saved for server1
+rsd @server1 host show
 ```
 
 ---

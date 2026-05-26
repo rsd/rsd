@@ -142,6 +142,13 @@ EOF
     [ "$?" -eq 0 ]
     [ "$val" = "debian" ]
     
+    # Test retrieving from non-prefixed key section (which read_ini constructs from [section])
+    R_INI_hosts["server2.distro"]="debian"
+    local val2=""
+    rsd::l::host::get_property server2 distro val2
+    [ "$?" -eq 0 ]
+    [ "$val2" = "debian" ]
+    
     # 2. Test localhost dynamic fallback
     local os_release="${TEST_TMP_DIR}/os-release-local"
     cat <<EOF > "$os_release"
@@ -172,3 +179,35 @@ EOF
     [[ "$script" == *"os="* ]]
     [[ "$script" == *"pkg_manager="* ]]
 }
+
+@test "rsd::c::host::show retrieves and prints saved host properties correctly" {
+    # Source the command file
+    source "${BATS_TEST_DIRNAME}/../../command/host"
+
+    # Populate mock config data (without hosts. prefix as parsed from hosts.ini)
+    declare -gA R_INI_hosts
+    R_INI_hosts["server3.os"]="linux"
+    R_INI_hosts["server3.arch"]="x86_64"
+    R_INI_hosts["server3.distro"]="ubuntu"
+    R_INI_hosts["server3.family"]="debian"
+    R_INI_hosts["server3.version"]="22.04"
+    R_INI_hosts["server3.pkg_manager"]="apt"
+    R_INI_hosts["server3.writable_bins"]="/usr/bin"
+
+    # 1. Test displaying saved server3 configuration
+    run rsd::c::host::show server3
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"os=linux"* ]]
+    [[ "$output" == *"arch=x86_64"* ]]
+    [[ "$output" == *"distro=ubuntu"* ]]
+    [[ "$output" == *"family=debian"* ]]
+    [[ "$output" == *"version=22.04"* ]]
+    [[ "$output" == *"pkg_manager=apt"* ]]
+    [[ "$output" == *"writable_bins=/usr/bin"* ]]
+
+    # 2. Test displaying missing configuration returns error 10
+    run rsd::c::host::show missing-server
+    [ "$status" -eq 10 ]
+    [[ "$output" == *"Error: No saved host properties found for"* ]]
+}
+

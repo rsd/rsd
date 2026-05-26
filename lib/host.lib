@@ -181,6 +181,12 @@ function rsd::l::host::get_property() {
         return 0
     fi
     
+    local alt_key="${alias}.${prop}"
+    if [[ -n "${R_INI_hosts[$alt_key]}" ]]; then
+        _r_val="${R_INI_hosts[$alt_key]}"
+        return 0
+    fi
+    
     # Intent: Fallback dynamically if requested for local environment and no config is saved
     if [[ "$alias" == "localhost" ]]; then
         declare -A local_props

@@ -393,9 +393,15 @@ function rsd::l::remote::bootstrap_check() {
     if [[ $probe_status -ne 0 ]]; then
         # Check if bootstrapping is explicitly blocked for this target
         local host_alias="${remote_spec#@}"
-        local allow_key="hosts.${host_alias}.allow_bootstrap"
-        if [[ -v "R_INI_hosts" && -n "${R_INI_hosts[$allow_key]}" ]]; then
-            local allowed="${R_INI_hosts[$allow_key]}"
+        local allowed=""
+        if [[ -v "R_INI_hosts" ]]; then
+            if [[ -n "${R_INI_hosts["hosts.${host_alias}.allow_bootstrap"]}" ]]; then
+                allowed="${R_INI_hosts["hosts.${host_alias}.allow_bootstrap"]}"
+            elif [[ -n "${R_INI_hosts["${host_alias}.allow_bootstrap"]}" ]]; then
+                allowed="${R_INI_hosts["${host_alias}.allow_bootstrap"]}"
+            fi
+        fi
+        if [[ -n "$allowed" ]]; then
             if [[ "$allowed" == "false" || "$allowed" == "0" || "$allowed" == "no" ]]; then
                 rsd::warn "Abort: Bootstrapping is disabled for target '$remote_spec' in hosts.ini."
                 return 1
@@ -432,10 +438,16 @@ function rsd::l::remote::bootstrap_check() {
         
         # Check if upgrades/writes are blocked for this target
         local host_alias="${remote_spec#@}"
-        local allow_key="hosts.${host_alias}.allow_bootstrap"
+        local allowed=""
+        if [[ -v "R_INI_hosts" ]]; then
+            if [[ -n "${R_INI_hosts["hosts.${host_alias}.allow_bootstrap"]}" ]]; then
+                allowed="${R_INI_hosts["hosts.${host_alias}.allow_bootstrap"]}"
+            elif [[ -n "${R_INI_hosts["${host_alias}.allow_bootstrap"]}" ]]; then
+                allowed="${R_INI_hosts["${host_alias}.allow_bootstrap"]}"
+            fi
+        fi
         local can_upgrade=1
-        if [[ -v "R_INI_hosts" && -n "${R_INI_hosts[$allow_key]}" ]]; then
-            local allowed="${R_INI_hosts[$allow_key]}"
+        if [[ -n "$allowed" ]]; then
             if [[ "$allowed" == "false" || "$allowed" == "0" || "$allowed" == "no" ]]; then
                 can_upgrade=0
             fi

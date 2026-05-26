@@ -26,6 +26,7 @@ function rsd::c::host::help() {
     echo -e "\t\tActions:"
     echo -e "\t\t\tidentify              Discover and display host properties"
     echo -e "\t\t\tsave [alias]          Identify and save host properties to hosts.ini"
+    echo -e "\t\t\tshow [alias]          Display saved host properties from hosts.ini"
 }
 
 # Discover and display host properties.
@@ -133,3 +134,50 @@ function rsd::c::host::save() {
     rsd::warn "Successfully saved host properties for '$alias' to '$ini_file'."
     return 0
 }
+
+# Display saved host properties from hosts.ini.
+# Intent: Retrieves saved platform attributes for a given host alias from configuration and prints them.
+#
+# @param string $1 Optional host alias. Defaults to 'localhost' or remote target spec.
+# @return int 0 on success.
+# @throws 10 if no saved profile exists for the specified alias.
+function rsd::c::host::show() {
+    local alias="$1"
+    if [[ -z "$alias" ]]; then
+        if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+            alias="${RSD_REMOTE_TARGET#@}"
+        else
+            alias="localhost"
+        fi
+    fi
+
+    # Load host library if not loaded yet
+    [[ "$RSD_HOST_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/host.lib)
+
+    local val
+    local found=0
+    local key
+    
+    # Intent: Retrieve all core properties from config using get_property
+    declare -A saved_props
+    local p
+    for p in os arch distro family version pkg_manager writable_bins; do
+        if rsd::l::host::get_property "$alias" "$p" val; then
+            saved_props[$p]="$val"
+            found=1
+        fi
+    done
+
+    if [[ $found -eq 0 ]]; then
+        rsd::warn "Error: No saved host properties found for '$alias'."
+        return 10
+    fi
+
+    for p in os arch distro family version pkg_manager writable_bins; do
+        if [[ -v saved_props[$p] && -n "${saved_props[$p]}" ]]; then
+            echo "${p}=${saved_props[$p]}"
+        fi
+    done
+    return 0
+}
+
