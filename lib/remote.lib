@@ -273,14 +273,14 @@ function rsd::l::remote::prompt_user() {
     echo -n "$prompt_msg " >&2
     if { read -n 1 -r reply < /dev/tty; } 2>/dev/null; then
         echo >&2 # line break
-        if [[ "$reply" =~ ^[Yy]$ ]]; then
+        if [[ -z "$reply" || "$reply" =~ ^[Yy]$ || "$reply" == $'\n' ]]; then
             return 0
         fi
     else
         # Fallback to standard input in case of redirected stdin in active terminals
         if [[ ! -t 0 ]]; then
             if read -n 1 -r reply 2>/dev/null; then
-                if [[ "$reply" =~ ^[Yy]$ ]]; then
+                if [[ -z "$reply" || "$reply" =~ ^[Yy]$ || "$reply" == $'\n' ]]; then
                     return 0
                 fi
             fi
