@@ -61,9 +61,21 @@ function rsd::l::protocol::ssh::run() {
     
     # Check if kpx.lib is available and loaded
     if [[ "$RSD_KPX_LIB" == "1" ]]; then
-        # Try retrieving password under RemoteHosts/<host>
-        rsd::debug "Checking vault credentials for RemoteHosts/$host..." 15
-        rsd::l::kpx::get_password "RemoteHosts/$host" password 2>/dev/null
+        # Try user-specific entry first, then host-only fallback
+        local -a entry_paths=()
+        if [[ -n "$user" ]]; then
+            entry_paths+=("RemoteHosts/${user}@${host}" "RemoteHosts/${host}")
+        else
+            entry_paths+=("RemoteHosts/${host}")
+        fi
+
+        local entry
+        for entry in "${entry_paths[@]}"; do
+            rsd::debug "Checking vault credentials for $entry..." 15
+            if rsd::l::kpx::get_password "$entry" password 2>/dev/null; then
+                break
+            fi
+        done
     fi
 
     # Set up secure in-memory SSH_ASKPASS pipeline if credential found
@@ -85,13 +97,17 @@ EOF
         export RSD_SSH_PASS="$password"
         export SSH_ASKPASS="$askpass_tmp"
         export SSH_ASKPASS_REQUIRE="force"
-        export DISPLAY=":0.0" # Force dummy display to trigger SSH_ASKPASS
+
+        # Preserve original DISPLAY and set a dummy value to trigger SSH_ASKPASS.
+        # Without a DISPLAY, SSH skips the ASKPASS helper entirely on some systems.
+        local _rsd_saved_display="${DISPLAY:-}"
+        export DISPLAY=":0.0"
 
         # Trap-guarded cleanup: ensures askpass file and credential variables
         # are removed even if SSH is interrupted by SIGINT/SIGTERM (e.g. Ctrl+C).
         # Without this, an interrupted session would leave a credential-bearing
         # temp file in /tmp/ indefinitely.
-        trap 'rm -f "$askpass_tmp"; unset RSD_SSH_PASS SSH_ASKPASS SSH_ASKPASS_REQUIRE DISPLAY; trap - EXIT INT TERM' EXIT INT TERM
+        trap 'rm -f "$askpass_tmp"; unset RSD_SSH_PASS SSH_ASKPASS SSH_ASKPASS_REQUIRE; if [[ -n "$_rsd_saved_display" ]]; then export DISPLAY="$_rsd_saved_display"; else unset DISPLAY; fi; trap - EXIT INT TERM' EXIT INT TERM
     fi
 
     # Execute remote command securely in subshell
@@ -104,7 +120,13 @@ EOF
     # Also runs via the trap above on signal interruption.
     if [[ -n "$askpass_tmp" ]]; then
         rm -f "$askpass_tmp"
-        unset RSD_SSH_PASS SSH_ASKPASS SSH_ASKPASS_REQUIRE DISPLAY
+        unset RSD_SSH_PASS SSH_ASKPASS SSH_ASKPASS_REQUIRE
+        # Restore original DISPLAY instead of unsetting it
+        if [[ -n "$_rsd_saved_display" ]]; then
+            export DISPLAY="$_rsd_saved_display"
+        else
+            unset DISPLAY
+        fi
         trap - EXIT INT TERM
     fi
 

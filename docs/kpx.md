@@ -29,7 +29,7 @@ RSD implements a **double-envelope security protocol** combining asymmetric GPG 
   └──────────────────────────────────────────────────────────────────┘
 ```
 
-1. **Transaction Isolation & Atomic Writes**: Vault creations (`init`) or credential modifications (`add`, `rotate-key`) occur entirely inside sandboxed temporary directories (e.g. `/tmp/rsd-bootstrap-XXXXXX`) to prevent partial write corruptions or dirty states. Promoted files are swapped atomically via `mv` once operations succeed.
+1. **Transaction Isolation & Atomic Writes**: Vault creations (`init`) or credential modifications (`add`, `rotate-key`) occur entirely inside sandboxed temporary directories within `~/.config/rsd/` (e.g. `tmp.init.XXXXXX`) to prevent partial write corruptions or dirty states. Keeping the sandbox on the same filesystem as the vault ensures `mv` is a true atomic rename. Promoted files are swapped atomically via `mv` once operations succeed.
 2. **Double-Envelope Vault Key**: The 48-character high-entropy KeePass database master password is generated dynamically via `openssl rand -base64 48` and immediately encrypted as a GPG payload (`vault.key.gpg`) targeting the user's `RSD_GPG_USER_ID`.
 3. **Zero-Echo Stdin Stream Piping**: RSD never leaks database master keys or password entries in shell history or process list tables (avoiding command-line arguments like `keepassxc-cli --password`). Instead, it pushes credentials into standard input file descriptors dynamically:
    ```bash

@@ -12,7 +12,7 @@ RSD_C_GPG_SHORT_DESC="GPG Integration"
 RSD_C_GPG_VERSION="0.1.0"
 
 function rsd::c::gpg::help() {
-    echo -e "\n\tGPG Commanf Help:\n"
+    echo -e "\n\tGPG Command Help:\n"
     echo -e "\t\tActions:"
     echo -e "\t\t\tcheck        Checks the GPG Installation"
     echo -e "\t\t\tinit         Initialize GPG"
