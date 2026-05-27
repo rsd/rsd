@@ -157,6 +157,9 @@ function rsd::l::remote::delegate() {
     # 2. Compile execution blocks right-to-left (backwards)
     local -a active_payload=("${command_payload[@]}")
 
+    # Save-on-first-use tracking for sudo hops
+    local _sudo_save_entry="" _sudo_save_user="" _sudo_save_pass=""
+
     local i
     for (( i=${#hops[@]}-1; i>=0; i-- )); do
         local hop="${hops[i]}"
@@ -205,8 +208,15 @@ function rsd::l::remote::delegate() {
                 # Sourcing-Inheritance hook for sudo.lib if not active
                 [[ "$RSD_SUDO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/sudo.lib)"
 
-                local password=""
-                rsd::l::sudo::get_password "${p_host:-localhost}" "$user" password
+                local password="" password_source=""
+                rsd::l::sudo::get_password "${p_host:-localhost}" "$user" password password_source
+
+                # Stash for post-execution save hook
+                if [[ "$password_source" == "interactive" ]]; then
+                    _sudo_save_entry="Sudo/${p_host:-localhost}"
+                    _sudo_save_user="${user:-root}"
+                    _sudo_save_pass="$password"
+                fi
 
                 # Shell-escape the active payload arguments cleanly
                 local escaped_cmd=""
@@ -236,7 +246,15 @@ function rsd::l::remote::delegate() {
         else
             # Outermost hop (index 0) is executed locally
             "$run_func" "$user" "$host" "$port" "${active_payload[@]}"
-            return $?
+            local exit_status=$?
+
+            # Save-on-first-use hook (after outermost hop returns)
+            if [[ $exit_status -eq 0 && -n "$_sudo_save_pass" ]]; then
+                [[ "$RSD_SUDO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/sudo.lib)"
+                rsd::l::sudo::offer_vault_save "$_sudo_save_entry" "$_sudo_save_user" "$_sudo_save_pass"
+            fi
+
+            return $exit_status
         fi
     done
 }

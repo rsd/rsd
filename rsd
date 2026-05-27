@@ -81,7 +81,7 @@
 
 shopt -s extglob
 
-RSD_VERSION='1.9.12'
+RSD_VERSION='1.10.0'
 VERSION=$RSD_VERSION
 
 RSD_ON=1
@@ -178,6 +178,8 @@ declare -A RSD_ARGS_PARAM=(
     ["pt"]=0
     ["no-pass-thru"]=0
     ["np"]=0
+    ["vault-mode"]=1
+    ["no-vault"]=0
     #["debug-parse-args"]=0 # Internal use
 )
 
@@ -806,6 +808,15 @@ DEBUG=$RSD_DEBUG
 rsd::debug "Debug set to $RSD_DEBUG" 2
 rsd::debug2 9 "Arguments parsed (values): keys -> (${RSD_ARGS[*]}): " "${!RSD_ARGS[*]}"
 rsd::debug "Original call was ${RSD_ORIGINAL_ARGS[*]}" 7
+
+# Vault mode: CLI takes precedence over config
+if [[ -n "${RSD_ARGS[vault-mode]}" ]]; then
+    RSD_VAULT_MODE="${RSD_ARGS[vault-mode]}"
+elif [[ -n "${RSD_ARGS[no-vault]}" ]]; then
+    RSD_VAULT_MODE="never"
+fi
+RSD_VAULT_MODE="${RSD_VAULT_MODE:-opportunistic}"
+export RSD_VAULT_MODE
 
 # swith to a local copy if any (local == pwd)
 if ! [[ ${RSD_ARGS[no-local]} || ${RSD_ARGS[nl]} ]]; then

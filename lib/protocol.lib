@@ -60,7 +60,7 @@ function rsd::l::protocol::ssh::run() {
     local askpass_tmp=""
     
     # Check if kpx.lib is available and loaded
-    if [[ "$RSD_KPX_LIB" == "1" ]]; then
+    if [[ "$RSD_KPX_LIB" == "1" && "${RSD_VAULT_MODE:-opportunistic}" != "never" ]]; then
         # Try user-specific entry first, then host-only fallback
         local -a entry_paths=()
         if [[ -n "$user" ]]; then

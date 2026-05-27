@@ -10,7 +10,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_KPX_LIB=1
-RSD_KPX_LIB_VERSION="0.1.1"
+RSD_KPX_LIB_VERSION="0.2.0"
 
 # Using the `keepassxc-cli` to interact with the keepassxc database
 # Note that are other options for it like:
@@ -27,6 +27,30 @@ RSD_KPX_BIN="keepassxc-cli"
 # because tests (and init workflows) may set RSD_CONFIG_DIR after sourcing.
 function rsd::l::kpx::vault_dir() {
     echo "${RSD_CONFIG_DIR:-$HOME/.config/rsd}"
+}
+
+# Decrypt the vault master key using GPG.
+# Respects RSD_VAULT_MODE:
+#   - opportunistic: uses --batch (silent fail if agent cold)
+#   - ask: omits --batch (pinentry triggers if needed)
+# Stderr is always suppressed — pinentry uses its own dialog, not stderr.
+#
+# @param string $1 Path to the encrypted vault key file.
+# @param string $2 Nameref output variable for the decrypted master key.
+# @return int 0 on success, 1 on decrypt failure.
+function rsd::l::kpx::decrypt_key() {
+    local vault_key="$1"
+    declare -n _dk_out="$2"
+
+    local -a gpg_opts=(--decrypt --quiet)
+    if [[ "${RSD_VAULT_MODE:-opportunistic}" == "opportunistic" ]]; then
+        gpg_opts+=(--batch)
+    fi
+
+    if ! _dk_out=$(gpg "${gpg_opts[@]}" "$vault_key" 2>/dev/null); then
+        return 1
+    fi
+    return 0
 }
 
 # Checks for the availability of the keepassxc-cli command
@@ -165,7 +189,7 @@ function rsd::l::kpx::get_password() {
 
     # 3. Decrypt Master Key via GPG (leverages gpg-agent cache)
     local master_key
-    if ! master_key=$(gpg --decrypt --quiet --batch "$vault_key" 2>/dev/null); then
+    if ! rsd::l::kpx::decrypt_key "$vault_key" master_key; then
         rsd::warn "Failed to decrypt KeePass master key via GPG."
         return 1
     fi
@@ -211,7 +235,7 @@ function rsd::l::kpx::add_password() {
     trap 'unset master_key; trap - EXIT INT TERM' EXIT INT TERM
 
     local master_key
-    if ! master_key=$(gpg --decrypt --quiet --batch "$vault_key" 2>/dev/null); then
+    if ! rsd::l::kpx::decrypt_key "$vault_key" master_key; then
         rsd::warn "Failed to decrypt KeePass master key via GPG."
         return 1
     fi
@@ -267,7 +291,7 @@ function rsd::l::kpx::rotate_key() {
 
     # 4. Decrypt current vault key in-memory
     local master_key
-    if ! master_key=$(gpg --decrypt --quiet --batch "$vault_key" 2>/dev/null); then
+    if ! rsd::l::kpx::decrypt_key "$vault_key" master_key; then
         rsd::warn "Rotation failed: Unable to decrypt vault key using the current GPG key."
         return 10
     fi
@@ -281,7 +305,7 @@ function rsd::l::kpx::rotate_key() {
     # Rotate recovery token if it exists
     if [[ -f "$recovery_key" ]]; then
         local recovery_token
-        if recovery_token=$(gpg --decrypt --quiet --batch "$recovery_key" 2>/dev/null); then
+        if rsd::l::kpx::decrypt_key "$recovery_key" recovery_token; then
             echo "$recovery_token" | gpg --encrypt --batch --recipient "$new_gpg_id" --output "$temp_dir/recovery.key.gpg" 2>/dev/null
         fi
     fi
