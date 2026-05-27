@@ -10,7 +10,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_KPX_LIB=1
-RSD_KPX_LIB_VERSION="0.1.0"
+RSD_KPX_LIB_VERSION="0.1.1"
 
 # Using the `keepassxc-cli` to interact with the keepassxc database
 # Note that are other options for it like:
@@ -22,6 +22,12 @@ RSD_KPX_LIB_VERSION="0.1.0"
 RSD_KPX_BIN="keepassxc-cli"
 
 [[ "$RSD_GPG_LIB" != "1" ]] && $(rsd::source_lib lib/gpg.lib)
+
+# Canonical vault directory resolver. Uses a function instead of a constant
+# because tests (and init workflows) may set RSD_CONFIG_DIR after sourcing.
+function rsd::l::kpx::vault_dir() {
+    echo "${RSD_CONFIG_DIR:-$HOME/.config/rsd}"
+}
 
 # Checks for the availability of the keepassxc-cli command
 # Arguments:
@@ -63,7 +69,8 @@ function rsd::l::kpx::init() {
     rsd::l::kpx::check || return $?
 
     # 3. Transaction isolation: Create temporary directory in ~/.config/rsd (Protocol C)
-    local config_dir="${RSD_CONFIG_DIR:-$HOME/.config/rsd}"
+    local config_dir
+    config_dir="$(rsd::l::kpx::vault_dir)"
     if [[ ! -d "$config_dir" ]]; then
         mkdir -p "$config_dir" || {
             rsd::warn "Failed to create config directory '$config_dir'."
@@ -140,7 +147,8 @@ function rsd::l::kpx::get_password() {
     local output_var="$2"
     declare -n out="$output_var"
 
-    local config_dir="${RSD_CONFIG_DIR:-$HOME/.config/rsd}"
+    local config_dir
+    config_dir="$(rsd::l::kpx::vault_dir)"
     local vault_key="$config_dir/vault.key.gpg"
     local vault_db="$config_dir/vault.kdbx"
 
@@ -189,7 +197,8 @@ function rsd::l::kpx::add_password() {
     local username="$2"
     local secret_to_store="$3"
 
-    local config_dir="${RSD_CONFIG_DIR:-$HOME/.config/rsd}"
+    local config_dir
+    config_dir="$(rsd::l::kpx::vault_dir)"
     local vault_key="$config_dir/vault.key.gpg"
     local vault_db="$config_dir/vault.kdbx"
 
@@ -241,7 +250,8 @@ function rsd::l::kpx::rotate_key() {
     # 2. Pre-flight check: Validate gpg-agent health (Protocol F)
     rsd::l::gpg::validate_agent_or_fail || return $?
 
-    local config_dir="${RSD_CONFIG_DIR:-$HOME/.config/rsd}"
+    local config_dir
+    config_dir="$(rsd::l::kpx::vault_dir)"
     local vault_key="$config_dir/vault.key.gpg"
     local recovery_key="$config_dir/recovery.key.gpg"
 
