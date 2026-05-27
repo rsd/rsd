@@ -113,11 +113,27 @@ EOF
     # Execute remote command securely
     rsd::debug "Executing remote SSH command: ssh ${ssh_opts[*]} $connection_target ${payload[*]}" 10
 
-    # SSH -t PTY exit code defense: when a PTY is allocated, the remote PTY teardown
-    # can race with the exit-status channel message (OpenSSH known behavior), causing
-    # the SSH client to return 0 despite a non-zero remote exit. We append an explicit
-    # exit code capture to the remote command string so the shell transmits the correct
-    # status before the channel closes.
+    # SSH -t PTY exit code defense (defense-in-depth):
+    #
+    # CONTEXT: We initially observed SSH returning exit 0 despite remote command
+    # failures (e.g. sudo auth failure). The ROOT CAUSE was rsd::command() calling
+    # exit 0 unconditionally (now fixed). However, a secondary risk remains:
+    #
+    # When SSH allocates a PTY (-t), the remote PTY teardown can theoretically
+    # race with the exit-status channel message (OpenSSH known behavior). If the
+    # PTY is destroyed before the exit-status message is transmitted, SSH defaults
+    # to exit 0 on the client side.
+    #
+    # DEFENSE: We append '; _rsd_rc=$?; exit $_rsd_rc' to the remote command
+    # string. This forces the remote shell to:
+    #   1. Capture the command's exit code into a variable
+    #   2. Explicitly call exit with that code
+    # This ensures the shell transmits exit-status before channel close, even
+    # during aggressive PTY teardown scenarios.
+    #
+    # NOTE: ${payload[*]} (not ${payload[@]}) is intentional — SSH concatenates
+    # all trailing arguments into a single remote command string anyway. Using [*]
+    # makes the string concatenation with the suffix explicit and correct.
     ssh "${ssh_opts[@]}" "$connection_target" "${payload[*]}"'; _rsd_rc=$?; exit $_rsd_rc'
     local exit_status=$?
 

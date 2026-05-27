@@ -103,7 +103,10 @@ function rsd::command() {
 	if real_command=$(rsd::search_command "$command"); then
 		rsd::debug "Calling $real_command with arguments: ${RSD_ARGS_UNPROCESSED[*]}" 5
 		$real_command "${RSD_ARGS_UNPROCESSED[@]}"
-		exit 0
+		# Propagate the command's exit code. Previously this was 'exit 0' which
+		# unconditionally reported success, masking failures in remote delegated
+		# commands (e.g. sudo auth failures were invisible to the calling recipe).
+		exit $?
 	else
 	    # Try action
 	    # FIXME: FIX parse argues for commands

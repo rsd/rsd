@@ -989,7 +989,9 @@ if [[ "${RSD_ARGS[command]}" ]]; then
         source "$command_source" "${RSD_ARGS_UNPROCESSED[@]}"
         rsd::command "$RSD_COMMAND"
 
-        exit 0
+        # rsd::command exits internally, but if control ever falls through
+        # (e.g. future refactor), propagate the command's exit code.
+        exit $?
     fi
 fi
 
