@@ -155,8 +155,25 @@ function rsd::c::install::command() {
         if rsd::l::remote::bootstrap_check "$RSD_REMOTE_TARGET" rsd_bin; then
             local -a remote_opts=()
             ((dry_run)) && remote_opts+=("--dry-run")
+
+            # Pre-provision: resolve sudo password locally before delegating.
+            # This ensures the credential enters the local session cache (reused
+            # by subsequent recipe tasks like exec_sudo), and avoids a redundant
+            # interactive prompt on the remote worker.
+            [[ "$RSD_SUDO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/sudo.lib)"
+            local _pre_pass="" _pre_source=""
+            rsd::l::sudo::get_password "$host_alias" "root" _pre_pass _pre_source
+
+            local -a inject_env=()
+            if [[ -n "$_pre_pass" ]]; then
+                local _b64_pass
+                _b64_pass=$(printf '%s' "$_pre_pass" | base64 -w0)
+                inject_env=("RSD_SUDO_PASS_INJECT=${_b64_pass}")
+                rsd::debug "Pre-provisioning sudo credential to remote worker (source: $_pre_source)" 5
+            fi
+
             rsd::warn "Delegating package installation to remote RSD..."
-            rsd::l::remote::execute "$RSD_REMOTE_TARGET" "$rsd_bin" "install" "$package" "${remote_opts[@]}"
+            rsd::l::remote::execute "$RSD_REMOTE_TARGET" "${inject_env[@]}" "$rsd_bin" "--delegated" "install" "$package" "${remote_opts[@]}"
             return $?
         else
             local -a install_cmd=()

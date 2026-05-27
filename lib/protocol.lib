@@ -134,8 +134,57 @@ EOF
     # NOTE: ${payload[*]} (not ${payload[@]}) is intentional — SSH concatenates
     # all trailing arguments into a single remote command string anyway. Using [*]
     # makes the string concatenation with the suffix explicit and correct.
-    ssh "${ssh_opts[@]}" "$connection_target" "${payload[*]}"'; _rsd_rc=$?; exit $_rsd_rc'
+
+    # Credential return capture: when a delegated worker returns credentials via
+    # stderr (sentinel __RSD_SUDO_CRED__), we tee stderr to a temp file for
+    # post-execution parsing while preserving real-time output to the user.
+    local _stderr_cap=""
+    _stderr_cap=$(mktemp "${TMPDIR:-/tmp}/rsd-stderr.XXXXXX")
+    chmod 0700 "$_stderr_cap"
+
+    ssh "${ssh_opts[@]}" "$connection_target" "${payload[*]}"'; _rsd_rc=$?; exit $_rsd_rc' \
+        2> >(tee "$_stderr_cap" >&2)
     local exit_status=$?
+
+    # Allow tee's process substitution to flush before we read the file
+    sleep 0.1
+
+    # Parse credential returns from the captured stderr
+    if [[ -f "$_stderr_cap" ]]; then
+        local _line
+        while IFS= read -r _line; do
+            if [[ "$_line" == __RSD_SUDO_CRED__:*__ ]]; then
+                local _cred_body="${_line#__RSD_SUDO_CRED__:}"
+                _cred_body="${_cred_body%__}"
+                # Format: <b64_password>:<hostname>:<user>
+                local _cred_pass _cred_host _cred_user
+                IFS=: read -r _cred_pass _cred_host _cred_user <<< "$_cred_body"
+
+                if [[ -n "$_cred_pass" ]]; then
+                    local _decoded_pass
+                    _decoded_pass=$(echo "$_cred_pass" | base64 -d)
+                    [[ "$RSD_SUDO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/sudo.lib)"
+
+                    # Cache under the remote's reported hostname (e.g. cavezzale-bi)
+                    if [[ -n "$_cred_host" ]]; then
+                        RSD_SUDO_PASSWORDS["${_cred_user:-root}@${_cred_host}"]="$_decoded_pass"
+                        RSD_SUDO_PASSWORDS_TS["${_cred_user:-root}@${_cred_host}"]=$EPOCHSECONDS
+                    fi
+
+                    # Also cache under the SSH connection alias (e.g. bi) so that
+                    # subsequent local delegate hops (,sudo://root) find the cached
+                    # credential when looking up by alias instead of hostname.
+                    if [[ -n "$connection_target" && "$connection_target" != "${_cred_host:-}" ]]; then
+                        RSD_SUDO_PASSWORDS["${_cred_user:-root}@${connection_target}"]="$_decoded_pass"
+                        RSD_SUDO_PASSWORDS_TS["${_cred_user:-root}@${connection_target}"]=$EPOCHSECONDS
+                    fi
+
+                    rsd::debug "Cached credential returned from delegated worker: ${_cred_user:-root}@${_cred_host} (alias: $connection_target)" 5
+                fi
+            fi
+        done < "$_stderr_cap"
+        rm -f "$_stderr_cap"
+    fi
 
     rsd::debug "SSH exit status: $exit_status" 10
 

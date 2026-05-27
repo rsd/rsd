@@ -81,7 +81,7 @@
 
 shopt -s extglob
 
-RSD_VERSION='1.10.1'
+RSD_VERSION='1.10.2'
 VERSION=$RSD_VERSION
 
 RSD_ON=1
@@ -180,6 +180,7 @@ declare -A RSD_ARGS_PARAM=(
     ["np"]=0
     ["vault-mode"]=1
     ["no-vault"]=0
+    ["delegated"]=0
     #["debug-parse-args"]=0 # Internal use
 )
 
@@ -817,6 +818,11 @@ elif [[ -n "${RSD_ARGS[no-vault]}" ]]; then
 fi
 RSD_VAULT_MODE="${RSD_VAULT_MODE:-opportunistic}"
 export RSD_VAULT_MODE
+
+# Delegated mode: this RSD instance is being orchestrated by a master
+if [[ -n "${RSD_ARGS[delegated]}" ]]; then
+    export RSD_DELEGATED=1
+fi
 
 # swith to a local copy if any (local == pwd)
 if ! [[ ${RSD_ARGS[no-local]} || ${RSD_ARGS[nl]} ]]; then
