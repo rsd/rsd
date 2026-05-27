@@ -110,11 +110,18 @@ EOF
         trap 'rm -f "$askpass_tmp"; unset RSD_SSH_PASS SSH_ASKPASS SSH_ASKPASS_REQUIRE; if [[ -n "$_rsd_saved_display" ]]; then export DISPLAY="$_rsd_saved_display"; else unset DISPLAY; fi; trap - EXIT INT TERM' EXIT INT TERM
     fi
 
-    # Execute remote command securely in subshell
+    # Execute remote command securely
     rsd::debug "Executing remote SSH command: ssh ${ssh_opts[*]} $connection_target ${payload[*]}" 10
-    
-    ssh "${ssh_opts[@]}" "$connection_target" "${payload[@]}"
+
+    # SSH -t PTY exit code defense: when a PTY is allocated, the remote PTY teardown
+    # can race with the exit-status channel message (OpenSSH known behavior), causing
+    # the SSH client to return 0 despite a non-zero remote exit. We append an explicit
+    # exit code capture to the remote command string so the shell transmits the correct
+    # status before the channel closes.
+    ssh "${ssh_opts[@]}" "$connection_target" "${payload[*]}"'; _rsd_rc=$?; exit $_rsd_rc'
     local exit_status=$?
+
+    rsd::debug "SSH exit status: $exit_status" 10
 
     # Secure Cleanup of memory credentials and temporary files.
     # Also runs via the trap above on signal interruption.
