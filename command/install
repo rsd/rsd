@@ -174,7 +174,17 @@ function rsd::c::install::command() {
 
             rsd::warn "Delegating package installation to remote RSD..."
             rsd::l::remote::execute "$RSD_REMOTE_TARGET" "${inject_env[@]}" "$rsd_bin" "--delegated" "install" "$package" "${remote_opts[@]}"
-            return $?
+            local _rc=$?
+
+            # Save-on-first-use: when the pre-provision collected the password
+            # interactively and the remote install succeeded, offer to persist
+            # it to the vault. The remote worker suppresses its own save hook
+            # (delegated mode), so the master must close the loop here.
+            if [[ $_rc -eq 0 && "$_pre_source" == "interactive" && -n "$_pre_pass" ]]; then
+                rsd::l::sudo::offer_vault_save "Sudo/${host_alias}" "root" "$_pre_pass"
+            fi
+
+            return $_rc
         else
             local -a install_cmd=()
             local target_spec="$RSD_REMOTE_TARGET"

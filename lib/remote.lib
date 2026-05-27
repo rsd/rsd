@@ -235,7 +235,15 @@ function rsd::l::remote::delegate() {
                     # This is an inherent limitation of multi-hop command compilation.
                     local escaped_pass
                     escaped_pass=$(printf '%s' "$password" | sed "s/'/'\\\\''/g")
-                    active_payload=("sh" "-c" "echo '${escaped_pass}' | sudo -S -p '' -u ${user:-root} -- ${escaped_cmd}")
+
+                    # Build the sh -c command string, then shell-escape it as a single
+                    # word using printf '%q'. Without this, SSH transport causes the
+                    # remote shell to split on the unquoted pipe '|', so 'sh -c echo'
+                    # runs alone (outputting nothing) and sudo gets empty input.
+                    local _sh_c_cmd="echo '${escaped_pass}' | sudo -S -p '' -u ${user:-root} -- ${escaped_cmd}"
+                    local _escaped_sh_c
+                    printf -v _escaped_sh_c '%q' "$_sh_c_cmd"
+                    active_payload=("sh" "-c" "$_escaped_sh_c")
                 else
                     active_payload=("sudo" "-u" "${user:-root}" "--" "${active_payload[@]}")
                 fi
