@@ -23,7 +23,9 @@ setup() {
 
 @test "rsd::l::sudo::get_password retrieves password from session cache" {
     declare -gA RSD_SUDO_PASSWORDS
+    declare -gA RSD_SUDO_PASSWORDS_TS
     RSD_SUDO_PASSWORDS["root@localhost"]="secret123"
+    RSD_SUDO_PASSWORDS_TS["root@localhost"]=$EPOCHSECONDS
 
     local password=""
     rsd::l::sudo::get_password "localhost" "root" password
@@ -67,5 +69,78 @@ setup() {
     [ -z "$SUDO_ASKPASS" ]
     [ -z "$RSD_SUDO_PASS" ]
     
+    unset RSD_MOCK_SUDO_PASSWORD
+}
+
+@test "rsd::l::sudo::get_password reports source as 'mock' for mock override" {
+    export RSD_MOCK_SUDO_PASSWORD="mocked"
+
+    local password="" source=""
+    rsd::l::sudo::get_password "host" "user" password source
+
+    [ "$password" = "mocked" ]
+    [ "$source" = "mock" ]
+    unset RSD_MOCK_SUDO_PASSWORD
+}
+
+@test "rsd::l::sudo::get_password reports source as 'cache' for session cache" {
+    declare -gA RSD_SUDO_PASSWORDS
+    declare -gA RSD_SUDO_PASSWORDS_TS
+    RSD_SUDO_PASSWORDS["root@myhost"]="cached-pass"
+    RSD_SUDO_PASSWORDS_TS["root@myhost"]=$EPOCHSECONDS
+
+    local password="" source=""
+    rsd::l::sudo::get_password "myhost" "root" password source
+
+    [ "$password" = "cached-pass" ]
+    [ "$source" = "cache" ]
+}
+
+@test "rsd::l::sudo::get_password reports source as 'vault' when kpx returns password" {
+    rsd::l::kpx::get_password() {
+        declare -n _out="$2"
+        _out="vault-secret"
+        return 0
+    }
+
+    export RSD_VAULT_MODE="opportunistic"
+    export RSD_KPX_LIB=1
+
+    local password="" source=""
+    rsd::l::sudo::get_password "server1" "" password source
+
+    [ "$password" = "vault-secret" ]
+    [ "$source" = "vault" ]
+}
+
+@test "rsd::l::sudo::get_password skips vault when RSD_VAULT_MODE is never" {
+    rsd::l::kpx::get_password() {
+        echo "VAULT_CALLED — should not happen"
+        return 0
+    }
+
+    declare -gA RSD_SUDO_PASSWORDS
+    declare -gA RSD_SUDO_PASSWORDS_TS
+    RSD_SUDO_PASSWORDS["root@host"]="cached"
+    RSD_SUDO_PASSWORDS_TS["root@host"]=$EPOCHSECONDS
+
+    export RSD_VAULT_MODE="never"
+    export RSD_KPX_LIB=1
+
+    local password="" source=""
+    rsd::l::sudo::get_password "host" "root" password source
+
+    # Should skip vault and fall through to cache
+    [ "$password" = "cached" ]
+    [ "$source" = "cache" ]
+}
+
+@test "rsd::l::sudo::get_password works without optional 4th source parameter" {
+    export RSD_MOCK_SUDO_PASSWORD="compat-test"
+
+    local password=""
+    rsd::l::sudo::get_password "host" "user" password
+
+    [ "$password" = "compat-test" ]
     unset RSD_MOCK_SUDO_PASSWORD
 }
