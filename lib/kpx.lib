@@ -234,6 +234,11 @@ function rsd::l::kpx::add_password() {
     rsd::l::gpg::validate_agent_or_fail || return $?
     trap 'unset master_key; trap - EXIT INT TERM' EXIT INT TERM
 
+    # Force non-batch mode: add_password is only called after the user explicitly
+    # accepted a vault save prompt. Pinentry should trigger if the GPG agent is
+    # cold — the user already expressed intent to interact with the vault.
+    local RSD_VAULT_MODE="ask"
+
     local master_key
     if ! rsd::l::kpx::decrypt_key "$vault_key" master_key; then
         rsd::warn "Failed to decrypt KeePass master key via GPG."
