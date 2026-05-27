@@ -39,7 +39,72 @@ RSD implements a **double-envelope security protocol** combining asymmetric GPG 
 
 ---
 
-## 2. Setup & Host Installation
+## 2. GPG Agent & Session Caching
+
+The double-envelope vault model means that every credential retrieval requires decrypting `vault.key.gpg` with your GPG private key. To avoid prompting you for your GPG passphrase on every single operation, RSD relies on **`gpg-agent`** — the standard GnuPG daemon that caches decrypted key material in kernel-secured memory.
+
+### How It Works
+
+1. The **first** vault access in a session triggers a GPG passphrase prompt (via pinentry).
+2. `gpg-agent` caches the decrypted key material in memory.
+3. All **subsequent** vault lookups within the cache window are **silent** — no re-prompting.
+4. After the configured timeout expires, the cache is cleared and the next access prompts again.
+
+RSD itself does **not** manage agent policy or timeouts. It only:
+- Checks the agent is alive ([`validate_agent_or_fail`](file:///home/raul/Devel/rsd/lib/gpg.lib))
+- Auto-launches it if dead (`gpgconf --launch gpg-agent`)
+
+### Configuring Cache Timeouts
+
+Cache behavior is configured in `~/.gnupg/gpg-agent.conf`:
+
+```
+# Seconds of inactivity before forgetting the passphrase (default: 600 = 10 min)
+default-cache-ttl 600
+
+# Absolute maximum cache lifetime regardless of activity (default: 7200 = 2 hours)
+max-cache-ttl 7200
+```
+
+- **`default-cache-ttl`**: Resets every time the cached key is used. If you keep using RSD within 10 minutes, the cache stays alive.
+- **`max-cache-ttl`**: Hard ceiling. Even with continuous use, after 2 hours you will be re-prompted.
+
+After editing the file, reload the agent:
+```bash
+gpgconf --kill gpg-agent
+```
+The agent auto-relaunches on the next GPG operation. RSD's `validate_agent_or_fail` handles this transparently.
+
+### Manually Flushing Cached Credentials
+
+To force `gpg-agent` to forget all cached passphrases immediately (e.g. before stepping away from the terminal):
+
+```bash
+gpg-connect-agent reloadagent /bye
+```
+
+The next vault access will prompt for the GPG passphrase again.
+
+### Choosing Your GPG Key
+
+RSD does not require a dedicated GPG key — you can use any key already in your keyring. The vault is encrypted to whichever recipient is set in `RSD_GPG_USER_ID`:
+
+```bash
+# Option A: Use an existing GPG key (set your key's email or fingerprint)
+rsd config set RSD_GPG_USER_ID "your.email@example.com"
+
+# Option B: Generate a dedicated RSD-only key (ed25519 + cv25519)
+rsd gpg create-key
+```
+
+To migrate the vault to a different GPG key later (e.g. after key expiration):
+```bash
+rsd kpx rotate-key "new-recipient@host"
+```
+
+---
+
+## 3. Setup & Host Installation
 
 RSD depends on `keepassxc-cli` to coordinate vault operations. Choose the installation route matched to your workstation layout:
 
@@ -58,7 +123,7 @@ RUN apt-get update && apt-get install -y keepassxc gpg-agent openssl
 
 ---
 
-## 3. CLI Command Reference
+## 4. CLI Command Reference
 
 Execute the `kpx` command module to manage your local secure vault.
 
@@ -97,7 +162,7 @@ rsd kpx rotate-key "new-recipient@nostromo"
 
 ---
 
-## 4. Developer Library API (`lib/kpx.lib`)
+## 5. Developer Library API (`lib/kpx.lib`)
 
 Custom automation commands and recipes can programmatic retrieve credentials using the standard library functions:
 

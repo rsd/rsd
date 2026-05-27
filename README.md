@@ -32,14 +32,19 @@ rsd @server1 recipe run zsh_dev_setup
 Follow these standard steps to configure your GPG identity, initialize the GPG-hardened KeePassXC credential vault, define a remote server alias, and bootstrap the RSD framework remotely:
 
 ### Step 1: Export/Ensure Your GPG Recipient Key ID
-RSD utilizes GPG asymmetric encryption to secure your KeePassXC database master password. Ensure your local GPG environment is active and write your GPG Recipient key ID to your configuration:
+RSD utilizes GPG asymmetric encryption to secure your KeePassXC database master password. You can use an existing GPG key from your keyring or generate a dedicated one for RSD:
 ```bash
-# 1. View your active GPG keys to identify your Key ID or email
+# Option A: Use an existing GPG key — identify your Key ID or email
 gpg --list-secret-keys --keyid-format=long
 
-# 2. Write your GPG Key ID to your user configuration
+# Option B: Generate a dedicated RSD-only key (ed25519 + cv25519)
+rsd gpg create-key
+
+# Write your chosen GPG Key ID to your user configuration
 rsd config set RSD_GPG_USER_ID "your.email@example.com"
 ```
+
+**GPG Agent Session Caching**: After you enter your GPG passphrase once, `gpg-agent` caches the decrypted key in memory. Subsequent vault lookups are silent — no re-prompting — until the cache expires (`default-cache-ttl`, 10 minutes of inactivity by default). To manually flush the cache: `gpg-connect-agent reloadagent /bye`. See the [GPG Agent & Session Caching](docs/kpx.md#2-gpg-agent--session-caching) section for timeout tuning and full details.
 
 ### Step 2: Initialize the KeePassXC Vault (`kpx`)
 Generate a new, secure database (`vault.kdbx`) and a GPG-encrypted master key (`vault.key.gpg`) targeting your GPG Recipient ID:
