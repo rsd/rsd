@@ -10,7 +10,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_PROTOCOL_LIB=1
-RSD_PROTOCOL_LIB_VERSION="0.1.1"
+RSD_PROTOCOL_LIB_VERSION="0.1.2"
 
 # Unified Protocol Interface (UPI) Library
 # All protocol handlers are prefixed using rsd::l::protocol::<scheme>::
@@ -182,18 +182,11 @@ function rsd::l::protocol::sudo::run() {
     
     local -a active_payload=("$@")
     if [[ -n "$password" ]]; then
-        local escaped_pass
-        escaped_pass=$(printf '%s' "$password" | sed "s/'/'\\\\''/g")
-        
-        # Shell-escape the active payload arguments cleanly
-        local escaped_cmd=""
-        local item
-        for item in "${active_payload[@]}"; do
-            escaped_cmd="${escaped_cmd} '$(printf '%s' "$item" | sed "s/'/'\\\\''/g")'"
-        done
-        
-        # Execute using a secure piping subshell remotely
-        rsd::l::remote::execute "$host" "sh" "-c" "echo '${escaped_pass}' | sudo -S -p '' -u ${user:-root} -- ${escaped_cmd}"
+        # Pipe password via stdin through the SSH tunnel. This prevents the
+        # password from appearing in remote process listings (ps aux / /proc/PID/cmdline).
+        # sudo -S reads exactly one line from stdin for authentication; the password
+        # never touches a command argument or shell string on the remote host.
+        printf '%s\n' "$password" | rsd::l::remote::execute "$host" "sudo" "-S" "-p" "" "-u" "${user:-root}" -- "${active_payload[@]}"
         return $?
     else
         # Run standard remote sudo (may prompt)

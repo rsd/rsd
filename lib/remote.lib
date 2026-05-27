@@ -216,6 +216,13 @@ function rsd::l::remote::delegate() {
                 done
 
                 if [[ -n "$password" ]]; then
+                    # SECURITY NOTE: For intermediate hops, the password must be embedded
+                    # in the compiled command string because stdin belongs to the outermost
+                    # SSH tunnel and cannot be multiplexed per hop. This means the password
+                    # is briefly visible in `ps aux` on the intermediate host.
+                    # The outermost hop (protocol.lib::sudo::run) uses stdin piping instead,
+                    # which does NOT expose the password in process arguments.
+                    # This is an inherent limitation of multi-hop command compilation.
                     local escaped_pass
                     escaped_pass=$(printf '%s' "$password" | sed "s/'/'\\\\''/g")
                     active_payload=("sh" "-c" "echo '${escaped_pass}' | sudo -S -p '' -u ${user:-root} -- ${escaped_cmd}")

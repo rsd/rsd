@@ -10,12 +10,19 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_GPG_LIB=1
-RSD_GPG_LIB_VERSION="0.1.0"
+RSD_GPG_LIB_VERSION="0.1.1"
 
 [[ "$RSD_NET_LIB" != "1" ]] && $(rsd::source_lib lib/net.lib)
 
-# FIXME: This should come from a config file
-RSD_GPG_USER_ID="rsd@$(rsd::l::net::hostname)"
+# Identity anchor for the entire vault trust chain.
+# Honor explicit configuration (rsd.conf / environment) if already set.
+# Falls back to hostname-derived default for backward compatibility.
+# WARNING: If relying on the default and the hostname changes, vault.key.gpg
+# becomes undecryptable. Pin this value in rsd.conf for production setups:
+#   RSD_GPG_USER_ID="your.email@example.com"
+if [[ ! -v RSD_GPG_USER_ID || -z "$RSD_GPG_USER_ID" ]]; then
+    RSD_GPG_USER_ID="rsd@$(rsd::l::net::hostname)"
+fi
 
 # Is GPG ready to be used?
 # Values:
