@@ -10,7 +10,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_GPG_LIB=1
-RSD_GPG_LIB_VERSION="0.1.1"
+RSD_GPG_LIB_VERSION="0.1.2"
 
 [[ "$RSD_NET_LIB" != "1" ]] && $(rsd::source_lib lib/net.lib)
 
@@ -240,11 +240,14 @@ function rsd::l::gpg::is_agent_warm() {
     fi
 
     # Probe: 'keyinfo --list' returns lines with a '1' in field 7 when the
-    # passphrase is cached. Format: S KEYINFO <grip> <type> <serial> <idstr> <cached> ...
-    # Field 7 (1-indexed) is '1' if cached, '-' if not.
+    # passphrase is cached.
+    # Format (1-indexed fields, space-separated):
+    #   1=S 2=KEYINFO 3=<grip> 4=<type> 5=<serialno> 6=<idstr> 7=<cached> 8=<protection> ...
+    # Field 7 is '1' if cached, '-' if not.
+    # The grep uses 4 wildcard groups after 'S KEYINFO' to land on field 7.
     local _keyinfo
     if _keyinfo=$(gpg-connect-agent 'keyinfo --list' /bye 2>/dev/null); then
-        if echo "$_keyinfo" | grep -q '^S KEYINFO [^ ]* [^ ]* [^ ]* [^ ]* [^ ]* 1'; then
+        if echo "$_keyinfo" | grep -q '^S KEYINFO [^ ]* [^ ]* [^ ]* [^ ]* 1'; then
             RSD_GPG_AGENT_WARM=0
             rsd::debug "GPG agent is warm (passphrase cached)" 10
             return 0

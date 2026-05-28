@@ -139,7 +139,7 @@ setup() {
         for ((i=1; i<=$#; i++)); do
             if [[ "${!i}" == "--output" ]]; then
                 local next_idx=$((i+1))
-                touch "${!next_idx}"
+                echo "mock_gpg_encrypted_data" > "${!next_idx}"
                 break
             fi
         done
@@ -164,7 +164,7 @@ setup() {
     
     keepassxc-cli() {
         if [[ "$1" == "db-create" ]]; then
-            touch "${!#}"
+            echo "mock_kdbx_data" > "${!#}"
         fi
         return 0
     }
@@ -186,9 +186,9 @@ setup() {
     export RSD_GPG_USER_ID="test_user"
     mkdir -p "$RSD_CONFIG_DIR"
     
-    # Touch mock databases
-    touch "$RSD_CONFIG_DIR/vault.key.gpg"
-    touch "$RSD_CONFIG_DIR/vault.kdbx"
+    # Write non-empty mock vault files (size checks reject 0-byte files)
+    echo "mock_gpg_vault_key" > "$RSD_CONFIG_DIR/vault.key.gpg"
+    echo "mock_kdbx_data" > "$RSD_CONFIG_DIR/vault.kdbx"
     
     rsd::l::gpg::validate_agent_or_fail() {
         return 0
@@ -245,8 +245,8 @@ setup() {
     export RSD_CONFIG_DIR="${BATS_TEST_TMPDIR}/rsd_config_rotate"
     mkdir -p "$RSD_CONFIG_DIR"
     
-    touch "$RSD_CONFIG_DIR/vault.key.gpg"
-    touch "$RSD_CONFIG_DIR/recovery.key.gpg"
+    echo "mock_gpg_vault_key" > "$RSD_CONFIG_DIR/vault.key.gpg"
+    echo "mock_gpg_recovery_key" > "$RSD_CONFIG_DIR/recovery.key.gpg"
     
     gpg() {
         if [[ "$*" == *"--list-secret-keys"* ]]; then
@@ -257,12 +257,12 @@ setup() {
             return 0
         fi
         if [[ "$*" == *"--encrypt"* ]]; then
-            # Write to --output file
+            # Write non-empty content to --output file
             local arg
             for ((i=1; i<=$#; i++)); do
                 if [[ "${!i}" == "--output" ]]; then
                     local next_idx=$((i+1))
-                    touch "${!next_idx}"
+                    echo "mock_re_encrypted_data" > "${!next_idx}"
                     break
                 fi
             done

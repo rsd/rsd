@@ -10,7 +10,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_KPX_LIB=1
-RSD_KPX_LIB_VERSION="0.2.0"
+RSD_KPX_LIB_VERSION="0.2.1"
 
 # Using the `keepassxc-cli` to interact with the keepassxc database
 # Note that are other options for it like:
@@ -135,6 +135,16 @@ function rsd::l::kpx::init() {
         return 10
     fi
 
+    # 5.5 Pre-commit validation: reject empty artifacts.
+    # If GPG or keepassxc-cli silently failed (exit 0 but empty output), do NOT
+    # promote the empty files into the config directory — they would be unfixable
+    # without a full re-initialization.
+    if [[ ! -s "$temp_dir/vault.key.gpg" || ! -s "$temp_dir/vault.kdbx" ]]; then
+        rsd::warn "Critical: Generated vault artifacts are empty. GPG or keepassxc-cli failed silently."
+        rsd::warn "Check that '$RSD_GPG_USER_ID' resolves to a valid GPG key with encryption capability."
+        return 10
+    fi
+
     # 6. Atomic Promotion (Transaction Commit - Protocol C)
     mv "$temp_dir/vault.key.gpg" "$config_dir/vault.key.gpg" || return 13
     mv "$temp_dir/recovery.key.gpg" "$config_dir/recovery.key.gpg" || return 13
@@ -178,6 +188,12 @@ function rsd::l::kpx::get_password() {
 
     if [[ ! -f "$vault_key" || ! -f "$vault_db" ]]; then
         rsd::warn "KeePass vault has not been initialized. Please run 'rsd kpx init' first."
+        return 1
+    fi
+
+    # 1a. Fail fast if vault key is empty (corrupted init)
+    if [[ ! -s "$vault_key" ]]; then
+        rsd::warn "Vault key file is empty (corrupted). Please re-initialize: rm ~/.config/rsd/vault.* && rsd kpx init"
         return 1
     fi
 
@@ -228,6 +244,12 @@ function rsd::l::kpx::add_password() {
 
     if [[ ! -f "$vault_key" || ! -f "$vault_db" ]]; then
         rsd::warn "KeePass vault has not been initialized. Please run 'rsd kpx init' first."
+        return 1
+    fi
+
+    # Fail fast if vault key is empty (corrupted init)
+    if [[ ! -s "$vault_key" ]]; then
+        rsd::warn "Vault key file is empty (corrupted). Please re-initialize: rm ~/.config/rsd/vault.* && rsd kpx init"
         return 1
     fi
 
