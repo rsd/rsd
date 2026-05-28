@@ -111,14 +111,21 @@ EOF
     fi
 
     # Execute remote command securely
-    # Sanitize credential material from debug output:
-    #   - RSD_SUDO_PASS_INJECT=<base64> → RSD_SUDO_PASS_INJECT=***
-    #   - echo '<password>' | sudo -S → echo '***' | sudo -S
-    local _dbg_payload="${payload[*]}"
-    _dbg_payload=$(printf '%s' "$_dbg_payload" | sed -E \
-        -e "s/RSD_SUDO_PASS_INJECT=[^ ]*/RSD_SUDO_PASS_INJECT=***/" \
-        -e "s/echo '[^']*' \| sudo/echo '***' | sudo/")
-    rsd::debug "Executing remote SSH command: ssh ${ssh_opts[*]} $connection_target $_dbg_payload" 10
+    # Sanitize credential material from debug output.
+    # Bash-native approach: match on payload array elements, not password content.
+    # This is safe regardless of special characters in the password (|, $, &, etc.)
+    local -a _dbg_parts=()
+    local _el
+    for _el in "${payload[@]}"; do
+        if [[ "$_el" == RSD_SUDO_PASS_INJECT=* ]]; then
+            _dbg_parts+=("RSD_SUDO_PASS_INJECT=***")
+        elif [[ "$_el" == *'| sudo -S'* ]]; then
+            _dbg_parts+=("<redacted-sudo-pipeline>")
+        else
+            _dbg_parts+=("$_el")
+        fi
+    done
+    rsd::debug "Executing remote SSH command: ssh ${ssh_opts[*]} $connection_target ${_dbg_parts[*]}" 10
 
     # SSH -t PTY exit code defense (defense-in-depth):
     #
