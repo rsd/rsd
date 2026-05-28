@@ -119,7 +119,7 @@ EOF
     for _el in "${payload[@]}"; do
         if [[ "$_el" == RSD_SUDO_PASS_INJECT=* ]]; then
             _dbg_parts+=("RSD_SUDO_PASS_INJECT=***")
-        elif [[ "$_el" == *'| sudo -S'* ]]; then
+        elif [[ "$_el" == *'| sudo -S'* || "$_el" == *'\|\ sudo\ -S'* ]]; then
             _dbg_parts+=("<redacted-sudo-pipeline>")
         else
             _dbg_parts+=("$_el")
