@@ -111,7 +111,14 @@ EOF
     fi
 
     # Execute remote command securely
-    rsd::debug "Executing remote SSH command: ssh ${ssh_opts[*]} $connection_target ${payload[*]}" 10
+    # Sanitize credential material from debug output:
+    #   - RSD_SUDO_PASS_INJECT=<base64> → RSD_SUDO_PASS_INJECT=***
+    #   - echo '<password>' | sudo -S → echo '***' | sudo -S
+    local _dbg_payload="${payload[*]}"
+    _dbg_payload=$(printf '%s' "$_dbg_payload" | sed -E \
+        -e "s/RSD_SUDO_PASS_INJECT=[^ ]*/RSD_SUDO_PASS_INJECT=***/" \
+        -e "s/echo '[^']*' \| sudo/echo '***' | sudo/")
+    rsd::debug "Executing remote SSH command: ssh ${ssh_opts[*]} $connection_target $_dbg_payload" 10
 
     # SSH -t PTY exit code defense (defense-in-depth):
     #
