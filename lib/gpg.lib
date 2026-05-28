@@ -10,9 +10,17 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_GPG_LIB=1
-RSD_GPG_LIB_VERSION="0.1.2"
+RSD_GPG_LIB_VERSION="0.1.3"
 
 [[ "$RSD_NET_LIB" != "1" ]] && $(rsd::source_lib lib/net.lib)
+
+# Ensure pinentry can locate the controlling terminal for passphrase prompts.
+# Without this, pinentry fails silently after SSH -t sessions disrupt terminal
+# ownership — the agent appears warm from cache but decrypt operations fail
+# because pinentry cannot attach to any TTY.
+if [[ -t 0 || -t 1 ]] && { : < /dev/tty; } 2>/dev/null; then
+    export GPG_TTY=$(tty)
+fi
 
 # Identity anchor for the entire vault trust chain.
 # Honor explicit configuration (rsd.conf / environment) if already set.

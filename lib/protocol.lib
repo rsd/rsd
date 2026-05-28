@@ -10,7 +10,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_PROTOCOL_LIB=1
-RSD_PROTOCOL_LIB_VERSION="0.1.2"
+RSD_PROTOCOL_LIB_VERSION="0.1.3"
 
 # Unified Protocol Interface (UPI) Library
 # All protocol handlers are prefixed using rsd::l::protocol::<scheme>::
@@ -145,6 +145,16 @@ EOF
     ssh "${ssh_opts[@]}" "$connection_target" "${payload[*]}"'; _rsd_rc=$?; exit $_rsd_rc' \
         2> >(tee "$_stderr_cap" >&2)
     local exit_status=$?
+
+    # Post-SSH terminal recovery: SSH -t allocates a PTY that disrupts the
+    # controlling terminal. After the session closes, gpg-agent may hold a stale
+    # TTY reference and the cached warmth probe becomes unreliable. Reset both
+    # so that post-SSH vault operations (e.g. add_password → decrypt_key) can
+    # re-probe agent state and pinentry can attach to the correct terminal.
+    unset RSD_GPG_AGENT_WARM
+    if [[ -t 0 || -t 1 ]] && { : < /dev/tty; } 2>/dev/null; then
+        export GPG_TTY=$(tty)
+    fi
 
     # Allow tee's process substitution to flush before we read the file
     sleep 0.1
