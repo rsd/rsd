@@ -237,16 +237,11 @@ function rsd::l::gpg::validate_agent_or_fail() {
 # A "cold" agent would require user interaction (pinentry), which should be
 # avoided during opportunistic vault operations.
 #
-# Result is cached in RSD_GPG_AGENT_WARM for the session to avoid repeated
-# gpg-connect-agent calls.
+# NOTE: No session caching — the agent's cache state can change between calls
+# (e.g. TTL expiry during an SSH session), so we always probe live.
 #
 # @return int 0 if agent is warm (keys cached), 1 if cold (no keys cached).
 function rsd::l::gpg::is_agent_warm() {
-    # Return cached result if already probed
-    if [[ -v RSD_GPG_AGENT_WARM ]]; then
-        return "$RSD_GPG_AGENT_WARM"
-    fi
-
     # Probe: 'keyinfo --list' returns lines with a '1' in field 7 when the
     # passphrase is cached.
     # Format (1-indexed fields, space-separated):
@@ -256,13 +251,11 @@ function rsd::l::gpg::is_agent_warm() {
     local _keyinfo
     if _keyinfo=$(gpg-connect-agent 'keyinfo --list' /bye 2>/dev/null); then
         if echo "$_keyinfo" | grep -q '^S KEYINFO [^ ]* [^ ]* [^ ]* [^ ]* 1'; then
-            RSD_GPG_AGENT_WARM=0
             rsd::debug "GPG agent is warm (passphrase cached)" 10
             return 0
         fi
     fi
 
-    RSD_GPG_AGENT_WARM=1
     rsd::debug "GPG agent is cold (no passphrase cached)" 10
     return 1
 }

@@ -10,7 +10,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_KPX_LIB=1
-RSD_KPX_LIB_VERSION="0.2.1"
+RSD_KPX_LIB_VERSION="0.2.2"
 
 # Using the `keepassxc-cli` to interact with the keepassxc database
 # Note that are other options for it like:
@@ -271,9 +271,17 @@ function rsd::l::kpx::add_password() {
     # Line 1: Database master password
     # Line 2: Entry password
     # Line 3: Entry password (confirmation)
-    if ! printf "%s\n%s\n%s\n" "$master_key" "$secret_to_store" "$secret_to_store" | keepassxc-cli add -p --username "$username" "$vault_db" "$entry_path" &>/dev/null; then
-         rsd::warn "Failed to add entry '$entry_path' to the vault."
-         return 2
+    #
+    # Upsert strategy: try 'add' first; if it fails (e.g. entry already exists),
+    # fall back to 'edit' which overwrites the existing entry's password.
+    local _kpx_err=""
+    if ! _kpx_err=$(printf "%s\n%s\n%s\n" "$master_key" "$secret_to_store" "$secret_to_store" | keepassxc-cli add -p --username "$username" "$vault_db" "$entry_path" 2>&1 >/dev/null); then
+        rsd::debug "keepassxc-cli add failed, attempting edit (upsert): $_kpx_err" 10
+        # 'edit' uses: Line 1 = master password, Line 2 = new password
+        if ! _kpx_err=$(printf "%s\n%s\n" "$master_key" "$secret_to_store" | keepassxc-cli edit -p "$vault_db" "$entry_path" 2>&1 >/dev/null); then
+            rsd::warn "Failed to add entry '$entry_path' to the vault: $_kpx_err"
+            return 2
+        fi
     fi
 
     return 0
