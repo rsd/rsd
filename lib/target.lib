@@ -16,7 +16,7 @@ if [[ "$RSD_TARGET_LIB" == "1" ]]; then
     return 0
 fi
 RSD_TARGET_LIB=1
-RSD_TARGET_LIB_VERSION="0.2.0"
+RSD_TARGET_LIB_VERSION="0.3.0"
 
 # ==============================================================================
 # Target-Aware Dispatch Primitives
@@ -113,6 +113,37 @@ function rsd::l::target::git_clone() {
     [[ -n "$depth" ]] && depth_args=("--depth" "$depth")
 
     rsd::l::target::exec git clone "${depth_args[@]}" "$repo" "$dest"
+}
+
+# Push a local file to a destination path on the target host.
+# Intent: Transfer a file from the local RSD data/lib directory to the target.
+#         For remote targets, streams file content via stdin through the SSH
+#         tunnel to avoid adding scp/rsync as hard dependencies.
+#         For local targets, delegates to a simple cp.
+#
+# @param string $1 The local source file path (absolute).
+# @param string $2 The destination path on target (supports remote shell expansions).
+# @return int 0 on success, 1 on failure.
+function rsd::l::target::file_push() {
+    local src="$1"
+    local dest="$2"
+
+    if [[ ! -f "$src" ]]; then
+        rsd::warn "Error: Source file '$src' does not exist."
+        return 1
+    fi
+
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        # Stream file content through the SSH tunnel; the remote shell expands
+        # $dest (e.g. $HOME) because it's unquoted inside the sh -c string.
+        # Uses tee instead of redirection to avoid shell metacharacter quoting
+        # issues across the SSH argument concatenation layer (protocol.lib
+        # uses ${payload[*]} which lets the remote shell parse the full string).
+        cat "$src" | rsd::l::remote::execute "$RSD_REMOTE_TARGET" \
+            "tee" "$dest" ">/dev/null"
+    else
+        cp "$src" "$dest"
+    fi
 }
 
 # ==============================================================================

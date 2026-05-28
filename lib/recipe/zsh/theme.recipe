@@ -15,6 +15,8 @@ function rsd::r::zsh_theme::register() {
 
     rsd::r::register_task "zsh_theme::clone_p10k"
     rsd::r::register_task "zsh_theme::configure_p10k" "rollback"
+    rsd::r::register_task "zsh_theme::deploy_p10k_config"
+    rsd::r::register_task "zsh_theme::patch_zshrc_for_p10k" "rollback"
     rsd::r::register_task "zsh_theme::adjust_p10k_context" "ignore"
 }
 
@@ -47,16 +49,78 @@ function rsd::r::zsh_theme::configure_p10k::rollback() {
     rsd::l::target::exec mv "\$HOME/.zshrc.theme.bak" "\$HOME/.zshrc"
 }
 
+# --- Task: deploy_p10k_config ---
+# Ships the pre-baked p10k.zsh configuration to the target.
+# The pristine config is adjusted post-deploy by adjust_p10k_context.
+
+function rsd::r::zsh_theme::deploy_p10k_config::pre_check() {
+    rsd::l::target::file_exists "\$HOME/.p10k.zsh"
+}
+
+function rsd::r::zsh_theme::deploy_p10k_config() {
+    local src
+    src="$(rsd::get_libdir_file "data/recipes/zsh/p10k.zsh")"
+    rsd::l::target::file_push "$src" "\$HOME/.p10k.zsh"
+}
+
+# --- Task: patch_zshrc_for_p10k ---
+# Scan-based idempotent patching: checks each block independently and only
+# adds what is missing. Safe against user edits to .zshrc.
+
+function rsd::r::zsh_theme::patch_zshrc_for_p10k::pre_check() {
+    rsd::l::target::file_contains 'p10k-instant-prompt' "\$HOME/.zshrc" && \
+    rsd::l::target::file_contains 'source.*\.p10k\.zsh' "\$HOME/.zshrc"
+}
+
+function rsd::r::zsh_theme::patch_zshrc_for_p10k() {
+    # Backup before patching
+    rsd::l::target::exec cp "\$HOME/.zshrc" "\$HOME/.zshrc.p10k.bak"
+
+    # 1. Prepend instant-prompt block if missing
+    if ! rsd::l::target::file_contains 'p10k-instant-prompt' "\$HOME/.zshrc"; then
+        rsd::l::target::exec sh -c "'
+            _tmp=\$(mktemp) && {
+                cat <<\"_RSD_P10K_INSTANT_\" > \"\$_tmp\"
+# Enable Powerlevel10k instant prompt. Should stay close to the top of ~/.zshrc.
+# Initialization code that may require console input (password prompts, [y/n]
+# confirmations, etc.) must go above this block; everything else may go below.
+if [[ -r \"\${XDG_CACHE_HOME:-\$HOME/.cache}/p10k-instant-prompt-\${(%):-%n}.zsh\" ]]; then
+  source \"\${XDG_CACHE_HOME:-\$HOME/.cache}/p10k-instant-prompt-\${(%):-%n}.zsh\"
+fi
+
+_RSD_P10K_INSTANT_
+                cat \"\$HOME/.zshrc\" >> \"\$_tmp\" && mv \"\$_tmp\" \"\$HOME/.zshrc\"
+            }
+        '"
+    fi
+
+    # 2. Append source line if missing
+    if ! rsd::l::target::file_contains 'source.*\.p10k\.zsh' "\$HOME/.zshrc"; then
+        rsd::l::target::exec sh -c "'
+            printf \"\\n# To customize prompt, run \\\`p10k configure\\\` or edit ~/.p10k.zsh.\\n\" >> \"\$HOME/.zshrc\"
+            echo \"[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh\" >> \"\$HOME/.zshrc\"
+        '"
+    fi
+}
+
+function rsd::r::zsh_theme::patch_zshrc_for_p10k::rollback() {
+    rsd::l::target::exec mv "\$HOME/.zshrc.p10k.bak" "\$HOME/.zshrc"
+}
+
 # --- Task: adjust_p10k_context ---
+# Comments out CONTEXT_{DEFAULT,SUDO} expansion lines in the deployed config.
+# Intent: Show user@hostname even for local (non-SSH) sessions, which the
+# pristine config hides by default.
 
 # P10k context adjustment pre-check (compound: file must exist AND contain uncommented lines)
 function rsd::r::zsh_theme::adjust_p10k_context::pre_check() {
     rsd::l::target::file_exists "\$HOME/.p10k.zsh" && \
-    rsd::l::target::file_contains '^# typeset -g POWERLEVEL9K_CONTEXT_' "\$HOME/.p10k.zsh"
+    rsd::l::target::exec grep -Fq -- "'# typeset -g POWERLEVEL9K_CONTEXT_{DEFAULT,SUDO}'" "\$HOME/.p10k.zsh"
 }
 
 function rsd::r::zsh_theme::adjust_p10k_context() {
     rsd::l::target::exec perl -pi -e \
-        's@^\s+(typeset -g POWERLEVEL9K_CONTEXT_{DEFAULT,SUDO}_{CONTENT,VISUAL_IDENTIFIER}_EXPANSION=)@# $1@' \
+        "'s@^\\s+(typeset -g POWERLEVEL9K_CONTEXT_{DEFAULT,SUDO}_{CONTENT,VISUAL_IDENTIFIER}_EXPANSION=)@# \$1@'" \
         "\$HOME/.p10k.zsh"
 }
+

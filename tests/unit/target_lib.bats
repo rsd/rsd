@@ -232,3 +232,51 @@ setup() {
     leftover=$(find /tmp -maxdepth 1 -name "rsd-fetch.*" -user "$(whoami)" 2>/dev/null | wc -l)
     [ "$leftover" -eq 0 ]
 }
+
+# ==============================================================================
+# rsd::l::target::file_push (local file transfer)
+# ==============================================================================
+
+@test "rsd::l::target::file_push copies file to destination (local mode)" {
+    local src dest
+    src=$(mktemp -t rsd-push-src.XXXXXX)
+    dest=$(mktemp -t rsd-push-dst.XXXXXX)
+    rm -f "$dest"  # file_push should create it
+
+    echo "FILE_PUSH_CONTENT" > "$src"
+
+    run rsd::l::target::file_push "$src" "$dest"
+    [ "$status" -eq 0 ]
+    [ -f "$dest" ]
+    [[ "$(cat "$dest")" == "FILE_PUSH_CONTENT" ]]
+
+    rm -f "$src" "$dest"
+}
+
+@test "rsd::l::target::file_push returns 1 for missing source file" {
+    run rsd::l::target::file_push "/tmp/__rsd_nonexistent_source__" "/tmp/dest"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"does not exist"* ]]
+}
+
+@test "rsd::l::target::file_push preserves binary-safe content integrity" {
+    local src dest
+    src=$(mktemp -t rsd-push-bin.XXXXXX)
+    dest=$(mktemp -t rsd-push-bin-dst.XXXXXX)
+    rm -f "$dest"
+
+    # Write content with special characters that could break naive piping
+    printf 'line1\nZSH_THEME="test"\n$HOME/.config\n' > "$src"
+
+    run rsd::l::target::file_push "$src" "$dest"
+    [ "$status" -eq 0 ]
+
+    # Verify byte-for-byte content match
+    local src_hash dest_hash
+    src_hash=$(sha256sum "$src" | awk '{print $1}')
+    dest_hash=$(sha256sum "$dest" | awk '{print $1}')
+    [ "$src_hash" = "$dest_hash" ]
+
+    rm -f "$src" "$dest"
+}
+
