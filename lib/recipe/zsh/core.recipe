@@ -9,29 +9,26 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
     exit 12
 fi
 
-function rsd::recipe::zsh_core::register() {
-    rsd::recipe::register_task \
-        --name "zsh_core::install_zsh" \
-        --pre-check "rsd::l::target::has_bin zsh" \
-        --apply "rsd::l::recipe::install_pkg zsh" \
-        --recovery "forward"
-
-    rsd::recipe::register_task \
-        --name "zsh_core::set_default_shell" \
-        --pre-check "rsd::recipe::zsh_core::shell_pre" \
-        --apply "rsd::recipe::zsh_core::shell_apply" \
-        --recovery "rollback" \
-        --rollback "rsd::l::target::exec_sudo '' chsh -s /bin/bash $USER"
-
-    rsd::recipe::register_task \
-        --name "zsh_core::install_oh_my_zsh" \
-        --pre-check "rsd::l::target::dir_exists \$HOME/.oh-my-zsh" \
-        --apply "rsd::recipe::zsh_core::omz_apply" \
-        --recovery "forward"
+function rsd::r::zsh_core::register() {
+    rsd::r::register_task "zsh_core::install_zsh"
+    rsd::r::register_task "zsh_core::set_default_shell" "rollback"
+    rsd::r::register_task "zsh_core::install_oh_my_zsh"
 }
 
+# --- Task: install_zsh ---
+
+function rsd::r::zsh_core::install_zsh::pre_check() {
+    rsd::l::target::has_bin zsh
+}
+
+function rsd::r::zsh_core::install_zsh() {
+    rsd::l::r::install_pkg zsh
+}
+
+# --- Task: set_default_shell ---
+
 # Default shell pre-check requires reading $SHELL, which has no single-line helper equivalent
-function rsd::recipe::zsh_core::shell_pre() {
+function rsd::r::zsh_core::set_default_shell::pre_check() {
     local current_shell=""
     if [[ -n "$RSD_REMOTE_TARGET" ]]; then
         current_shell=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "echo \$SHELL")
@@ -42,7 +39,7 @@ function rsd::recipe::zsh_core::shell_pre() {
 }
 
 # Default shell change requires dynamic path resolution before sudo elevation
-function rsd::recipe::zsh_core::shell_apply() {
+function rsd::r::zsh_core::set_default_shell() {
     local zsh_path=""
     if [[ -n "$RSD_REMOTE_TARGET" ]]; then
         zsh_path=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "which" "zsh" 2>/dev/null)
@@ -60,12 +57,22 @@ function rsd::recipe::zsh_core::shell_apply() {
     rsd::l::target::exec_sudo "" "chsh" "-s" "$zsh_path" "$USER"
 }
 
+function rsd::r::zsh_core::set_default_shell::rollback() {
+    rsd::l::target::exec_sudo '' chsh -s /bin/bash $USER
+}
+
+# --- Task: install_oh_my_zsh ---
+
+function rsd::r::zsh_core::install_oh_my_zsh::pre_check() {
+    rsd::l::target::dir_exists "\$HOME/.oh-my-zsh"
+}
+
 # Oh My Zsh unattended installation via secure download pipeline.
 # Uses fetch_and_exec to prevent:
 #   - Symlink attacks on predictable /tmp paths (CWE-377)
 #   - TOCTOU races between download and execution (CWE-367)
 #   - Blind curl-pipe-to-shell execution (CWE-494)
-function rsd::recipe::zsh_core::omz_apply() {
+function rsd::r::zsh_core::install_oh_my_zsh() {
     rsd::l::target::fetch_and_exec \
         "https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh" \
         "sh" "--unattended"

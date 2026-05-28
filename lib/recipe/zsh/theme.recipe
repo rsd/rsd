@@ -9,38 +9,54 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
     exit 12
 fi
 
-function rsd::recipe::zsh_theme::register() {
+function rsd::r::zsh_theme::register() {
     # Prerequisite: Zsh and Oh My Zsh base must be satisfied first
-    rsd::recipe::include_recipe "zsh/core"
+    rsd::r::include "zsh/core"
 
-    rsd::recipe::register_task \
-        --name "zsh_theme::clone_p10k" \
-        --pre-check "rsd::l::target::dir_exists \${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/themes/powerlevel10k" \
-        --apply "rsd::l::target::git_clone https://github.com/romkatv/powerlevel10k.git \${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/themes/powerlevel10k 1" \
-        --recovery "forward"
-
-    rsd::recipe::register_task \
-        --name "zsh_theme::configure_p10k" \
-        --pre-check "rsd::l::target::file_contains '^ZSH_THEME=\"powerlevel10k/powerlevel10k\"' \$HOME/.zshrc" \
-        --apply "rsd::recipe::zsh_theme::config_apply" \
-        --recovery "rollback" \
-        --rollback "rsd::l::target::exec mv \$HOME/.zshrc.theme.bak \$HOME/.zshrc"
-
-    rsd::recipe::register_task \
-        --name "zsh_theme::adjust_p10k_context" \
-        --pre-check "rsd::recipe::zsh_theme::p10k_pre" \
-        --apply "rsd::l::target::exec perl -pi -e 's@^\\s+(typeset -g POWERLEVEL9K_CONTEXT_{DEFAULT,SUDO}_{CONTENT,VISUAL_IDENTIFIER}_EXPANSION=)@# \$1@' \$HOME/.p10k.zsh" \
-        --recovery "ignore"
+    rsd::r::register_task "zsh_theme::clone_p10k"
+    rsd::r::register_task "zsh_theme::configure_p10k" "rollback"
+    rsd::r::register_task "zsh_theme::adjust_p10k_context" "ignore"
 }
 
-# Zsh theme config execution (backup + sed replacement)
-function rsd::recipe::zsh_theme::config_apply() {
+# --- Task: clone_p10k ---
+
+function rsd::r::zsh_theme::clone_p10k::pre_check() {
+    rsd::l::target::dir_exists "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
+}
+
+function rsd::r::zsh_theme::clone_p10k() {
+    rsd::l::target::git_clone \
+        "https://github.com/romkatv/powerlevel10k.git" \
+        "\${ZSH_CUSTOM:-\$HOME/.oh-my-zsh/custom}/themes/powerlevel10k" 1
+}
+
+# --- Task: configure_p10k ---
+
+function rsd::r::zsh_theme::configure_p10k::pre_check() {
+    rsd::l::target::file_contains \
+        '^ZSH_THEME="powerlevel10k/powerlevel10k"' "\$HOME/.zshrc"
+}
+
+function rsd::r::zsh_theme::configure_p10k() {
     rsd::l::target::exec cp "\$HOME/.zshrc" "\$HOME/.zshrc.theme.bak"
-    rsd::l::target::exec perl -pi -e "'s@^ZSH_THEME=.*\$@ZSH_THEME=\"powerlevel10k/powerlevel10k\"@'" "\$HOME/.zshrc"
+    rsd::l::target::exec perl -pi -e \
+        "'s@^ZSH_THEME=.*\$@ZSH_THEME=\"powerlevel10k/powerlevel10k\"@'" "\$HOME/.zshrc"
 }
+
+function rsd::r::zsh_theme::configure_p10k::rollback() {
+    rsd::l::target::exec mv "\$HOME/.zshrc.theme.bak" "\$HOME/.zshrc"
+}
+
+# --- Task: adjust_p10k_context ---
 
 # P10k context adjustment pre-check (compound: file must exist AND contain uncommented lines)
-function rsd::recipe::zsh_theme::p10k_pre() {
+function rsd::r::zsh_theme::adjust_p10k_context::pre_check() {
     rsd::l::target::file_exists "\$HOME/.p10k.zsh" && \
     rsd::l::target::file_contains '^# typeset -g POWERLEVEL9K_CONTEXT_' "\$HOME/.p10k.zsh"
+}
+
+function rsd::r::zsh_theme::adjust_p10k_context() {
+    rsd::l::target::exec perl -pi -e \
+        's@^\s+(typeset -g POWERLEVEL9K_CONTEXT_{DEFAULT,SUDO}_{CONTENT,VISUAL_IDENTIFIER}_EXPANSION=)@# $1@' \
+        "\$HOME/.p10k.zsh"
 }

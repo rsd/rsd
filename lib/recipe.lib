@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # Declarative recipe provisioning engine.
-# namespace rsd::recipe::
-# namespace rsd::l::recipe::
+# namespace rsd::r::
+# namespace rsd::l::r::
 
 # @see docs/recipes.md
 # @see AGENTS.md
@@ -17,70 +17,59 @@ if [[ "$RSD_RECIPE_LIB" == "1" ]]; then
     return 0
 fi
 RSD_RECIPE_LIB=1
-RSD_RECIPE_LIB_VERSION="0.3.0"
+RSD_RECIPE_LIB_VERSION="0.4.0"
 
 # Load target-aware dispatch primitives
 [[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
 
-# Scoped task definitions
+# Scoped task definitions — only task names and recovery mode are stored.
+# All other hooks (pre_check, rollback) are discovered at dispatch time
+# via bash::is_function probing on convention-based function names.
 declare -g -a RSD_REGISTERED_TASKS=()
-declare -g -A RSD_TASKS_PRE
-declare -g -A RSD_TASKS_APPLY
-declare -g -A RSD_TASKS_POST
-declare -g -A RSD_TASKS_RECOVERY
-declare -g -A RSD_TASKS_ROLLBACK
+declare -g -A RSD_TASKS_RECOVERY=()
 declare -g -A RSD_INCLUDED_RECIPES=()
 
 # Session stack tracking completed tasks
 declare -g -a RSD_COMPLETED_STACK=()
 
-# Register a declarative recipe task
-# Arguments:
-#   --name) Task identifier (mandatory)
-#   --pre-check) State detection function/command
-#   --apply) Execution payload (mandatory)
-#   --post-check) State verification function/command
-#   --recovery) Fault handling mode ('forward', 'rollback', 'ignore')
-#   --rollback) Rollback execution payload (required if recovery is 'rollback')
-# Returns:
-#   0 - Success
-#   11 - Mandatory parameter missing
-function rsd::recipe::register_task() {
-    local name="" pre="" apply="" post="" recovery="forward" rollback=""
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --name) name="$2"; shift ;;
-            --pre-check) pre="$2"; shift ;;
-            --apply) apply="$2"; shift ;;
-            --post-check) post="$2"; shift ;;
-            --recovery) recovery="$2"; shift ;;
-            --rollback) rollback="$2"; shift ;;
-        esac
-        shift
-    done
+# Register a convention-based recipe task.
+# The task name maps directly to a function: rsd::r::<task_name>
+# Optional hooks are discovered by probing: rsd::r::<task_name>::pre_check,
+# rsd::r::<task_name>::rollback, etc.
+#
+# @param string $1 Task identifier (mandatory). Must match a declared function rsd::r::<name>.
+# @param string $2 Recovery mode: 'forward' (default), 'rollback', 'ignore'.
+# @return 0 on success
+# @return 11 on missing apply function or rollback mismatch
+function rsd::r::register_task() {
+    local task_name="$1"
+    local recovery="${2:-forward}"
+    local func="rsd::r::${task_name}"
 
-    if [[ -z "$name" || -z "$apply" ]]; then
-        rsd::warn "Error: Task registration requires --name and --apply parameters."
+    # The task name IS the apply function — it must exist
+    if ! bash::is_function "$func"; then
+        rsd::warn "Error: Task function '${func}' is not declared."
         return 11
     fi
 
-    RSD_REGISTERED_TASKS+=("$name")
-    RSD_TASKS_PRE["$name"]="$pre"
-    RSD_TASKS_APPLY["$name"]="$apply"
-    RSD_TASKS_POST["$name"]="$post"
-    RSD_TASKS_RECOVERY["$name"]="$recovery"
-    RSD_TASKS_ROLLBACK["$name"]="$rollback"
+    # Validate rollback function exists when recovery=rollback
+    if [[ "$recovery" == "rollback" ]] && ! bash::is_function "${func}::rollback"; then
+        rsd::warn "Error: Task '${task_name}' has recovery='rollback' but no ::rollback function."
+        return 11
+    fi
+
+    RSD_REGISTERED_TASKS+=("$task_name")
+    RSD_TASKS_RECOVERY["$task_name"]="$recovery"
     return 0
 }
 
 # Compile and include a sub-recipe dynamically into the active task stack
-# Arguments:
-#   $1 - sub-recipe file basename (e.g. 'zsh_core')
-# Returns:
-#   0 - Success
-#   5 - File not resolved
-#   11 - Registration hook missing
-function rsd::recipe::include_recipe() {
+#
+# @param string $1 Sub-recipe file path (e.g. 'zsh/core')
+# @return 0 on success
+# @return 5 on file not resolved
+# @return 11 on missing registration hook
+function rsd::r::include() {
     rsd::arguments_or_usage 1 "$@"
     local name="$1"
 
@@ -107,7 +96,7 @@ function rsd::recipe::include_recipe() {
     source "$(rsd::get_libdir_file "lib/recipe/${name}.recipe")"
 
     # Invoke the registration hook
-    local reg_func="rsd::recipe::${clean_name}::register"
+    local reg_func="rsd::r::${clean_name}::register"
     if bash::is_function "$reg_func"; then
         "$reg_func"
     else
@@ -117,66 +106,30 @@ function rsd::recipe::include_recipe() {
     return 0
 }
 
-# Dispatches a registered hook string through eval for argument support.
-# Intent: Enables hooks like "rsd::l::target::has_bin zsh" where the
-#         string contains both the function name and its arguments, separated
-#         by whitespace. Bare function names (legacy style) work identically.
+# Executes the compiled flat task stack via direct function dispatch.
+# No eval — all hooks are called as native Bash functions.
 #
-# TAINT GUARD: This is defense-in-depth, not a security boundary. Recipe files
-#   are trusted code loaded from $RSD_LIBRARY_SEARCH_PATH. The guard catches:
-#   - Accidental shell metacharacter injection in hook strings
-#   - Typos in function names (caught at dispatch time, not silently eval'd)
-#   - Copy-paste errors from shell snippets into registration blocks
-#
-# @param string $1 The hook string stored in RSD_TASKS_* associative arrays.
-# @return int Exit code of the dispatched function.
-# @return 2 on taint validation failure.
-function rsd::l::recipe::eval_hook() {
-    local hook="$1"
-
-    # Stage 1: Metacharacter taint rejection
-    if [[ "$hook" =~ [\;\|\`] ]] || [[ "$hook" == *'$('* ]]; then
-        rsd::warn "TAINT: Hook contains forbidden shell metacharacters: '$hook'"
-        return 2
-    fi
-
-    # Stage 2: Function existence validation
-    local func_name="${hook%% *}"
-    if ! bash::is_function "$func_name"; then
-        rsd::warn "TAINT: Hook function '$func_name' is not a declared function."
-        return 2
-    fi
-
-    eval "$hook"
-}
-
-# Executes the compiled flat task stack
-# Arguments:
-#   $1 - dry_run (0 or 1, default 0)
-#   $2 - verbose (0 or 1, default 0)
-# Returns:
-#   0 - Success
-#   10 - Task execution failed
-function rsd::l::recipe::execute_engine() {
+# @param int $1 dry_run (0 or 1, default 0)
+# @param int $2 verbose (0 or 1, default 0)
+# @return 0 on success
+# @return 10 on task execution failure
+function rsd::l::r::execute_engine() {
     local dry_run="${1:-0}"
     local verbose="${2:-0}"
-    
+
     RSD_COMPLETED_STACK=()
-    local name pre apply post recovery rollback
+    local name func recovery
 
     for name in "${RSD_REGISTERED_TASKS[@]}"; do
-        pre="${RSD_TASKS_PRE["$name"]}"
-        apply="${RSD_TASKS_APPLY["$name"]}"
-        post="${RSD_TASKS_POST["$name"]}"
+        func="rsd::r::${name}"
         recovery="${RSD_TASKS_RECOVERY["$name"]}"
-        rollback="${RSD_TASKS_ROLLBACK["$name"]}"
 
         # 1. Pre-flight Necessity Guard
-        if [[ -n "$pre" ]]; then
+        if bash::is_function "${func}::pre_check"; then
             if ((verbose)); then
                 rsd::warn "  [CHECKING] Task '$name'..."
             fi
-            if rsd::l::recipe::eval_hook "$pre" &>/dev/null; then
+            if "${func}::pre_check" &>/dev/null; then
                 rsd::warn "  [SKIPPED] Task '$name' is already satisfied."
                 continue
             fi
@@ -188,36 +141,19 @@ function rsd::l::recipe::execute_engine() {
             continue
         fi
 
-        # 3. Execution Phase
+        # 3. Execution Phase — call the task function directly
         rsd::warn "  [APPLYING] Executing task '$name'..."
-        if ! rsd::l::recipe::eval_hook "$apply"; then
+        if ! "$func"; then
             if [[ "$recovery" == "ignore" ]]; then
                 rsd::warn "  [WARNING] Task '$name' failed. Skipping optional step."
                 continue
             else
-                rsd::l::recipe::handle_failure "$name" "$recovery"
+                rsd::l::r::handle_failure "$name" "$recovery"
                 return 10
             fi
         fi
 
-        # 4. Post-flight Verification
-        if [[ -n "$post" ]]; then
-            if ((verbose)); then
-                rsd::warn "  [VERIFYING] Task '$name'..."
-            fi
-            if ! rsd::l::recipe::eval_hook "$post" &>/dev/null; then
-                if [[ "$recovery" == "ignore" ]]; then
-                    rsd::warn "  [WARNING] Task '$name' verification failed. Skipping optional step."
-                    continue
-                else
-                    rsd::warn "  [ERROR] Verification failed for task '$name'."
-                    rsd::l::recipe::handle_failure "$name" "$recovery"
-                    return 10
-                fi
-            fi
-        fi
-
-        # 5. Registry Success Track
+        # 4. Registry Success Track
         RSD_COMPLETED_STACK+=("$name")
         rsd::warn "  [OK] Task '$name' applied successfully."
     done
@@ -227,10 +163,10 @@ function rsd::l::recipe::execute_engine() {
 }
 
 # Coordinate state-specific failure recovery
-# Arguments:
-#   $1 - failed task name
-#   $2 - recovery mode ('forward', 'rollback')
-function rsd::l::recipe::handle_failure() {
+#
+# @param string $1 Failed task name
+# @param string $2 Recovery mode ('forward', 'rollback')
+function rsd::l::r::handle_failure() {
     local name="$1"
     local recovery="$2"
 
@@ -238,13 +174,13 @@ function rsd::l::recipe::handle_failure() {
 
     if [[ "$recovery" == "rollback" ]]; then
         rsd::warn "Initiating Backward Recovery (Rollback)..."
-        local i completed rollback
+        local i completed rollback_func
         for (( i=${#RSD_COMPLETED_STACK[@]}-1; i>=0; i-- )); do
             completed="${RSD_COMPLETED_STACK[i]}"
-            rollback="${RSD_TASKS_ROLLBACK["$completed"]}"
-            if [[ -n "$rollback" ]]; then
+            rollback_func="rsd::r::${completed}::rollback"
+            if bash::is_function "$rollback_func"; then
                 rsd::warn "  [ROLLBACK] Undoing changes for task '$completed'..."
-                if ! rsd::l::recipe::eval_hook "$rollback"; then
+                if ! "$rollback_func"; then
                     rsd::warn "  [CRITICAL] Rollback failed for task '$completed'! Manual cleanup required."
                 fi
             fi
@@ -270,7 +206,7 @@ function rsd::l::recipe::handle_failure() {
 #
 # @param string $1 The package name.
 # @return int Exit code of the install subsystem.
-function rsd::l::recipe::install_pkg() {
+function rsd::l::r::install_pkg() {
     local package="$1"
     source "$(rsd::get_libdir_file command/install)"
     rsd::c::install::command "$package"
@@ -282,7 +218,7 @@ function rsd::l::recipe::install_pkg() {
 # @param string $1 The absolute base directory path.
 # @param string $2 The current subfolder relative path (empty for root).
 # @return stdout Relative paths of found recipes (without .recipe extension).
-function rsd::l::recipe::find_recursive() {
+function rsd::l::r::find_recursive() {
     local base_dir="$1"
     local sub_dir="$2"
     local path="${base_dir}/${sub_dir}"
@@ -299,7 +235,7 @@ function rsd::l::recipe::find_recursive() {
             else
                 next_sub="${sub_dir}/$(basename "$item")"
             fi
-            rsd::l::recipe::find_recursive "$base_dir" "$next_sub"
+            rsd::l::r::find_recursive "$base_dir" "$next_sub"
         elif [[ -f "$item" && "$item" == *.recipe ]]; then
             local relative_file="${item#$base_dir/}"
             echo "${relative_file%.recipe}"

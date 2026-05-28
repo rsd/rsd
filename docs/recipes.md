@@ -10,12 +10,34 @@ The Recipes Subsystem operates on three fundamental abstractions:
 
 | Component | Definition | File / Class Scope |
 | :--- | :--- | :--- |
-| **Task** | The smallest atomic unit of execution. Declares pre-flight conditions, payload actions, post-flight verifications, and optional rollback logic. | Registered via `rsd::recipe::register_task` |
+| **Task** | The smallest atomic unit of execution. A task is a function (`rsd::r::<task_name>`) with optional lifecycle hooks discovered by convention. | Registered via `rsd::r::register_task` |
 | **Recipe** | A collection of related Tasks or an inclusion of other sub-recipes. | Written as `.recipe` files under `lib/recipe/` |
 | **Engine** | The core orchestrator. Compiles a flat chronological task stack, checks necessity guards, applies modifications, and handles failures. | Controlled by `lib/recipe.lib` |
 
+### Convention-Over-Configuration
+
+The recipe system uses a **convention-based function dispatch** model. Instead of passing hooks as string arguments, each task is defined as a set of Bash functions following a naming convention:
+
+```bash
+# The task name IS the apply function
+function rsd::r::my_recipe::my_task() { ... }
+
+# Optional hooks are discovered by suffix
+function rsd::r::my_recipe::my_task::pre_check() { ... }
+function rsd::r::my_recipe::my_task::rollback() { ... }
+```
+
+| Hook | Function Suffix | Required? | Purpose |
+| :--- | :--- | :---: | :--- |
+| **apply** | *(none — the task name itself)* | **Yes** | The execution payload |
+| **pre_check** | `::pre_check` | No | State detection — skip if satisfied |
+| **rollback** | `::rollback` | No | Undo logic — required if `recovery="rollback"` |
+| **description** | `::description` | No | Human-readable task description |
+
+If a suffixed function does not exist, the engine treats that hook as empty/default. Only the base function (apply) is mandatory.
+
 ### Flat Task Stack Compilation
-To prevent runtime isolation or split-brain states during nested composition, RSD does **not** execute nested recipes in separate context blocks. Instead, when a master recipe includes other sub-recipes (using `rsd::recipe::include_recipe`), they are **recursively compiled** into a single, flat chronological list of Tasks (`RSD_REGISTERED_TASKS`).
+To prevent runtime isolation or split-brain states during nested composition, RSD does **not** execute nested recipes in separate context blocks. Instead, when a master recipe includes other sub-recipes (using `rsd::r::include`), they are **recursively compiled** into a single, flat chronological list of Tasks (`RSD_REGISTERED_TASKS`).
 
 ```mermaid
 graph TD
@@ -42,18 +64,14 @@ This flat compile allows:
 
 ## 2. The Task Lifecycle & Idempotency
 
-Every Task registered in a recipe executes in four explicit phases:
+Every Task registered in a recipe executes in three explicit phases:
 
 ```
   [Pre-Check] ──────(Succeeded)──────> [SKIPPED] (Already Satisfied)
        │
-    (Failed)
+    (Failed / Not defined)
        ▼
    [APPLY] ───────(Failed)──────────> [RECOVERY FLOW] (Rollback or Forward Halt)
-       │
-   (Succeeded)
-       ▼
- [Post-Check] ─────(Failed)──────────> [RECOVERY FLOW] (Rollback or Forward Halt)
        │
    (Succeeded)
        ▼
@@ -64,8 +82,8 @@ Every Task registered in a recipe executes in four explicit phases:
 Every step in a recipe **must be idempotent**. A task is idempotent if running it multiple times produces the exact same system state without redundant executions or side effects. 
 
 To achieve this:
-1. **Pre-Check Hook (`--pre-check`)**: A function that queries the host system to determine if the desired state is already satisfied. If this function returns success (`0`), the entire step is skipped.
-2. **Post-Check Hook (`--post-check`)**: A function that queries the host system *after* execution to verify the state was correctly applied. If it fails, the step is treated as a failed application.
+1. **Pre-Check Hook (`::pre_check`)**: A function that queries the host system to determine if the desired state is already satisfied. If this function returns success (`0`), the entire step is skipped.
+2. **If no `::pre_check` is defined**: The task runs unconditionally every time.
 
 > [!IMPORTANT]
 > A recipe should be capable of failing in the middle, having the user correct the environment, and being re-run directly. The pre-check necessity checks will automatically skip all completed steps up to the point of failure.
@@ -84,7 +102,7 @@ Users should not need to explicitly specify administrative paths or sudo hops (e
 
 #### Example: Elevated chsh execution
 ```bash
-function rsd::recipe::zsh_core::shell_apply() {
+function rsd::r::zsh_core::set_default_shell() {
     local zsh_path=$(which zsh 2>/dev/null)
     # rsd::l::target::exec_sudo transparently handles:
     #   - Local: sudo.lib askpass pipeline
@@ -97,14 +115,11 @@ function rsd::recipe::zsh_core::shell_apply() {
 
 ## 4. Fault Tolerance & Recovery Modes
 
-When a task fails during application or fails its post-check verification, the engine resolves the failure based on its configured recovery strategy:
+When a task fails during application, the engine resolves the failure based on the recovery mode passed to `rsd::r::register_task`:
 
 ```bash
-rsd::recipe::register_task \
-    --name "my_step" \
-    --apply "my_payload" \
-    --recovery "rollback" \
-    --rollback "my_cleanup"
+# Signature: rsd::r::register_task <task_name> [recovery_mode]
+rsd::r::register_task "my_step" "rollback"
 ```
 
 ### A. Recovery: `forward` (Default)
@@ -113,7 +128,8 @@ rsd::recipe::register_task \
 
 ### B. Recovery: `rollback`
 - **Behavior**: Halts execution immediately and triggers **Backward Recovery**.
-- **Rollback Cascade**: Pops all successfully completed tasks from `RSD_COMPLETED_STACK` in **exact reverse chronological order** (last in, first out) and executes their corresponding `--rollback` cleanup payloads.
+- **Rollback Cascade**: Pops all successfully completed tasks from `RSD_COMPLETED_STACK` in **exact reverse chronological order** (last in, first out) and executes their corresponding `::rollback` functions.
+- **Requirement**: A `::rollback` function must exist for the task. `rsd::r::register_task` validates this at registration time.
 
 ### C. Recovery: `ignore` (Soft-Failure)
 - **Behavior**: Prints a warning diagnostic but continues execution of the next step.
@@ -144,37 +160,41 @@ fi
 ```
 
 ### Step 2: Declare the Registration Hook
-Every recipe file must implement `rsd::recipe::<basename>::register` to define its steps.
-Use `rsd::l::target::` helpers for inline hooks and `rsd::l::recipe::install_pkg` for package installation:
+Every recipe file must implement `rsd::r::<basename>::register` to register its tasks.
 
 ```bash
-# @param none
-# @return none
-function rsd::recipe::my_app::register() {
-    # Simple tasks can be fully declarative using target:: helpers
-    rsd::recipe::register_task \
-        --name "my_app::install_packages" \
-        --pre-check "rsd::l::target::has_bin my-app" \
-        --apply "rsd::l::recipe::install_pkg my-app" \
-        --recovery "forward"
-
-    # Complex tasks use custom callbacks
-    rsd::recipe::register_task \
-        --name "my_app::configure_settings" \
-        --pre-check "rsd::l::target::file_exists \$HOME/.myapp.conf" \
-        --apply "rsd::recipe::my_app::config_apply" \
-        --recovery "rollback" \
-        --rollback "rsd::l::target::exec rm -f \$HOME/.myapp.conf"
+function rsd::r::my_app::register() {
+    rsd::r::register_task "my_app::install_packages"
+    rsd::r::register_task "my_app::configure_settings" "rollback"
 }
 ```
 
-### Step 3: Implement Custom Hook Callbacks
-Callbacks are only needed for complex logic that cannot be expressed as a single `rsd::l::target::` inline call. Use `rsd::l::target::exec` to route commands transparently:
+### Step 3: Implement Task Functions
+Each registered task name must have a corresponding function. Optional lifecycle hooks use suffixed function names:
 
 ```bash
-# Config apply: uses target::exec for transparent local/remote routing
-function rsd::recipe::my_app::config_apply() {
+# --- Task: install_packages ---
+
+function rsd::r::my_app::install_packages::pre_check() {
+    rsd::l::target::has_bin my-app
+}
+
+function rsd::r::my_app::install_packages() {
+    rsd::l::r::install_pkg my-app
+}
+
+# --- Task: configure_settings ---
+
+function rsd::r::my_app::configure_settings::pre_check() {
+    rsd::l::target::file_exists "\$HOME/.myapp.conf"
+}
+
+function rsd::r::my_app::configure_settings() {
     rsd::l::target::exec sh -c "echo 'theme=dark' > \$HOME/.myapp.conf"
+}
+
+function rsd::r::my_app::configure_settings::rollback() {
+    rsd::l::target::exec rm -f "\$HOME/.myapp.conf"
 }
 ```
 
@@ -182,18 +202,18 @@ function rsd::recipe::my_app::config_apply() {
 
 ## 6. Recipe Dependencies & Composition
 
-To build complex systems, the framework allows recipes to compose or depend on other upstream recipes. This is managed sequentially through `rsd::recipe::include_recipe`.
+To build complex systems, the framework allows recipes to compose or depend on other upstream recipes. This is managed sequentially through `rsd::r::include`.
 
 ### A. Composing Master Recipes
 A master recipe aggregates multiple sub-recipes sequentially to compile a single unified stack:
 
 ```bash
-function rsd::recipe::my_dev_stack::register() {
+function rsd::r::my_dev_stack::register() {
     # Include base shell utilities
-    rsd::recipe::include_recipe "zsh_core"
+    rsd::r::include "zsh/core"
 
     # Include custom application configurations
-    rsd::recipe::include_recipe "my_app"
+    rsd::r::include "my_app"
 }
 ```
 
@@ -201,20 +221,17 @@ function rsd::recipe::my_dev_stack::register() {
 If a sub-recipe depends on upstream configurations to function correctly (for example, `zsh_theme` or `zsh_plugins` requiring Zsh and Oh My Zsh base to be present), it must explicitly declare that dependency as a prerequisite at the very beginning of its registration hook:
 
 ```bash
-function rsd::recipe::zsh_theme::register() {
+function rsd::r::zsh_theme::register() {
     # Prerequisite: Core Zsh and Oh My Zsh base must be satisfied first
-    rsd::recipe::include_recipe "zsh_core"
+    rsd::r::include "zsh/core"
 
     # Register theme configuration tasks
-    rsd::recipe::register_task \
-        --name "zsh_theme::clone_p10k" \
-        --pre-check "rsd::recipe::zsh_theme::theme_pre" \
-        --apply "rsd::recipe::zsh_theme::theme_apply" \
-        --recovery "forward"
+    rsd::r::register_task "zsh_theme::clone_p10k"
+    rsd::r::register_task "zsh_theme::configure_p10k" "rollback"
     # ...
 }
 ```
-If a user runs the `zsh_theme` recipe directly (`./rsd recipe run zsh_theme`), the engine automatically detects and satisfy the prerequisite tasks from `zsh_core` first.
+If a user runs the `zsh_theme` recipe directly (`./rsd recipe run zsh/theme`), the engine automatically detects and satisfies the prerequisite tasks from `zsh_core` first.
 
 ### C. Double-Inclusion Protection
 To prevent task duplication when multiple sub-recipes declare the same prerequisite, the compiler implements a dynamic **Double-Inclusion Guard** using the global `RSD_INCLUDED_RECIPES` registry. 
@@ -225,38 +242,50 @@ Each recipe name is recorded in the registry upon its first compile invocation:
 - This ensures that in master compositions like `zsh_dev_setup` (which includes `zsh_core` and then includes multiple sub-recipes that also depend on `zsh_core`), the `zsh_core` tasks are registered **exactly once**.
 
 ### D. Necessity Check Efficiency
-Because every task in RSD defines a `--pre-check` necessity guard, resolving dependencies has zero performance penalty if they are already satisfied on the host system. The engine runs pre-checks, finds them satisfied, skips them instantly (taking less than a millisecond), and proceeds straight to the target payload.
+Because every task in RSD can define a `::pre_check` necessity guard, resolving dependencies has zero performance penalty if they are already satisfied on the host system. The engine runs pre-checks, finds them satisfied, skips them instantly (taking less than a millisecond), and proceeds straight to the target payload.
 
 ---
 
-## 7. Testing & CLI Usage
+## 7. Namespace Reference
+
+The recipe subsystem uses the `rsd::r::` namespace (shortened from the historical `rsd::recipe::`):
+
+| Namespace | Purpose | Example |
+| :--- | :--- | :--- |
+| `rsd::r::` | Public recipe API + task functions | `rsd::r::register_task`, `rsd::r::zsh_core::install_zsh` |
+| `rsd::l::r::` | Internal engine + helpers | `rsd::l::r::execute_engine`, `rsd::l::r::install_pkg` |
+| `rsd::c::recipe::` | CLI command entry points | `rsd::c::recipe::run`, `rsd::c::recipe::help` |
+
+---
+
+## 8. Testing & CLI Usage
 
 ### Simulating (Dry-Run)
 Always run dry-runs first to review planned executions:
 
 ```bash
 # Locally
-./rsd recipe run zsh_dev_setup --dry-run --verbose
+./rsd recipe run zsh/dev_setup --dry-run --verbose
 
 # Remotely targeting an alias
-rsd @target recipe run zsh_dev_setup --dry-run --verbose
+rsd @target recipe run zsh/dev_setup --dry-run --verbose
 ```
 
 ### Writing Automated Tests
 Write tests using the BATS framework under `tests/unit/` to assert task registration or recovery behavior:
 
 ```bash
-@test "rsd::l::recipe::execute_engine respects skips" {
+@test "rsd::l::r::execute_engine respects skips" {
     RSD_REGISTERED_TASKS=()
-    task_pre() { return 0; } # Already satisfied
-    task_apply() { echo "EXEC"; return 0; }
-    
-    rsd::recipe::register_task \
-        --name "test_task" \
-        --pre-check "task_pre" \
-        --apply "task_apply"
+    declare -g -A RSD_TASKS_RECOVERY
 
-    run rsd::l::recipe::execute_engine 0 0
+    # Declare task functions
+    function rsd::r::test_task::pre_check() { return 0; }  # Already satisfied
+    function rsd::r::test_task() { echo "EXEC"; return 0; }
+
+    rsd::r::register_task "test_task"
+
+    run rsd::l::r::execute_engine 0 0
     [ "$status" -eq 0 ]
     [[ "$output" == *"Task 'test_task' is already satisfied."* ]]
     [[ "$output" != *"EXEC"* ]]
@@ -265,7 +294,7 @@ Write tests using the BATS framework under `tests/unit/` to assert task registra
 
 ---
 
-## 8. Security: Download and Execute
+## 9. Security: Download and Execute
 
 Recipes that download and execute remote scripts must follow strict security protocols to prevent three classes of vulnerability:
 
@@ -295,9 +324,11 @@ Use `rsd::l::target::fetch_and_exec` for all download-and-execute workflows:
 
 ```bash
 # SECURE: Unpredictable temp path + restrictive perms + guaranteed cleanup
-rsd::l::target::fetch_and_exec \
-    "https://example.com/install.sh" \
-    "sh" "--unattended"
+function rsd::r::zsh_core::install_oh_my_zsh() {
+    rsd::l::target::fetch_and_exec \
+        "https://example.com/install.sh" \
+        "sh" "--unattended"
+}
 ```
 
 This function enforces:

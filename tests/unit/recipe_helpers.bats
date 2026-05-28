@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 
-# Tests for the eval_hook dispatcher and taint guard (recipe.lib v0.3.0)
-# Tests for recipe-specific helpers (install_pkg)
+# Tests for recipe-specific helpers (install_pkg, find_recursive)
+# and convention-based engine dispatch integration
 # @see lib/recipe.lib
 
 setup() {
@@ -25,145 +25,121 @@ setup() {
 }
 
 # ==============================================================================
-# eval_hook dispatcher — legacy compatibility
+# Convention-based dispatch — function probing
 # ==============================================================================
 
-@test "rsd::l::recipe::eval_hook dispatches a bare function name (legacy compat)" {
-    my_hook() { echo "LEGACY_OK"; return 0; }
-    run rsd::l::recipe::eval_hook "my_hook"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"LEGACY_OK"* ]]
-}
-
-@test "rsd::l::recipe::eval_hook dispatches a function with inline arguments" {
-    my_param_hook() { echo "ARG=$1"; return 0; }
-    run rsd::l::recipe::eval_hook "my_param_hook hello_world"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"ARG=hello_world"* ]]
-}
-
-@test "rsd::l::recipe::eval_hook propagates non-zero exit codes" {
-    failing_hook() { return 42; }
-    run rsd::l::recipe::eval_hook "failing_hook"
-    [ "$status" -eq 42 ]
-}
-
-# ==============================================================================
-# eval_hook — taint guard: metacharacter rejection
-# ==============================================================================
-
-@test "eval_hook TAINT: rejects semicolon injection" {
-    safe_func() { return 0; }
-    run rsd::l::recipe::eval_hook "safe_func; echo INJECTED"
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"TAINT"* ]]
-    [[ "$output" == *"forbidden shell metacharacters"* ]]
-}
-
-@test "eval_hook TAINT: rejects pipe injection" {
-    safe_func() { return 0; }
-    run rsd::l::recipe::eval_hook "safe_func | malicious_cmd"
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"TAINT"* ]]
-}
-
-@test "eval_hook TAINT: rejects backtick command substitution" {
-    safe_func() { return 0; }
-    run rsd::l::recipe::eval_hook 'safe_func `whoami`'
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"TAINT"* ]]
-}
-
-@test "eval_hook TAINT: rejects dollar-paren command substitution" {
-    safe_func() { return 0; }
-    run rsd::l::recipe::eval_hook 'safe_func $(whoami)'
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"TAINT"* ]]
-}
-
-# ==============================================================================
-# eval_hook — taint guard: function existence validation
-# ==============================================================================
-
-@test "eval_hook TAINT: rejects non-existent function names" {
-    run rsd::l::recipe::eval_hook "__rsd_nonexistent_function_xyz__"
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"TAINT"* ]]
-    [[ "$output" == *"not a declared function"* ]]
-}
-
-@test "eval_hook TAINT: catches typos in function names" {
-    run rsd::l::recipe::eval_hook "rsd::l::target::haz_bin bash"
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"TAINT"* ]]
-}
-
-# ==============================================================================
-# eval_hook — legitimate usage passes taint guard
-# ==============================================================================
-
-@test "eval_hook TAINT: allows dollar-sign variable references in arguments" {
-    test_func() { echo "OK"; return 0; }
-    run rsd::l::recipe::eval_hook 'test_func $HOME'
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"OK"* ]]
-}
-
-@test "eval_hook TAINT: allows target library functions with arguments" {
-    run rsd::l::recipe::eval_hook "rsd::l::target::has_bin bash"
-    [ "$status" -eq 0 ]
-}
-
-# ==============================================================================
-# execute_engine integration with inline-argument hooks and taint guard
-# ==============================================================================
-
-@test "execute_engine works with inline-argument hooks through taint guard" {
+@test "engine dispatches task function directly (no eval)" {
     RSD_REGISTERED_TASKS=()
-    declare -g -A RSD_TASKS_PRE
-    declare -g -A RSD_TASKS_APPLY
-    declare -g -A RSD_TASKS_POST
     declare -g -A RSD_TASKS_RECOVERY
 
-    check_with_arg() { [[ "$1" == "yes" ]]; }
-    apply_with_arg() { echo "APPLIED_$1"; return 0; }
+    function rsd::r::direct_dispatch() { echo "DIRECT_OK"; return 0; }
+    rsd::r::register_task "direct_dispatch"
 
-    rsd::recipe::register_task \
-        --name "test_inline_skip" \
-        --pre-check "check_with_arg yes" \
-        --apply "apply_with_arg skipped"
-
-    rsd::recipe::register_task \
-        --name "test_inline_run" \
-        --pre-check "check_with_arg no" \
-        --apply "apply_with_arg executed"
-
-    run rsd::l::recipe::execute_engine 0 0
+    run rsd::l::r::execute_engine 0 0
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Task 'test_inline_skip' is already satisfied."* ]]
-    [[ "$output" == *"APPLIED_executed"* ]]
-    [[ "$output" != *"APPLIED_skipped"* ]]
+    [[ "$output" == *"DIRECT_OK"* ]]
 }
 
-@test "full engine cycle using target::has_bin pre-check skips satisfied tasks" {
+@test "engine discovers and calls pre_check by convention suffix" {
     RSD_REGISTERED_TASKS=()
-    declare -g -A RSD_TASKS_PRE
-    declare -g -A RSD_TASKS_APPLY
-    declare -g -A RSD_TASKS_POST
     declare -g -A RSD_TASKS_RECOVERY
 
-    dummy_apply() { echo "SHOULD_NOT_RUN"; return 0; }
+    function rsd::r::probe_test::pre_check() { return 0; }  # Already satisfied
+    function rsd::r::probe_test() { echo "SHOULD_NOT_RUN"; return 0; }
+    rsd::r::register_task "probe_test"
 
-    rsd::recipe::register_task \
-        --name "test_has_bin_bash" \
-        --pre-check "rsd::l::target::has_bin bash" \
-        --apply "dummy_apply" \
-        --recovery "forward"
+    run rsd::l::r::execute_engine 0 0
 
-    run rsd::l::recipe::execute_engine 0 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Task 'probe_test' is already satisfied."* ]]
+    [[ "$output" != *"SHOULD_NOT_RUN"* ]]
+}
+
+@test "engine skips pre_check gracefully when function does not exist" {
+    RSD_REGISTERED_TASKS=()
+    declare -g -A RSD_TASKS_RECOVERY
+
+    # No ::pre_check defined — task should always run
+    function rsd::r::no_precheck() { echo "ALWAYS_RUNS"; return 0; }
+    rsd::r::register_task "no_precheck"
+
+    run rsd::l::r::execute_engine 0 0
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ALWAYS_RUNS"* ]]
+}
+
+@test "engine calls task with arguments passed through function body (no quoting issues)" {
+    RSD_REGISTERED_TASKS=()
+    declare -g -A RSD_TASKS_RECOVERY
+
+    function rsd::r::arg_test() {
+        local path="${HOME}/.config/test"
+        echo "PATH=$path"
+        return 0
+    }
+    rsd::r::register_task "arg_test"
+
+    run rsd::l::r::execute_engine 0 0
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PATH=${HOME}/.config/test"* ]]
+}
+
+# ==============================================================================
+# Engine integration with inline pre-checks via convention
+# ==============================================================================
+
+@test "execute_engine with target::has_bin pre_check skips satisfied tasks" {
+    RSD_REGISTERED_TASKS=()
+    declare -g -A RSD_TASKS_RECOVERY
+
+    function rsd::r::test_has_bin_bash::pre_check() {
+        rsd::l::target::has_bin bash
+    }
+    function rsd::r::test_has_bin_bash() { echo "SHOULD_NOT_RUN"; return 0; }
+    rsd::r::register_task "test_has_bin_bash"
+
+    run rsd::l::r::execute_engine 0 0
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"Task 'test_has_bin_bash' is already satisfied."* ]]
     [[ "$output" != *"SHOULD_NOT_RUN"* ]]
+}
+
+@test "execute_engine runs apply when pre_check fails" {
+    RSD_REGISTERED_TASKS=()
+    declare -g -A RSD_TASKS_RECOVERY
+
+    function rsd::r::test_fails_pre::pre_check() {
+        rsd::l::target::has_bin __rsd_nonexistent_binary_xyz__
+    }
+    function rsd::r::test_fails_pre() { echo "APPLIED_OK"; return 0; }
+    rsd::r::register_task "test_fails_pre"
+
+    run rsd::l::r::execute_engine 0 0
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"APPLIED_OK"* ]]
+}
+
+# ==============================================================================
+# find_recursive helper
+# ==============================================================================
+
+@test "rsd::l::r::find_recursive discovers nested recipe files" {
+    local mock_dir
+    mock_dir=$(mktemp -d -t rsd-find-test.XXXXXX)
+    mkdir -p "${mock_dir}/sub"
+    touch "${mock_dir}/top_level.recipe"
+    touch "${mock_dir}/sub/nested.recipe"
+
+    run rsd::l::r::find_recursive "$mock_dir" ""
+
+    rm -rf "$mock_dir"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"top_level"* ]]
+    [[ "$output" == *"sub/nested"* ]]
 }

@@ -34,13 +34,9 @@ function rsd::c::recipe::help() {
     if [[ -n "$recipe" ]]; then
         # Compile the recipe tasks recursively into the flat stack
         RSD_REGISTERED_TASKS=()
-        declare -g -A RSD_TASKS_PRE
-        declare -g -A RSD_TASKS_APPLY
-        declare -g -A RSD_TASKS_POST
         declare -g -A RSD_TASKS_RECOVERY
-        declare -g -A RSD_TASKS_ROLLBACK
 
-        if ! rsd::recipe::include_recipe "$recipe" &>/dev/null; then
+        if ! rsd::r::include "$recipe" &>/dev/null; then
             rsd::warn "Error: Recipe '$recipe' not found or could not be loaded."
             return 5
         fi
@@ -48,23 +44,21 @@ function rsd::c::recipe::help() {
         rsd::warn "=== Recipe Overview: $recipe ==="
         echo -e "This recipe compiles into ${#RSD_REGISTERED_TASKS[@]} sequential tasks:\n"
 
-        local name pre apply recovery rollback
+        local name func recovery
         for name in "${RSD_REGISTERED_TASKS[@]}"; do
-            pre="${RSD_TASKS_PRE["$name"]}"
-            apply="${RSD_TASKS_APPLY["$name"]}"
+            func="rsd::r::${name}"
             recovery="${RSD_TASKS_RECOVERY["$name"]}"
-            rollback="${RSD_TASKS_ROLLBACK["$name"]}"
 
             echo -e "  \033[1m$name\033[0m"
-            echo -e "    Action Payload:  $apply"
-            if [[ -n "$pre" ]]; then
-                echo -e "    Necessity Check: $pre"
+            echo -e "    Apply Function:  $func"
+            if bash::is_function "${func}::pre_check"; then
+                echo -e "    Necessity Check: ${func}::pre_check"
             else
                 echo -e "    Necessity Check: (None - Always runs)"
             fi
             echo -e "    On Failure:      $recovery"
-            if [[ "$recovery" == "rollback" && -n "$rollback" ]]; then
-                echo -e "    Rollback Payload: $rollback"
+            if [[ "$recovery" == "rollback" ]] && bash::is_function "${func}::rollback"; then
+                echo -e "    Rollback Function: ${func}::rollback"
             fi
             echo -e ""
         done
@@ -103,7 +97,7 @@ function rsd::c::recipe::list() {
                     seen_recipes[$recipe_relative]=1
                     echo -e "  $recipe_relative"
                 fi
-            done < <(rsd::l::recipe::find_recursive "$recipe_dir" "")
+            done < <(rsd::l::r::find_recursive "$recipe_dir" "")
         fi
     done
     return 0
@@ -145,12 +139,12 @@ function rsd::c::recipe::run() {
     fi
 
     # 1. Compile the recipe tasks recursively into the flat stack
-    if ! rsd::recipe::include_recipe "$recipe"; then
+    if ! rsd::r::include "$recipe"; then
         rsd::warn "Error: Failed to load recipe '$recipe'."
         return 5
     fi
 
     # 2. Execute compiled tasks
-    rsd::l::recipe::execute_engine "$dry_run" "$verbose"
+    rsd::l::r::execute_engine "$dry_run" "$verbose"
     return $?
 }

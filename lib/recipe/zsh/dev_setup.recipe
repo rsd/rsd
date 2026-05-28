@@ -9,16 +9,16 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
     exit 12
 fi
 
-function rsd::recipe::zsh_dev_setup::register() {
+function rsd::r::zsh_dev_setup::register() {
     # 1. Include core Zsh setup
-    rsd::recipe::include_recipe "zsh/core"
+    rsd::r::include "zsh/core"
 
     # 2. Include P10k theme configuration
-    rsd::recipe::include_recipe "zsh/theme"
+    rsd::r::include "zsh/theme"
 
     # 3. Include plugins and custom settings block
-    rsd::recipe::include_recipe "zsh/plugins"
+    rsd::r::include "zsh/plugins"
 
     # 4. Include companion packages and source compilers
-    rsd::recipe::include_recipe "zsh/tools"
+    rsd::r::include "zsh/tools"
 }

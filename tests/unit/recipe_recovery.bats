@@ -20,38 +20,26 @@ setup() {
     source "${BATS_TEST_DIRNAME}/../../lib/recipe.lib"
 }
 
-@test "rsd::l::recipe::handle_failure rollback executes backward recovery pops in exact reverse chronological order" {
+@test "rsd::l::r::handle_failure rollback executes backward recovery pops in exact reverse chronological order" {
     RSD_REGISTERED_TASKS=()
-    declare -g -A RSD_TASKS_PRE
-    declare -g -A RSD_TASKS_APPLY
-    declare -g -A RSD_TASKS_POST
     declare -g -A RSD_TASKS_RECOVERY
-    declare -g -A RSD_TASKS_ROLLBACK
 
-    # Task 1 (succeeds)
-    task1_apply() { return 0; }
-    task1_rollback() { echo "ROLLBACK_1"; return 0; }
-    rsd::recipe::register_task \
-        --name "task1" \
-        --apply "task1_apply" \
-        --rollback "task1_rollback"
+    # Task 1 (succeeds, has rollback)
+    function rsd::r::task1() { return 0; }
+    function rsd::r::task1::rollback() { echo "ROLLBACK_1"; return 0; }
+    rsd::r::register_task "task1" "rollback"
 
-    # Task 2 (succeeds)
-    task2_apply() { return 0; }
-    task2_rollback() { echo "ROLLBACK_2"; return 0; }
-    rsd::recipe::register_task \
-        --name "task2" \
-        --apply "task2_apply" \
-        --rollback "task2_rollback"
+    # Task 2 (succeeds, has rollback)
+    function rsd::r::task2() { return 0; }
+    function rsd::r::task2::rollback() { echo "ROLLBACK_2"; return 0; }
+    rsd::r::register_task "task2" "rollback"
 
     # Task 3 (fails, recovery=rollback)
-    task3_apply() { return 1; }
-    rsd::recipe::register_task \
-        --name "task3" \
-        --apply "task3_apply" \
-        --recovery "rollback"
+    function rsd::r::task3() { return 1; }
+    function rsd::r::task3::rollback() { return 0; }
+    rsd::r::register_task "task3" "rollback"
 
-    run rsd::l::recipe::execute_engine 0 0
+    run rsd::l::r::execute_engine 0 0
 
     [ "$status" -eq 10 ]
     
@@ -69,19 +57,14 @@ setup() {
     [[ "$output" == *"ROLLBACK_2"*"ROLLBACK_1"* ]]
 }
 
-@test "rsd::l::recipe::handle_failure forward halts execution and prints rerunnable warnings" {
+@test "rsd::l::r::handle_failure forward halts execution and prints rerunnable warnings" {
     RSD_REGISTERED_TASKS=()
-    declare -g -A RSD_TASKS_PRE
-    declare -g -A RSD_TASKS_APPLY
     declare -g -A RSD_TASKS_RECOVERY
 
-    task_apply() { return 1; }
-    rsd::recipe::register_task \
-        --name "fail_task" \
-        --apply "task_apply" \
-        --recovery "forward"
+    function rsd::r::fail_task() { return 1; }
+    rsd::r::register_task "fail_task"
 
-    run rsd::l::recipe::execute_engine 0 0
+    run rsd::l::r::execute_engine 0 0
 
     [ "$status" -eq 10 ]
     [[ "$output" == *"Recovery Mode: FORWARD."* ]]

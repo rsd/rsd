@@ -12,48 +12,26 @@ fi
 # Load dependencies
 [[ "$RSD_HOST_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/host.lib)"
 
-function rsd::recipe::zsh_tools::register() {
+function rsd::r::zsh_tools::register() {
     # Prerequisite: Zsh and Oh My Zsh base must be satisfied first
-    rsd::recipe::include_recipe "zsh/core"
+    rsd::r::include "zsh/core"
 
-    rsd::recipe::register_task \
-        --name "zsh_tools::install_companion_tools" \
-        --pre-check "rsd::recipe::zsh_tools::companion_pre" \
-        --apply "rsd::recipe::zsh_tools::companion_apply" \
-        --recovery "forward"
-
-    rsd::recipe::register_task \
-        --name "zsh_tools::install_cargo" \
-        --pre-check "rsd::l::target::has_bin cargo" \
-        --apply "rsd::l::recipe::install_pkg cargo" \
-        --recovery "forward"
-
-    rsd::recipe::register_task \
-        --name "zsh_tools::compile_eza" \
-        --pre-check "rsd::l::target::file_exists \$HOME/.cargo/bin/eza" \
-        --apply "rsd::l::target::exec cargo install eza" \
-        --recovery "forward"
-
-    rsd::recipe::register_task \
-        --name "zsh_tools::install_make" \
-        --pre-check "rsd::l::target::has_bin make" \
-        --apply "rsd::l::recipe::install_pkg make" \
-        --recovery "forward"
-
-    rsd::recipe::register_task \
-        --name "zsh_tools::compile_lesspipe" \
-        --pre-check "rsd::l::target::file_exists /usr/local/bin/lesspipe.sh" \
-        --apply "rsd::recipe::zsh_tools::lesspipe_apply" \
-        --recovery "ignore"
+    rsd::r::register_task "zsh_tools::install_companion_tools"
+    rsd::r::register_task "zsh_tools::install_cargo"
+    rsd::r::register_task "zsh_tools::compile_eza"
+    rsd::r::register_task "zsh_tools::install_make"
+    rsd::r::register_task "zsh_tools::compile_lesspipe" "ignore"
 }
 
+# --- Task: install_companion_tools ---
+
 # Companion tools pre-check (Validates key binaries exist)
-function rsd::recipe::zsh_tools::companion_pre() {
+function rsd::r::zsh_tools::install_companion_tools::pre_check() {
     rsd::l::target::has_bin chsh && rsd::l::target::has_bin chafa
 }
 
 # Companion tools installation portably across Arch / Debian
-function rsd::recipe::zsh_tools::companion_apply() {
+function rsd::r::zsh_tools::install_companion_tools() {
     source "$(rsd::get_libdir_file command/install)"
 
     local host_alias="localhost"
@@ -84,8 +62,44 @@ function rsd::recipe::zsh_tools::companion_apply() {
     fi
 }
 
+# --- Task: install_cargo ---
+
+function rsd::r::zsh_tools::install_cargo::pre_check() {
+    rsd::l::target::has_bin cargo
+}
+
+function rsd::r::zsh_tools::install_cargo() {
+    rsd::l::r::install_pkg cargo
+}
+
+# --- Task: compile_eza ---
+
+function rsd::r::zsh_tools::compile_eza::pre_check() {
+    rsd::l::target::file_exists "\$HOME/.cargo/bin/eza"
+}
+
+function rsd::r::zsh_tools::compile_eza() {
+    rsd::l::target::exec cargo install eza
+}
+
+# --- Task: install_make ---
+
+function rsd::r::zsh_tools::install_make::pre_check() {
+    rsd::l::target::has_bin make
+}
+
+function rsd::r::zsh_tools::install_make() {
+    rsd::l::r::install_pkg make
+}
+
+# --- Task: compile_lesspipe ---
+
+function rsd::r::zsh_tools::compile_lesspipe::pre_check() {
+    rsd::l::target::file_exists /usr/local/bin/lesspipe.sh
+}
+
 # Lesspipe source compile and install (Mixed User/Sudo wrapping)
-function rsd::recipe::zsh_tools::lesspipe_apply() {
+function rsd::r::zsh_tools::compile_lesspipe() {
     rsd::l::target::exec mkdir -p "\$HOME/dev"
     rsd::l::target::exec rm -rf "\$HOME/dev/lesspipe"
     rsd::l::target::git_clone "https://github.com/wofr06/lesspipe" "\$HOME/dev/lesspipe"
