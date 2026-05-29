@@ -89,7 +89,7 @@ fi
 
 function rsd::r::terminfo_alacritty::register() {
     if [[ -z "$RSD_REMOTE_TARGET" ]]; then
-        rsd::warn "Error: Terminfo provisioning is remote-only. Use: rsd @target recipe run terminfo/alacritty"
+        rsd::io::error "Terminfo provisioning is remote-only. Use: rsd @target recipe run terminfo/alacritty"
         exit 2
     fi
 
@@ -145,7 +145,7 @@ function rsd::r::terminfo_alacritty::install_entry() {
     # Phase 1: Package install attempt
     if ((try_package)) && [[ -n "$pkg" ]]; then
         if ! rsd::l::r::install_pkg "$pkg"; then
-            rsd::warn "  [INFO] Package '$pkg' not available or install failed."
+            rsd::io::info "Package '$pkg' not available or install failed."
 
             # Alpine fallback: try the full ncurses-terminfo package
             if [[ "$family" == "alpine" ]]; then
@@ -159,10 +159,10 @@ function rsd::r::terminfo_alacritty::install_entry() {
         rsd::l::target::exec infocmp alacritty-direct &>/dev/null || pkg_ok=0
 
         if ((pkg_ok)); then
-            rsd::warn "  [OK] alacritty + alacritty-direct installed via package."
+            rsd::io::ok "alacritty + alacritty-direct installed via package."
             return 0
         fi
-        rsd::warn "  [INFO] Package installed but entries incomplete. Trying tic fallback..."
+        rsd::io::info "Package installed but entries incomplete. Trying tic fallback..."
     fi
 
     # Phase 2: tic fallback for each missing entry independently

@@ -24,7 +24,7 @@ RSD_OS_LINUX_LIB_VERSION="0.1.0"
 function rsd::l::os::install_package() {
     rsd::arguments_or_usage 1 "$@"
     local package="$1"
-    rsd::warn "Error: Generic Linux has no default package manager defined. Cannot install '$package'."
+    rsd::io::error "Generic Linux has no default package manager defined. Cannot install '$package'."
     return 3
 }
 

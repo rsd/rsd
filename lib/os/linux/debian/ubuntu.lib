@@ -23,6 +23,6 @@ RSD_OS_UBUNTU_LIB_VERSION="0.1.0"
 #
 # @return int exit code.
 function rsd::l::os::set_default_editor() {
-    rsd::warn "Ubuntu specific: setting default editor to nano..."
+    rsd::io::status "Ubuntu specific: setting default editor to nano..."
     return 0
 }

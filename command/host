@@ -46,7 +46,7 @@ function rsd::c::host::identify() {
         
         local remote_output
         if ! remote_output=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "bash" "-s" <<< "$script_content" 2>/dev/null); then
-            rsd::warn "Error: Failed to identify remote host properties over transport."
+            rsd::io::error "Failed to identify remote host properties over transport."
             return 10
         fi
         echo "$remote_output"
@@ -54,7 +54,7 @@ function rsd::c::host::identify() {
     else
         declare -A props
         if ! rsd::l::host::identify props; then
-            rsd::warn "Error: Failed to identify host properties."
+            rsd::io::error "Failed to identify host properties."
             return 10
         fi
         
@@ -96,7 +96,7 @@ function rsd::c::host::save() {
         
         local remote_output
         if ! remote_output=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "bash" "-s" <<< "$script_content" 2>/dev/null); then
-            rsd::warn "Error: Failed to identify remote host properties over transport."
+            rsd::io::error "Failed to identify remote host properties over transport."
             return 10
         fi
         
@@ -110,7 +110,7 @@ function rsd::c::host::save() {
         done <<< "$remote_output"
     else
         if ! rsd::l::host::identify props; then
-            rsd::warn "Error: Failed to identify host properties."
+            rsd::io::error "Failed to identify host properties."
             return 10
         fi
     fi
@@ -131,7 +131,7 @@ function rsd::c::host::save() {
     done
     
     rsd::config::write_ini "$ini_file" "$array_name" || return 13
-    rsd::warn "Successfully saved host properties for '$alias' to '$ini_file'."
+    rsd::io::ok "Successfully saved host properties for '$alias' to '$ini_file'."
     return 0
 }
 
@@ -169,7 +169,7 @@ function rsd::c::host::show() {
     done
 
     if [[ $found -eq 0 ]]; then
-        rsd::warn "Error: No saved host properties found for '$alias'."
+        rsd::io::error "No saved host properties found for '$alias'."
         return 10
     fi
 

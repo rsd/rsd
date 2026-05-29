@@ -168,7 +168,7 @@ function rsd::l::target::file_push() {
     local dest="$2"
 
     if [[ ! -f "$src" ]]; then
-        rsd::warn "Error: Source file '$src' does not exist."
+        rsd::io::error "Source file '$src' does not exist."
         return 1
     fi
 
@@ -232,7 +232,7 @@ function rsd::l::target::mktemp() {
     bash::trim result
 
     if [[ -z "$result" ]]; then
-        rsd::warn "Error: mktemp returned an empty path."
+        rsd::io::error "mktemp returned an empty path."
         return 14
     fi
 
@@ -275,7 +275,7 @@ function rsd::l::target::fetch_and_exec() {
     # 2. Download to secure temp file
     local rc=0
     if ! rsd::l::target::exec curl -fsSL "$url" -o "$tmpfile"; then
-        rsd::warn "Error: Failed to download script from: $url"
+        rsd::io::error "Failed to download script from: $url"
         rsd::l::target::exec rm -f "$tmpfile"
         return 1
     fi

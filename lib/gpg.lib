@@ -82,22 +82,22 @@ function rsd::l::gpg::check() {
     declare -g -A _r_gpg_keys_cap
 
     if ! rsd::check_binary gpg; then
-        ((silent)) || rsd::warn "GPG is not installed. Please install it first."
+        ((silent)) || rsd::io::error "GPG is not installed. Please install it first."
         RSD_GPG_READY="no"
         return 1
     fi
 
     rsd::l::gpg::get_keys "" _r_gpg_keys
     if [[ -z $_r_gpg_keys ]]; then
-        ((silent)) || rsd::warn "No GPG keys found. Please create one first with:"
-        ((silent)) || rsd::warn "rsd gpg --create-key"
+        ((silent)) || rsd::io::warn "No GPG keys found. Please create one first with:"
+        ((silent)) || rsd::io::info "rsd gpg --create-key"
         RSD_GPG_READY="no"
         return 2
     fi
 
     rsd::l::gpg::get_keys $RSD_GPG_USER_ID _r_gpg_keys
     if [[ -z $_r_gpg_keys ]]; then
-        ((silent)) || rsd::warn "There are some gpg keys installed, but none for RSD usage. Please create one first with:"
+        ((silent)) || rsd::io::warn "There are some gpg keys installed, but none for RSD usage. Please create one first with:"
         RSD_GPG_READY="no"
         return 3
     fi
@@ -109,7 +109,7 @@ function rsd::l::gpg::check() {
         RSD_GPG_READY="yes"
         return 0
     else
-        ((silent)) || rsd::warn "Key is not capable of encryption. Please create a new key with encryption capabilities."
+        ((silent)) || rsd::io::error "Key is not capable of encryption. Please create a new key with encryption capabilities."
         RSD_GPG_READY="no"
         return 4
     fi
@@ -160,12 +160,12 @@ function rsd::l::gpg::encrypt_file() {
     local encrypted_file="$file.gpg"
 
     if [[ -e "$encrypted_file" ]]; then
-        rsd::warn "Encrypted file '$encrypted_file' already exists. Nothing to do."
+        rsd::io::info "Encrypted file '$encrypted_file' already exists. Nothing to do."
         return 1
     fi
 
     if [[ ! -e "$file" ]]; then
-        rsd::warn "File '$file' does not exist."
+        rsd::io::error "File '$file' does not exist."
         return 2
     fi
 
@@ -173,7 +173,7 @@ function rsd::l::gpg::encrypt_file() {
         rm "$file"
         return 0
     else
-        rsd::warn "Some error occurred while encrypting the file.  Check stderr."
+        rsd::io::error "Some error occurred while encrypting the file. Check stderr."
         return 3
     fi
 }
@@ -192,18 +192,18 @@ function rsd::l::gpg::decrypt_file() {
 
     local file="$1"
     if [[ "$file" != *.gpg ]]; then
-        rsd::warn "File '$file' must end with .gpg for decryption."
+        rsd::io::error "File '$file' must end with .gpg for decryption."
         return 2
     fi
     local decrypted_file="${file%.gpg}"
 
     if [[ -e "$decrypted_file" ]]; then
-        rsd::warn "Decrypted file '$decrypted_file' already exists. Nothing to do."
+        rsd::io::info "Decrypted file '$decrypted_file' already exists. Nothing to do."
         return 1
     fi
 
     if [[ ! -e "$file" ]]; then
-        rsd::warn "File '$file' does not exist."
+        rsd::io::error "File '$file' does not exist."
         return 2
     fi
 
@@ -211,7 +211,7 @@ function rsd::l::gpg::decrypt_file() {
         rm "$file"
         return 0
     else
-        rsd::warn "Some error occurred while decrypting the file.  Check stderr."
+        rsd::io::error "Some error occurred while decrypting the file. Check stderr."
         return 3
     fi
 }
@@ -225,7 +225,7 @@ function rsd::l::gpg::validate_agent_or_fail() {
 
     if ! gpg-connect-agent /bye &>/dev/null; then
         if ! gpgconf --launch gpg-agent &>/dev/null; then
-            rsd::warn "Critical: gpg-agent daemon is unresponsive or failed to launch."
+            rsd::io::error "gpg-agent daemon is unresponsive or failed to launch."
             return 3
         fi
     fi

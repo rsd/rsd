@@ -91,7 +91,7 @@ fi
 
 function rsd::r::terminfo_kitty::register() {
     if [[ -z "$RSD_REMOTE_TARGET" ]]; then
-        rsd::warn "Error: Terminfo provisioning is remote-only. Use: rsd @target recipe run terminfo/kitty"
+        rsd::io::error "Terminfo provisioning is remote-only. Use: rsd @target recipe run terminfo/kitty"
         exit 2
     fi
 
@@ -151,7 +151,7 @@ function rsd::r::terminfo_kitty::install_entry() {
     # Phase 1: Package install attempt
     if ((try_package)) && [[ -n "$pkg" ]]; then
         if ! rsd::l::r::install_pkg "$pkg"; then
-            rsd::warn "  [INFO] Package '$pkg' not available. Trying ncurses-terminfo-base..."
+            rsd::io::info "Package '$pkg' not available. Trying ncurses-terminfo-base..."
 
             # Alpine fallback: ncurses-terminfo-base may carry xterm-kitty
             if [[ "$family" == "alpine" ]]; then
@@ -160,10 +160,10 @@ function rsd::r::terminfo_kitty::install_entry() {
         fi
 
         if rsd::l::target::exec infocmp xterm-kitty &>/dev/null; then
-            rsd::warn "  [OK] xterm-kitty installed via package."
+            rsd::io::ok "xterm-kitty installed via package."
             return 0
         fi
-        rsd::warn "  [INFO] Package installed but xterm-kitty not found. Trying tic fallback..."
+        rsd::io::info "Package installed but xterm-kitty not found. Trying tic fallback..."
     fi
 
     # Phase 2: tic fallback (local infocmp → remote tic)

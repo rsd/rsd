@@ -60,11 +60,11 @@ function rsd::c::recipe::help() {
         declare -g -A RSD_TASKS_RECOVERY
 
         if ! rsd::r::include "$recipe" &>/dev/null; then
-            rsd::warn "Error: Recipe '$recipe' not found or could not be loaded."
+            rsd::io::error "Recipe '$recipe' not found or could not be loaded."
             return 5
         fi
 
-        rsd::warn "=== Recipe Overview: $recipe ==="
+        rsd::io::status "=== Recipe Overview: $recipe ==="
         echo -e "This recipe compiles into ${#RSD_REGISTERED_TASKS[@]} sequential tasks:\n"
 
         local name func recovery
@@ -121,7 +121,7 @@ function rsd::c::recipe::help() {
 # List all available recipes in the framework search paths
 # @return int 0
 function rsd::c::recipe::list() {
-    rsd::warn "=== Available Recipes ==="
+    rsd::io::status "=== Available Recipes ==="
     
     local libdir recipe_relative
     local -A seen_recipes
@@ -170,16 +170,16 @@ function rsd::c::recipe::run() {
         verbose=1
     fi
 
-    rsd::warn "Initializing Recipe: $recipe"
+    rsd::io::status "Initializing Recipe: $recipe"
     if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        rsd::warn "Target Host: $RSD_REMOTE_TARGET"
+        rsd::io::info "Target Host: $RSD_REMOTE_TARGET"
     else
-        rsd::warn "Target Host: localhost"
+        rsd::io::info "Target Host: localhost"
     fi
 
     # 1. Compile the recipe tasks recursively into the flat stack
     if ! rsd::r::include "$recipe"; then
-        rsd::warn "Error: Failed to load recipe '$recipe'."
+        rsd::io::error "Failed to load recipe '$recipe'."
         return 5
     fi
 

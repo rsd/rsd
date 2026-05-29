@@ -71,7 +71,7 @@ function rsd::c::install::command() {
     if [[ "$host_alias" == "localhost" ]]; then
         declare -A local_props
         if ! rsd::l::host::identify local_props; then
-            rsd::warn "Error: Failed to identify local host properties."
+            rsd::io::error "Failed to identify local host properties."
             return 10
         fi
         os="${local_props[os]}"
@@ -88,7 +88,7 @@ function rsd::c::install::command() {
         
         # Self-healing: if remote target is not configured yet, run dynamic remote discovery
         if [[ -z "$os" ]]; then
-            rsd::warn "Warning: Target host '$host_alias' is not configured. Running zero-dependency discovery..."
+            rsd::io::info "Target host '$host_alias' is not configured. Running zero-dependency discovery..."
             local script_content
             rsd::l::host::generate_standalone_script script_content
             source "$(rsd::get_libdir_file lib/remote.lib)"
@@ -108,7 +108,7 @@ function rsd::c::install::command() {
                     fi
                 done <<< "$remote_output"
             else
-                rsd::warn "Error: Failed to auto-discover remote host properties."
+                rsd::io::error "Failed to auto-discover remote host properties."
                 return 10
             fi
         fi
@@ -116,7 +116,7 @@ function rsd::c::install::command() {
     
     # 1. Custom Command Override: check if command/<package> exists for custom pre/post setup routines
     if rsd::check_command "$package" &>/dev/null; then
-        rsd::warn "Executing custom installer module for '$package'..."
+        rsd::io::status "Executing custom installer module for '$package'..."
         local cmd_src
         cmd_src=$(rsd::load_command_file "$package")
         source "$cmd_src"
@@ -142,7 +142,7 @@ function rsd::c::install::command() {
     done
     
     if [[ $loaded -eq 0 ]]; then
-        rsd::warn "Error: No suitable OS library found for target platform."
+        rsd::io::error "No suitable OS library found for target platform."
         return 5
     fi
     
@@ -172,7 +172,7 @@ function rsd::c::install::command() {
                 rsd::debug "Pre-provisioning sudo credential to remote worker (source: $_pre_source)" 5
             fi
 
-            rsd::warn "Delegating package installation to remote RSD..."
+            rsd::io::status "Delegating package installation to remote RSD..."
             rsd::l::remote::execute "$RSD_REMOTE_TARGET" "${inject_env[@]}" "$rsd_bin" "--delegated" "install" "$package" "${remote_opts[@]}"
             local _rc=$?
 
@@ -200,7 +200,7 @@ function rsd::c::install::command() {
                 apk)     install_cmd=("apk" "add" "$package")
                          target_spec="${RSD_REMOTE_TARGET},sudo://root" ;;
                 brew)    install_cmd=("brew" "install" "$package") ;;
-                *)       rsd::warn "Error: Unrecognized package manager '$pkg_manager' for raw remote execution."
+                *)       rsd::io::error "Unrecognized package manager '$pkg_manager' for raw remote execution."
                          return 3 ;;
             esac
             
@@ -213,7 +213,7 @@ function rsd::c::install::command() {
                 return 0
             fi
             
-            rsd::warn "Executing raw package manager remotely: ${install_cmd[*]}"
+            rsd::io::status "Executing raw package manager remotely: ${install_cmd[*]}"
             rsd::l::remote::execute "$target_spec" "${install_cmd[@]}"
             return $?
         fi

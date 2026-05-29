@@ -23,6 +23,6 @@ RSD_OS_UBUNTU_2204_LIB_VERSION="0.1.0"
 #
 # @return int exit code.
 function rsd::l::os::set_default_editor() {
-    rsd::warn "Ubuntu 22.04 specific: setting default editor to vim-tiny..."
+    rsd::io::status "Ubuntu 22.04 specific: setting default editor to vim-tiny..."
     return 0
 }

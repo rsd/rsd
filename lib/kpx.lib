@@ -65,9 +65,9 @@ function rsd::l::kpx::check() {
         return 0
     fi
     if ((! silent)); then
-        rsd::warn "$RSD_KPX_BIN is not installed or not in the PATH."
-        rsd::warn "Please install it and try again."
-        rsd::warn "Refer to the KPX.md for further instructions."
+        rsd::io::error "$RSD_KPX_BIN is not installed or not in the PATH."
+        rsd::io::info "Please install it and try again."
+        rsd::io::info "Refer to the KPX.md for further instructions."
     fi
     return 1
 }
@@ -81,8 +81,8 @@ function rsd::l::kpx::check() {
 function rsd::l::kpx::init() {
     # 1. Pre-flight check: Verify GPG Key availability (Protocol D)
     if ! gpg --list-secret-keys "$RSD_GPG_USER_ID" &>/dev/null; then
-        rsd::warn "Critical: No GPG secret key found matching User ID: '$RSD_GPG_USER_ID'"
-        rsd::warn "Please generate a GPG key first with 'rsd gpg create-key' or set 'RSD_GPG_USER_ID' in your config."
+        rsd::io::error "No GPG secret key found matching User ID: '$RSD_GPG_USER_ID'"
+        rsd::io::info "Please generate a GPG key first with 'rsd gpg create-key' or set 'RSD_GPG_USER_ID' in your config."
         return 10
     fi
 
@@ -97,14 +97,14 @@ function rsd::l::kpx::init() {
     config_dir="$(rsd::l::kpx::vault_dir)"
     if [[ ! -d "$config_dir" ]]; then
         mkdir -p "$config_dir" || {
-            rsd::warn "Failed to create config directory '$config_dir'."
+            rsd::io::error "Failed to create config directory '$config_dir'."
             return 13
         }
     fi
 
     local temp_dir
     temp_dir=$(mktemp -d "$config_dir/tmp.init.XXXXXX") || {
-        rsd::warn "Failed to create temporary directory for initialization."
+        rsd::io::error "Failed to create temporary directory for initialization."
         return 14
     }
     
@@ -121,17 +121,17 @@ function rsd::l::kpx::init() {
 
     # 5. Generate encrypted master key and KeePass database in the temp folder
     if ! echo "$master_secret" | gpg --encrypt --batch --recipient "$RSD_GPG_USER_ID" --output "$temp_dir/vault.key.gpg" 2>/dev/null; then
-        rsd::warn "Failed to encrypt master secret using GPG."
+        rsd::io::error "Failed to encrypt master secret using GPG."
         return 10
     fi
 
     if ! echo "$recovery_token" | gpg --encrypt --batch --recipient "$RSD_GPG_USER_ID" --output "$temp_dir/recovery.key.gpg" 2>/dev/null; then
-        rsd::warn "Failed to encrypt recovery token using GPG."
+        rsd::io::error "Failed to encrypt recovery token using GPG."
         return 10
     fi
     
     if ! printf "%s\n%s\n" "$master_secret" "$master_secret" | keepassxc-cli db-create -p "$temp_dir/vault.kdbx" &>/dev/null; then
-        rsd::warn "Failed to create KeePass database."
+        rsd::io::error "Failed to create KeePass database."
         return 10
     fi
 
@@ -140,8 +140,8 @@ function rsd::l::kpx::init() {
     # promote the empty files into the config directory — they would be unfixable
     # without a full re-initialization.
     if [[ ! -s "$temp_dir/vault.key.gpg" || ! -s "$temp_dir/vault.kdbx" ]]; then
-        rsd::warn "Critical: Generated vault artifacts are empty. GPG or keepassxc-cli failed silently."
-        rsd::warn "Check that '$RSD_GPG_USER_ID' resolves to a valid GPG key with encryption capability."
+        rsd::io::error "Generated vault artifacts are empty. GPG or keepassxc-cli failed silently."
+        rsd::io::info "Check that '$RSD_GPG_USER_ID' resolves to a valid GPG key with encryption capability."
         return 10
     fi
 
@@ -151,17 +151,14 @@ function rsd::l::kpx::init() {
     mv "$temp_dir/vault.kdbx" "$config_dir/vault.kdbx" || return 13
     
     # 7. One-time recovery key output display (Protocol A)
-    rsd::warn "=========================================================="
-    rsd::warn "             KEEPASS VAULT INITIALIZED SUCCESSFULLY        "
-    rsd::warn "=========================================================="
-    rsd::warn "  CRITICAL: Write down your ONE-TIME backup recovery token. "
-    rsd::warn "  If your primary GPG key is lost, this token can restore "
-    rsd::warn "  access to your KeePass database."
-    rsd::warn ""
-    rsd::warn "  RECOVERY TOKEN: $recovery_token"
-    rsd::warn ""
-    rsd::warn "  Store this token in a physical vault or secure offline medium."
-    rsd::warn "=========================================================="
+    rsd::io::banner "KEEPASS VAULT INITIALIZED SUCCESSFULLY"
+    rsd::io::warn "Write down your ONE-TIME backup recovery token."
+    rsd::io::info "If your primary GPG key is lost, this token can restore"
+    rsd::io::info "access to your KeePass database."
+    rsd::io::blank
+    rsd::io::info "RECOVERY TOKEN: $recovery_token"
+    rsd::io::blank
+    rsd::io::info "Store this token in a physical vault or secure offline medium."
 
     # Remove temporary directory and unset variables (handled by trap on exit)
     return 0
@@ -187,13 +184,13 @@ function rsd::l::kpx::get_password() {
     local vault_db="$config_dir/vault.kdbx"
 
     if [[ ! -f "$vault_key" || ! -f "$vault_db" ]]; then
-        rsd::warn "KeePass vault has not been initialized. Please run 'rsd kpx init' first."
+        rsd::io::error "KeePass vault has not been initialized. Please run 'rsd kpx init' first."
         return 1
     fi
 
     # 1a. Fail fast if vault key is empty (corrupted init)
     if [[ ! -s "$vault_key" ]]; then
-        rsd::warn "Vault key file is empty (corrupted). Please re-initialize: rm ~/.config/rsd/vault.* && rsd kpx init"
+        rsd::io::error "Vault key file is empty (corrupted). Please re-initialize: rm ~/.config/rsd/vault.* && rsd kpx init"
         return 1
     fi
 
@@ -206,7 +203,7 @@ function rsd::l::kpx::get_password() {
     # 3. Decrypt Master Key via GPG (leverages gpg-agent cache)
     local master_key
     if ! rsd::l::kpx::decrypt_key "$vault_key" master_key; then
-        rsd::warn "Failed to decrypt KeePass master key via GPG."
+        rsd::io::error "Failed to decrypt KeePass master key via GPG."
         return 1
     fi
 
@@ -214,7 +211,7 @@ function rsd::l::kpx::get_password() {
     # Use highly unique local variable name to prevent dynamic nameref variable shadowing bug
     local _kpx_ret_secret
     if ! _kpx_ret_secret=$(keepassxc-cli show -a Password "$vault_db" "$entry_path" <<< "$master_key" 2>/dev/null); then
-         rsd::warn "Entry '$entry_path' not found in vault."
+         rsd::io::warn "Entry '$entry_path' not found in vault."
          return 2
     fi
 
@@ -243,13 +240,13 @@ function rsd::l::kpx::add_password() {
     local vault_db="$config_dir/vault.kdbx"
 
     if [[ ! -f "$vault_key" || ! -f "$vault_db" ]]; then
-        rsd::warn "KeePass vault has not been initialized. Please run 'rsd kpx init' first."
+        rsd::io::error "KeePass vault has not been initialized. Please run 'rsd kpx init' first."
         return 1
     fi
 
     # Fail fast if vault key is empty (corrupted init)
     if [[ ! -s "$vault_key" ]]; then
-        rsd::warn "Vault key file is empty (corrupted). Please re-initialize: rm ~/.config/rsd/vault.* && rsd kpx init"
+        rsd::io::error "Vault key file is empty (corrupted). Please re-initialize: rm ~/.config/rsd/vault.* && rsd kpx init"
         return 1
     fi
 
@@ -263,7 +260,7 @@ function rsd::l::kpx::add_password() {
 
     local master_key
     if ! rsd::l::kpx::decrypt_key "$vault_key" master_key; then
-        rsd::warn "Failed to decrypt KeePass master key via GPG."
+        rsd::io::error "Failed to decrypt KeePass master key via GPG."
         return 1
     fi
 
@@ -288,7 +285,7 @@ function rsd::l::kpx::add_password() {
         rsd::debug "keepassxc-cli add failed, attempting edit (upsert): $_kpx_err" 10
         # 'edit' uses: Line 1 = master password, Line 2 = new password
         if ! _kpx_err=$(printf "%s\n%s\n" "$master_key" "$secret_to_store" | keepassxc-cli edit -p "$vault_db" "$entry_path" 2>&1 >/dev/null); then
-            rsd::warn "Failed to add entry '$entry_path' to the vault: $_kpx_err"
+            rsd::io::error "Failed to add entry '$entry_path' to the vault: $_kpx_err"
             return 2
         fi
     fi
@@ -311,7 +308,7 @@ function rsd::l::kpx::rotate_key() {
 
     # 1. Pre-flight check: Verify GPG Key availability (Protocol D & B)
     if ! gpg --list-secret-keys "$new_gpg_id" &>/dev/null; then
-        rsd::warn "Critical: New GPG key matching User ID '$new_gpg_id' is not present in keyring."
+        rsd::io::error "New GPG key matching User ID '$new_gpg_id' is not present in keyring."
         return 10
     fi
 
@@ -324,7 +321,7 @@ function rsd::l::kpx::rotate_key() {
     local recovery_key="$config_dir/recovery.key.gpg"
 
     if [[ ! -f "$vault_key" ]]; then
-        rsd::warn "KeePass vault has not been initialized. Please run 'rsd kpx init' first."
+        rsd::io::error "KeePass vault has not been initialized. Please run 'rsd kpx init' first."
         return 1
     fi
 
@@ -336,13 +333,13 @@ function rsd::l::kpx::rotate_key() {
     # 4. Decrypt current vault key in-memory
     local master_key
     if ! rsd::l::kpx::decrypt_key "$vault_key" master_key; then
-        rsd::warn "Rotation failed: Unable to decrypt vault key using the current GPG key."
+        rsd::io::error "Rotation failed: Unable to decrypt vault key using the current GPG key."
         return 10
     fi
 
     # 5. Re-encrypt using the new GPG User ID to the temporary space
     if ! echo "$master_key" | gpg --encrypt --batch --recipient "$new_gpg_id" --output "$temp_dir/vault.key.gpg" 2>/dev/null; then
-        rsd::warn "Rotation failed: Unable to encrypt using new GPG key."
+        rsd::io::error "Rotation failed: Unable to encrypt using new GPG key."
         return 10
     fi
 
@@ -360,6 +357,6 @@ function rsd::l::kpx::rotate_key() {
         mv "$temp_dir/recovery.key.gpg" "$recovery_key" || return 13
     fi
 
-    rsd::warn "Success: GPG key rotated successfully. Vault key is now encrypted to recipient '$new_gpg_id'."
+    rsd::io::ok "GPG key rotated successfully. Vault key is now encrypted to recipient '$new_gpg_id'."
     return 0
 }

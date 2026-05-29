@@ -136,13 +136,13 @@ function rsd::l::r::terminfo::push_entry() {
 
     # Pre-flight: verify entry exists on local machine
     if ! infocmp $flags "$entry" &>/dev/null; then
-        rsd::warn "  [SKIP] Terminfo '$entry' not found locally (terminal not installed)."
+        rsd::io::info "Terminfo '$entry' not found locally (terminal not installed)."
         return 1
     fi
 
     # Defensive binary validation on remote target
     if ! rsd::l::target::has_bin tic; then
-        rsd::warn "  [ERROR] 'tic' not found on remote target. Install ncurses to enable tic fallback."
+        rsd::io::error "'tic' not found on remote target. Install ncurses to enable tic fallback."
         return 3
     fi
 
@@ -152,10 +152,10 @@ function rsd::l::r::terminfo::push_entry() {
     # Pipe local terminfo source through SSH tunnel to remote tic compiler
     if infocmp $flags "$entry" | rsd::l::remote::execute "$RSD_REMOTE_TARGET" \
         "tic" "-x" "-o" "\$HOME/.terminfo" "-"; then
-        rsd::warn "  [OK] Pushed '$entry' via tic fallback."
+        rsd::io::ok "Pushed '$entry' via tic fallback."
         return 0
     else
-        rsd::warn "  [ERROR] Failed to push '$entry' via tic on remote."
+        rsd::io::error "Failed to push '$entry' via tic on remote."
         return 1
     fi
 }
@@ -168,7 +168,7 @@ fi  # end shared helpers guard
 
 function rsd::r::terminfo_ghostty::register() {
     if [[ -z "$RSD_REMOTE_TARGET" ]]; then
-        rsd::warn "Error: Terminfo provisioning is remote-only. Use: rsd @target recipe run terminfo/ghostty"
+        rsd::io::error "Terminfo provisioning is remote-only. Use: rsd @target recipe run terminfo/ghostty"
         exit 2
     fi
 
@@ -227,13 +227,13 @@ function rsd::r::terminfo_ghostty::install_entry() {
     # Phase 1: Package install attempt
     if ((try_package)) && [[ -n "$pkg" ]]; then
         rsd::l::r::install_pkg "$pkg" || \
-            rsd::warn "  [INFO] Package '$pkg' not available or install failed."
+            rsd::io::info "Package '$pkg' not available or install failed."
 
         if rsd::l::target::exec infocmp xterm-ghostty &>/dev/null; then
-            rsd::warn "  [OK] xterm-ghostty installed via package '$pkg'."
+            rsd::io::ok "xterm-ghostty installed via package '$pkg'."
             return 0
         fi
-        rsd::warn "  [INFO] Package installed but xterm-ghostty not found. Trying tic fallback..."
+        rsd::io::info "Package installed but xterm-ghostty not found. Trying tic fallback..."
     fi
 
     # Phase 2: tic fallback (local infocmp → remote tic)

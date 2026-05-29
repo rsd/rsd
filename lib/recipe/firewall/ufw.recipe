@@ -158,27 +158,25 @@ function rsd::r::firewall_ufw::harden() {
     # --- Gate: UFW must be installed ---
     if ! rsd::l::target::has_bin ufw; then
         if [[ "${RSD_COMMAND_ARGS[install-ufw]}" == "1" ]]; then
-            rsd::warn "  UFW not installed. Auto-installing (--install-ufw)..."
+            rsd::io::status "UFW not installed. Auto-installing (--install-ufw)..."
             if ! rsd::l::r::install_pkg ufw; then
-                rsd::warn "  [ERROR] Failed to install UFW."
+                rsd::io::error "Failed to install UFW."
                 return 3
             fi
-            rsd::warn "  [OK] UFW installed."
+            rsd::io::ok "UFW installed."
         else
-            rsd::warn ""
-            rsd::warn "  ┌─────────────────────────────────────────────────┐"
-            rsd::warn "  │  UFW is not installed on the target host.       │"
-            rsd::warn "  └─────────────────────────────────────────────────┘"
-            rsd::warn ""
-            rsd::warn "  Install UFW using your distribution's package manager:"
-            rsd::warn ""
-            rsd::warn "    Debian / Ubuntu :  sudo apt install ufw"
-            rsd::warn "    Arch Linux      :  sudo pacman -S ufw"
-            rsd::warn "    Fedora / RHEL   :  sudo dnf install ufw"
-            rsd::warn "    Alpine Linux    :  sudo apk add ufw"
-            rsd::warn "    openSUSE        :  sudo zypper install ufw"
-            rsd::warn ""
-            rsd::warn "  Or re-run this recipe with --install-ufw to automate."
+            rsd::io::blank
+            rsd::io::banner "UFW is not installed on the target host."
+            rsd::io::blank
+            rsd::io::info "Install UFW using your distribution's package manager:"
+            rsd::io::blank
+            rsd::io::info "  Debian / Ubuntu :  sudo apt install ufw"
+            rsd::io::info "  Arch Linux      :  sudo pacman -S ufw"
+            rsd::io::info "  Fedora / RHEL   :  sudo dnf install ufw"
+            rsd::io::info "  Alpine Linux    :  sudo apk add ufw"
+            rsd::io::info "  openSUSE        :  sudo zypper install ufw"
+            rsd::io::blank
+            rsd::io::info "Or re-run this recipe with --install-ufw to automate."
             return 3
         fi
     fi
@@ -186,58 +184,56 @@ function rsd::r::firewall_ufw::harden() {
     # --- Detect SSH port(s) ---
     rsd::l::r::firewall_ufw::detect_ssh_ports
 
-    rsd::warn ""
-    rsd::warn "  Firewall hardening: deny all incoming, allow SSH only."
-    rsd::warn "  SSH port(s) to allow: ${RSD_FIREWALL_SSH_PORTS[*]}"
-    rsd::warn ""
+    rsd::io::blank
+    rsd::io::info "Firewall hardening: deny all incoming, allow SSH only."
+    rsd::io::info "SSH port(s) to allow: ${RSD_FIREWALL_SSH_PORTS[*]}"
+    rsd::io::blank
 
     # --- Phase 1: Reset to clean slate ---
-    rsd::warn "  [1/5] Resetting UFW to factory defaults..."
+    rsd::io::step "1/5" "Resetting UFW to factory defaults..."
     if ! rsd::l::ufw::reset; then
-        rsd::warn "  [ERROR] ufw reset failed."
+        rsd::io::error "ufw reset failed."
         return 1
     fi
 
     # --- Phase 2: Set default policies ---
-    rsd::warn "  [2/5] Setting default policy: deny incoming..."
+    rsd::io::step "2/5" "Setting default policy: deny incoming..."
     if ! rsd::l::ufw::default_policy "deny" "incoming"; then
-        rsd::warn "  [ERROR] Failed to set default deny incoming."
+        rsd::io::error "Failed to set default deny incoming."
         return 1
     fi
 
-    rsd::warn "  [3/5] Setting default policy: allow outgoing..."
+    rsd::io::step "3/5" "Setting default policy: allow outgoing..."
     if ! rsd::l::ufw::default_policy "allow" "outgoing"; then
-        rsd::warn "  [ERROR] Failed to set default allow outgoing."
+        rsd::io::error "Failed to set default allow outgoing."
         return 1
     fi
 
     # --- Phase 3: Allow SSH port(s) ---
     local p
     for p in "${RSD_FIREWALL_SSH_PORTS[@]}"; do
-        rsd::warn "  [4/5] Allowing SSH on port ${p}/tcp..."
+        rsd::io::step "4/5" "Allowing SSH on port ${p}/tcp..."
         if ! rsd::l::ufw::allow "${p}/tcp"; then
-            rsd::warn "  [ERROR] Failed to allow port ${p}/tcp."
+            rsd::io::error "Failed to allow port ${p}/tcp."
             return 1
         fi
     done
 
     # --- Phase 4: Enable firewall ---
-    rsd::warn "  [5/5] Enabling UFW..."
+    rsd::io::step "5/5" "Enabling UFW..."
     if ! rsd::l::ufw::enable; then
-        rsd::warn "  [ERROR] Failed to enable UFW."
+        rsd::io::error "Failed to enable UFW."
         return 1
     fi
 
     # --- Verification: show final state ---
-    rsd::warn ""
-    rsd::warn "  ┌─────────────────────────────────────────────────┐"
-    rsd::warn "  │  Firewall hardened successfully.                │"
-    rsd::warn "  └─────────────────────────────────────────────────┘"
-    rsd::warn ""
+    rsd::io::blank
+    rsd::io::banner "Firewall hardened successfully."
+    rsd::io::blank
 
     local final_status=""
     rsd::l::ufw::get_status final_status
-    rsd::warn "$final_status"
+    rsd::io::info "$final_status"
 
     return 0
 }

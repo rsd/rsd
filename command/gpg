@@ -22,7 +22,7 @@ function rsd::c::gpg::help() {
 
 function rsd::c::gpg::check() {
     if rsd::l::gpg::check 1; then
-        rsd::warn "GPG is installed and working."
+        rsd::io::ok "GPG is installed and working."
         return 0
     else
         return $?
@@ -37,33 +37,33 @@ function rsd::c::gpg::init() {
 function rsd::c::gpg::create-key() {
     rsd::check_binaries_or_fail gpg
 
-    rsd::warn "Generating a new GPG key for RSD usage."
-    rsd::warn "You will be prompt for a secure strong password from the gpg command."
-    rsd::warn "It will be created under the user id: $RSD_GPG_USER_ID."
-    rsd::warn "These process will be done in 2 parts:"
-    rsd::warn "1. Create the key with certifying capability."
-    rsd::warn "2. Create a sub key with encryption capability."
-    rsd::warn
+    rsd::io::status "Generating a new GPG key for RSD usage."
+    rsd::io::info "You will be prompt for a secure strong password from the gpg command."
+    rsd::io::info "It will be created under the user id: $RSD_GPG_USER_ID."
+    rsd::io::info "These process will be done in 2 parts:"
+    rsd::io::info "1. Create the key with certifying capability."
+    rsd::io::info "2. Create a sub key with encryption capability."
+    rsd::io::blank
 
     rsd::l::gpg::get_keys $RSD_GPG_USER_ID _r_gpg_keys
     if [[ -n "${_r_gpg_keys[0]}" ]]; then
-        rsd::warn "There is already a GPG key for RSD usage. Please remove it first."
+        rsd::io::warn "There is already a GPG key for RSD usage. Please remove it first."
         exit 3
     fi
 
     gpg --quick-generate-key $RSD_GPG_USER_ID ed25519 cert,sign 0
     rsd::l::gpg::get_keys $RSD_GPG_USER_ID _r_gpg_keys
 
-    rsd::warn Fingerprint: ${_r_gpg_keys[0]}
-    rsd::warn
+    rsd::io::info "Fingerprint: ${_r_gpg_keys[0]}"
+    rsd::io::blank
 
     if [[ -z "${_r_gpg_keys[0]}" ]]; then
-        rsd::warn "Failed to create the GPG key with the user id: '$RSD_GPG_USER_ID'."
-        rsd::warn "You will have to check and clean up (sorry) and then try again."
+        rsd::io::error "Failed to create the GPG key with the user id: '$RSD_GPG_USER_ID'."
+        rsd::io::info "You will have to check and clean up (sorry) and then try again."
         exit 3
     fi
-    rsd::warn
-    rsd::warn "Creating now the sub key for encryption."
+    rsd::io::blank
+    rsd::io::status "Creating now the sub key for encryption."
     gpg --quick-add-key ${_r_gpg_keys[0]} cv25519 encr 0
     return 0
 }

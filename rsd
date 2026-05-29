@@ -902,6 +902,13 @@ else
 	exit 5
 fi
 
+# Load structured IO library — available for all post-bootstrap messaging.
+# Bootstrap-phase messages (argument parsing, search path) use the inline
+# rsd::warn defined at the top of this file. io.lib is NOT available there.
+if rsd::check_libdir_file lib/io.lib; then
+    source "$(rsd::get_libdir_file lib/io.lib)"
+fi
+
 # help and usage
 if [[ ${RSD_ARGS[usage]} || ${RSD_ARGS[help]} || ${RSD_ARGS[h]} ]]; then
 	rsd::usage

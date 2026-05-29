@@ -22,6 +22,9 @@ RSD_RECIPE_LIB_VERSION="0.4.0"
 # Load target-aware dispatch primitives
 [[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
 
+# Load structured IO messaging
+[[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
+
 # Scoped task definitions — only task names and recovery mode are stored.
 # All other hooks (pre_check, rollback) are discovered at dispatch time
 # via bash::is_function probing on convention-based function names.
@@ -48,13 +51,13 @@ function rsd::r::register_task() {
 
     # The task name IS the apply function — it must exist
     if ! bash::is_function "$func"; then
-        rsd::warn "Error: Task function '${func}' is not declared."
+        rsd::io::error "Task function '${func}' is not declared."
         return 11
     fi
 
     # Validate rollback function exists when recovery=rollback
     if [[ "$recovery" == "rollback" ]] && ! bash::is_function "${func}::rollback"; then
-        rsd::warn "Error: Task '${task_name}' has recovery='rollback' but no ::rollback function."
+        rsd::io::error "Task '${task_name}' has recovery='rollback' but no ::rollback function."
         return 11
     fi
 
@@ -88,7 +91,7 @@ function rsd::r::include() {
     RSD_INCLUDED_RECIPES["$clean_name"]=1
 
     if ! rsd::check_libdir_file "lib/recipe/${name}.recipe"; then
-        rsd::warn "Error: Sub-recipe file '${name}' could not be resolved."
+        rsd::io::error "Sub-recipe file '${name}' could not be resolved."
         exit 5
     fi
 
@@ -100,7 +103,7 @@ function rsd::r::include() {
     if bash::is_function "$reg_func"; then
         "$reg_func"
     else
-        rsd::warn "Error: Recipe registration hook '${reg_func}' is missing."
+        rsd::io::error "Recipe registration hook '${reg_func}' is missing."
         exit 11
     fi
     return 0
@@ -127,25 +130,28 @@ function rsd::l::r::execute_engine() {
         # 1. Pre-flight Necessity Guard
         if bash::is_function "${func}::pre_check"; then
             if ((verbose)); then
-                rsd::warn "  [CHECKING] Task '$name'..."
+                rsd::io::info "Checking task '$name'..."
             fi
             if "${func}::pre_check" &>/dev/null; then
-                rsd::warn "  [SKIPPED] Task '$name' is already satisfied."
+                rsd::io::info "Task '$name' is already satisfied. Skipping."
                 continue
             fi
         fi
 
         # 2. Dry-Run Isolation Check
         if ((dry_run)); then
-            rsd::warn "  [DRY-RUN] Would apply task '$name'"
+            rsd::io::status "[DRY-RUN] Would apply task '$name'"
             continue
         fi
 
         # 3. Execution Phase — call the task function directly
-        rsd::warn "  [APPLYING] Executing task '$name'..."
-        if ! "$func"; then
+        rsd::io::status "Executing task '$name'..."
+
+        # fd 3 framing: external command output gets [cmd] tag + dim pipe
+        RSD_IO_FRAME_CMD="${name##*::}"
+        if ! "$func" > >(rsd::l::io::frame_lines) 2> >(rsd::l::io::frame_lines >&2); then
             if [[ "$recovery" == "ignore" ]]; then
-                rsd::warn "  [WARNING] Task '$name' failed. Skipping optional step."
+                rsd::io::warn "Task '$name' failed. Skipping optional step."
                 continue
             else
                 rsd::l::r::handle_failure "$name" "$recovery"
@@ -154,11 +160,16 @@ function rsd::l::r::execute_engine() {
         fi
 
         # 4. Registry Success Track
+        RSD_IO_FRAME_CMD=""
+        # Small delay to flush asynchronous process substitution buffers
+        sleep 0.05
+
         RSD_COMPLETED_STACK+=("$name")
-        rsd::warn "  [OK] Task '$name' applied successfully."
+        rsd::io::ok "Task '$name' applied successfully."
     done
 
-    rsd::warn "\nRecipe execution completed successfully."
+    rsd::io::blank
+    rsd::io::ok "Recipe execution completed successfully."
     return 0
 }
 
@@ -170,26 +181,27 @@ function rsd::l::r::handle_failure() {
     local name="$1"
     local recovery="$2"
 
-    rsd::warn "\n!!! [FAILURE] Recipe failed at step: '$name' !!!"
+    rsd::io::blank
+    rsd::io::fatal "Recipe failed at step: '$name'"
 
     if [[ "$recovery" == "rollback" ]]; then
-        rsd::warn "Initiating Backward Recovery (Rollback)..."
+        rsd::io::status "Initiating Backward Recovery (Rollback)..."
         local i completed rollback_func
         for (( i=${#RSD_COMPLETED_STACK[@]}-1; i>=0; i-- )); do
             completed="${RSD_COMPLETED_STACK[i]}"
             rollback_func="rsd::r::${completed}::rollback"
             if bash::is_function "$rollback_func"; then
-                rsd::warn "  [ROLLBACK] Undoing changes for task '$completed'..."
+                rsd::io::warn "Undoing changes for task '$completed'..."
                 if ! "$rollback_func"; then
-                    rsd::warn "  [CRITICAL] Rollback failed for task '$completed'! Manual cleanup required."
+                    rsd::io::fatal "Rollback failed for task '$completed'! Manual cleanup required."
                 fi
             fi
         done
         exit 10
     else
-        rsd::warn "Recovery Mode: FORWARD."
-        rsd::warn "Please resolve the environmental issue, then run the recipe again."
-        rsd::warn "Already satisfied steps will be automatically skipped."
+        rsd::io::status "Recovery Mode: FORWARD."
+        rsd::io::info "Please resolve the environmental issue, then run the recipe again."
+        rsd::io::info "Already satisfied steps will be automatically skipped."
         exit 10
     fi
 }

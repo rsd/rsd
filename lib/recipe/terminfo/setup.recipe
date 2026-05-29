@@ -69,7 +69,7 @@ fi
 function rsd::r::terminfo_setup::register() {
     # Remote-only guard: terminfo provisioning targets SSH remote hosts
     if [[ -z "$RSD_REMOTE_TARGET" ]]; then
-        rsd::warn "Error: Terminfo provisioning is remote-only. Use: rsd @target recipe run terminfo/setup"
+        rsd::io::error "Terminfo provisioning is remote-only. Use: rsd @target recipe run terminfo/setup"
         exit 2
     fi
 

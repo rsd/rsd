@@ -83,13 +83,13 @@ function rsd::l::apt::download_key_dearmored() {
 
     local rc=0
     if ! rsd::l::target::exec curl -fsSL "$url" -o "$tmpkey"; then
-        rsd::warn "  [ERROR] Failed to download signing key from: $url"
+        rsd::io::error "Failed to download signing key from: $url"
         rsd::l::target::exec rm -f "$tmpkey"
         return 1
     fi
 
     if ! rsd::l::target::exec_sudo "" sh -c "'gpg --dearmor < \"$tmpkey\" > \"$dest\"'"; then
-        rsd::warn "  [ERROR] Failed to dearmor signing key."
+        rsd::io::error "Failed to dearmor signing key."
         rsd::l::target::exec rm -f "$tmpkey"
         return 1
     fi

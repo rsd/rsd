@@ -111,7 +111,7 @@ function rsd::r::zsh_core::set_default_shell() {
         bash::trim zsh_path
 
         if [[ -z "$zsh_path" ]]; then
-            rsd::warn "Error: Zsh binary was not found on remote target."
+            rsd::io::error "Zsh binary was not found on remote target."
             return 3
         fi
     else

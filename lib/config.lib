@@ -144,7 +144,7 @@ function rsd::config::read_ini() {
     local key_re='^[[:space:]]*([^=]*[^=[:space:]])[[:space:]]*=[[:space:]]*(.*)$'
 
     if [[ ! -f "$file" ]]; then
-        rsd::warn "Error: File does not exist."
+        rsd::io::error "File does not exist."
         return 1
     fi
 

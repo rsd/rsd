@@ -150,7 +150,7 @@ function rsd::l::remote::delegate() {
     rsd::l::remote::resolve_pathway "$remote_spec" hops
 
     if [[ ${#hops[@]} -eq 0 ]]; then
-        rsd::warn "Error: Failed to resolve remote target spec '$remote_spec'."
+        rsd::io::error "Failed to resolve remote target spec '$remote_spec'."
         exit 20
     fi
 
@@ -168,7 +168,7 @@ function rsd::l::remote::delegate() {
 
         local run_func="rsd::l::protocol::${proto}::run"
         if ! bash::is_function "$run_func"; then
-            rsd::warn "Error: Protocol transport '$proto' is unsupported or missing handler."
+            rsd::io::error "Protocol transport '$proto' is unsupported or missing handler."
             exit 3
         fi
 
@@ -248,7 +248,7 @@ function rsd::l::remote::delegate() {
                     active_payload=("sudo" "-u" "${user:-root}" "--" "${active_payload[@]}")
                 fi
             else
-                rsd::warn "Error: Protocol '$proto' does not support intermediate hop packaging."
+                rsd::io::error "Protocol '$proto' does not support intermediate hop packaging."
                 exit 3
             fi
         else
@@ -335,7 +335,7 @@ function rsd::l::remote::bootstrap_install() {
     
     rsd::check_binaries_or_fail tar
     
-    rsd::warn "Bootstrapping RSD on remote target '$remote_spec'..."
+    rsd::io::status "Bootstrapping RSD on remote target '$remote_spec'..."
     
     # Intent: Create a secure temporary directory on the remote host using mktemp.
     #         The old approach used `openssl rand -hex 6` locally to generate a suffix,
@@ -350,7 +350,7 @@ function rsd::l::remote::bootstrap_install() {
     # Trim leading/trailing whitespace from remote output
     bash::trim remote_tmp
     if [[ -z "$remote_tmp" ]]; then
-        rsd::warn "Error: Failed to create secure temp directory on remote host."
+        rsd::io::error "Failed to create secure temp directory on remote host."
         return 14
     fi
     local rsd_bin_dir="$RSD_RUN_DIR"
@@ -360,19 +360,19 @@ function rsd::l::remote::bootstrap_install() {
     fi
     
     # 1. Dispatch tarball and unpack remotely
-    rsd::warn "Streaming local RSD files to remote target..."
+    rsd::io::status "Streaming local RSD files to remote target..."
     if ! tar -cf - -C "$rsd_bin_dir" rsd -C "$rsd_share_dir" lib command config data LICENSE README.md 2>/dev/null | \
          rsd::l::remote::execute "$remote_spec" "mkdir" "-p" "$remote_tmp" "&&" "tar" "-xf" "-" "-C" "$remote_tmp" >/dev/null; then
-        rsd::warn "Error: Failed to stream and unpack RSD on remote host."
+        rsd::io::error "Failed to stream and unpack RSD on remote host."
         # Clean up in case directory was created
         rsd::l::remote::execute "$remote_spec" "rm" "-rf" "$remote_tmp" 2>/dev/null
         return 13
     fi
     
     # 2. Run remote installer
-    rsd::warn "Executing remote framework installer..."
+    rsd::io::status "Executing remote framework installer..."
     if ! rsd::l::remote::execute "$remote_spec" "env" "RSD_INSTALLATION_STEP=2" "TEMP_DIR=${remote_tmp}" "bash" "${remote_tmp}/rsd" "--install" "$mode" >/dev/null; then
-        rsd::warn "Error: Remote framework installer failed."
+        rsd::io::error "Remote framework installer failed."
         rsd::l::remote::execute "$remote_spec" "rm" "-rf" "$remote_tmp" 2>/dev/null
         return 13
     fi
@@ -380,7 +380,7 @@ function rsd::l::remote::bootstrap_install() {
     # 3. Clean up remote temp directory
     rsd::l::remote::execute "$remote_spec" "rm" "-rf" "$remote_tmp" >/dev/null
     
-    rsd::warn "Successfully bootstrapped RSD on remote target '$remote_spec'."
+    rsd::io::ok "Successfully bootstrapped RSD on remote target '$remote_spec'."
     return 0
 }
 
@@ -435,14 +435,14 @@ function rsd::l::remote::bootstrap_check() {
         fi
         if [[ -n "$allowed" ]]; then
             if [[ "$allowed" == "false" || "$allowed" == "0" || "$allowed" == "no" ]]; then
-                rsd::warn "Abort: Bootstrapping is disabled for target '$remote_spec' in hosts.ini."
+                rsd::io::warn "Bootstrapping is disabled for target '$remote_spec' in hosts.ini."
                 return 1
             fi
         fi
 
         if rsd::l::remote::prompt_user "RSD is not installed on remote target '$remote_spec'. Would you like to bootstrap the installation now? [Y/n]"; then
             if ! rsd::l::remote::bootstrap_install "$remote_spec"; then
-                rsd::warn "Error: Failed to bootstrap remote target."
+                rsd::io::error "Failed to bootstrap remote target."
                 return 1
             fi
             
@@ -451,11 +451,11 @@ function rsd::l::remote::bootstrap_check() {
             if [[ $? -eq 0 ]]; then
                 _r_bin="\$HOME/.local/bin/rsd"
             else
-                rsd::warn "Error: Bootstrapper completed but framework remains unresolvable on target."
+                rsd::io::error "Bootstrapper completed but framework remains unresolvable on target."
                 return 1
             fi
         else
-            rsd::warn "Abort: Command delegation declined because remote framework is missing."
+            rsd::io::warn "Command delegation declined because remote framework is missing."
             return 1
         fi
     fi
@@ -465,7 +465,7 @@ function rsd::l::remote::bootstrap_check() {
     bash::trim remote_ver
     
     if rsd::version_gt "$RSD_VERSION" "$remote_ver"; then
-        rsd::warn "Warning: Remote framework version ($remote_ver) is older than your local version ($RSD_VERSION)."
+        rsd::io::warn "Remote framework version ($remote_ver) is older than your local version ($RSD_VERSION)."
         
         # Check if upgrades/writes are blocked for this target
         local host_alias="${remote_spec#@}"
@@ -487,13 +487,13 @@ function rsd::l::remote::bootstrap_check() {
         if [[ $can_upgrade -eq 1 ]]; then
             if rsd::l::remote::prompt_user "Would you like to sync-upgrade remote target '$remote_spec' to $RSD_VERSION? [Y/n]"; then
                 if ! rsd::l::remote::bootstrap_install "$remote_spec"; then
-                    rsd::warn "Error: Failed to upgrade remote target. Executing with existing version $remote_ver."
+                    rsd::io::error "Failed to upgrade remote target. Executing with existing version $remote_ver."
                 else
                     _r_bin="\$HOME/.local/bin/rsd"
                 fi
             fi
         else
-            rsd::warn "Upgrade skipped because bootstrapping is disabled for target '$remote_spec' (allow_bootstrap=false)."
+            rsd::io::info "Upgrade skipped because bootstrapping is disabled for target '$remote_spec' (allow_bootstrap=false)."
         fi
     fi
     

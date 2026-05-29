@@ -34,7 +34,7 @@ function rsd::c::config::get() {
             echo "${!key}"
             return 0
         else
-            rsd::warn "Error: Global configuration '$key' is not set."
+            rsd::io::error "Global configuration '$key' is not set."
             return 10
         fi
     elif [[ "$key" =~ \. ]]; then
@@ -58,11 +58,11 @@ function rsd::c::config::get() {
             echo "${config_ref[$subkey]}"
             return 0
         else
-            rsd::warn "Error: Configuration key '$subkey' not found in module '$module'."
+            rsd::io::error "Configuration key '$subkey' not found in module '$module'."
             return 10
         fi
     else
-        rsd::warn "Error: Invalid key format. Use 'RSD_VAR' or 'module.section.key'."
+        rsd::io::error "Invalid key format. Use 'RSD_VAR' or 'module.section.key'."
         return 2
     fi
 }
@@ -82,7 +82,7 @@ function rsd::c::config::set() {
         # Writing to rsd.conf
         local rsd_conf="$user_config_dir/rsd.conf"
         rsd::l::config::set_conf_value "$rsd_conf" "$key" "$value" || return $?
-        rsd::warn "Successfully set '$key' to '$value' in '$rsd_conf'."
+        rsd::io::ok "Successfully set '$key' to '$value' in '$rsd_conf'."
         return 0
     elif [[ "$key" =~ \. ]]; then
         # Writing to module.ini
@@ -90,7 +90,7 @@ function rsd::c::config::set() {
         local subkey="${key#*.}"
         
         if [[ ! "$subkey" =~ \. ]]; then
-            rsd::warn "Error: INI keys must be in 'module.section.key' format."
+            rsd::io::error "INI keys must be in 'module.section.key' format."
             return 2
         fi
 
@@ -111,10 +111,10 @@ function rsd::c::config::set() {
 
         # 4. Write back to INI file
         rsd::config::write_ini "$ini_file" "$array_name" || return 13
-        rsd::warn "Successfully set '$subkey' to '$value' in '$ini_file'."
+        rsd::io::ok "Successfully set '$subkey' to '$value' in '$ini_file'."
         return 0
     else
-        rsd::warn "Error: Invalid key format. Use 'RSD_VAR' or 'module.section.key'."
+        rsd::io::error "Invalid key format. Use 'RSD_VAR' or 'module.section.key'."
         return 2
     fi
 }
@@ -122,7 +122,7 @@ function rsd::c::config::set() {
 # List all resolved configurations
 # @return int 0
 function rsd::c::config::list() {
-    rsd::warn "=== Resolved Global Configurations (Active Env) ==="
+    rsd::io::info "=== Resolved Global Configurations (Active Env) ==="
     local var
     for var in $(compgen -v | grep ^RSD_ | sort); do
         echo "$var=${!var}"
@@ -132,7 +132,7 @@ function rsd::c::config::list() {
     local active_inis
     active_inis=$(compgen -v | grep ^R_INI_)
     if [[ -n "$active_inis" ]]; then
-        rsd::warn -e "\n=== Loaded Module INI Settings ==="
+        rsd::io::info "\n=== Loaded Module INI Settings ==="
         local ini_var
         for ini_var in $active_inis; do
             local module="${ini_var#R_INI_}"
