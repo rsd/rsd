@@ -21,6 +21,12 @@ setup() {
     source "${BATS_TEST_DIRNAME}/../../command/remote"
 }
 
+# Helper: run capturing fd 7 (rsd::io) in $output
+_run_io() {
+    _run_io_inner() { exec 7>&1; "$@"; }
+    run _run_io_inner "$@"
+}
+
 @test "rsd::c::remote::check fails if RSD_REMOTE_TARGET is empty" {
     unset RSD_REMOTE_TARGET
     run rsd::c::remote::check
@@ -61,7 +67,7 @@ setup() {
         return 1
     }
     
-    run rsd::c::remote::check
+    _run_io rsd::c::remote::check
     [ "$status" -eq 3 ]
     [[ "$output" == *"missing required installer binaries: tar openssl"* ]]
     
@@ -108,7 +114,7 @@ setup() {
         return 1
     }
     
-    run rsd::c::remote::verify
+    _run_io rsd::c::remote::verify
     [ "$status" -eq 0 ]
     [[ "$output" == *"RSD is responsive at \$HOME/.local/bin/rsd (v1.9.12)"* ]]
     
@@ -199,9 +205,9 @@ setup() {
         return 1  # User declines
     }
     
-    run rsd::c::remote::install "user"
+    _run_io rsd::c::remote::install "user"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Abort: Remote installation declined because user bin directory is missing."* ]]
+    [[ "$output" == *"Remote installation declined because user bin directory is missing."* ]]
     
     unset RSD_REMOTE_TARGET
 }
@@ -226,9 +232,9 @@ setup() {
         return 1
     }
     
-    run rsd::c::remote::setup_path
+    _run_io rsd::c::remote::setup_path
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Remote ~/.bashrc already contains a ~/.local/bin path configuration."* ]]
+    [[ "$output" == *"already contains a ~/.local/bin path configuration."* ]]
     [[ "$output" == *"configured in ~/.bashrc, but not active in this session"* ]]
     
     unset RSD_REMOTE_TARGET
@@ -248,7 +254,7 @@ setup() {
         return 1
     }
     
-    run rsd::c::remote::setup_path
+    _run_io rsd::c::remote::setup_path
     [ "$status" -eq 0 ]
     [[ "$output" == *"is already in the remote PATH"* ]]
     
@@ -272,7 +278,7 @@ setup() {
         return 1
     }
     
-    run rsd::c::remote::setup_path "-y"
+    _run_io rsd::c::remote::setup_path "-y"
     [ "$status" -eq 0 ]
     [[ "$output" == *"APPEND_SUCCESS"* ]]
     [[ "$output" == *"Successfully added PATH configuration"* ]]
@@ -301,7 +307,7 @@ setup() {
         return 0  # User confirms
     }
     
-    run rsd::c::remote::setup_path
+    _run_io rsd::c::remote::setup_path
     [ "$status" -eq 0 ]
     [[ "$output" == *"APPEND_SUCCESS"* ]]
     [[ "$output" == *"Successfully added PATH configuration"* ]]
@@ -327,9 +333,9 @@ setup() {
         return 1  # User declines
     }
     
-    run rsd::c::remote::setup_path
+    _run_io rsd::c::remote::setup_path
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Abort: Path setup declined by user."* ]]
+    [[ "$output" == *"Path setup declined by user."* ]]
     
     unset RSD_REMOTE_TARGET
 }

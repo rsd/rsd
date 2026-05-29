@@ -171,12 +171,26 @@ function rsd::l::r::tsdb::resolve_platform() {
     fi
 
     # Resolve architecture
+    # 2-tier fallback: hosts.ini → dpkg --print-architecture
     local arch=""
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        arch=$(rsd::l::target::exec dpkg --print-architecture 2>/dev/null)
+
+    # Tier 1: INI property (zero SSH cost)
+    rsd::l::host::get_property "$host_alias" "arch" arch || true
+
+    # Normalize uname format → dpkg format (INI stores uname -m output)
+    case "$arch" in
+        x86_64)  arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+    esac
+
+    # Tier 2: dpkg (requires live target access)
+    if [[ -z "$arch" ]]; then
+        if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+            arch=$(rsd::l::target::exec dpkg --print-architecture 2>/dev/null)
+        else
+            arch=$(dpkg --print-architecture 2>/dev/null)
+        fi
         bash::trim arch
-    else
-        arch=$(dpkg --print-architecture 2>/dev/null)
     fi
 
     case "$arch" in

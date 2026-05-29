@@ -24,6 +24,7 @@ setup() {
     source "${BATS_TEST_DIRNAME}/../../lib/rsd.lib"
     source "${BATS_TEST_DIRNAME}/../../lib/config.lib"
     source "${BATS_TEST_DIRNAME}/../../lib/host.lib"
+    source "${BATS_TEST_DIRNAME}/../../lib/io.lib"
     
     # Create a temporary directory for release and config mocks
     TEST_TMP_DIR=$(mktemp -d -t rsd-host-test.XXXXXX)
