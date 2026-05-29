@@ -81,7 +81,7 @@
 
 shopt -s extglob
 
-RSD_VERSION='1.10.3'
+RSD_VERSION='1.11.0'
 VERSION=$RSD_VERSION
 
 RSD_ON=1
