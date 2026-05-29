@@ -24,6 +24,12 @@ setup() {
     unset RSD_REMOTE_TARGET
 }
 
+# Helper: run capturing fd 7 (rsd::io) in $output
+_run_io() {
+    _run_io_inner() { exec 7>&1; "$@"; }
+    run _run_io_inner "$@"
+}
+
 # ==============================================================================
 # rsd::l::target::exec (the core routing primitive)
 # ==============================================================================
@@ -254,7 +260,7 @@ setup() {
 }
 
 @test "rsd::l::target::file_push returns 1 for missing source file" {
-    run rsd::l::target::file_push "/tmp/__rsd_nonexistent_source__" "/tmp/dest"
+    _run_io rsd::l::target::file_push "/tmp/__rsd_nonexistent_source__" "/tmp/dest"
     [ "$status" -eq 1 ]
     [[ "$output" == *"does not exist"* ]]
 }
