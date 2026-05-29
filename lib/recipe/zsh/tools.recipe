@@ -1,5 +1,81 @@
 #!/usr/bin/env bash
 
+# ==============================================================================
+# Zsh Shell — Companion CLI Tools
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Installs CLI companion tools that enhance the Zsh shell experience,
+# particularly the FZF preview pipeline configured by zsh/plugins.
+# After this recipe runs, FZF previews render directory trees (eza),
+# images (chafa), syntax-highlighted files (bat), metadata (exiftool),
+# and enhanced paging (lesspipe).
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+# 1. Task: install_companion_tools
+#    Pre-check: `chsh` and `chafa` binaries exist on target.
+#    Apply: installs packages portably based on distro family:
+#      Debian: chafa, libimage-exiftool-perl, bat, fd-find + batcat→bat symlink
+#      Arch:   chafa, perl-image-exiftool, bat, fd
+#      Other:  chafa (generic fallback)
+#    Note: On Debian, `bat` is packaged as `batcat`. This task creates a
+#    symlink at /usr/local/bin/bat → /usr/bin/batcat for uniform usage.
+#    Similarly, `fd` is packaged as `fd-find` on Debian.
+#
+# 2. Task: install_cargo
+#    Pre-check: `cargo` binary exists on target.
+#    Apply: installs the `cargo` package (Rust build toolchain) via the
+#    distro package manager. Required by the eza compile task.
+#
+# 3. Task: compile_eza
+#    Pre-check: ~/.cargo/bin/eza file exists.
+#    Apply: runs `cargo install eza` on the target to compile eza (a modern
+#    replacement for `ls` with tree, git integration, and icons) from source.
+#    Installs to ~/.cargo/bin/ (user-space, no sudo needed).
+#
+# 4. Task: install_make
+#    Pre-check: `make` binary exists on target.
+#    Apply: installs the `make` package via distro package manager.
+#    Required by the lesspipe compile task.
+#
+# 5. Task: compile_lesspipe (recovery: ignore)
+#    Pre-check: /usr/local/bin/lesspipe.sh file exists.
+#    Apply: clones wofr06/lesspipe into ~/dev/lesspipe, runs ./configure
+#    as user, then `make install` via sudo (installs to /usr/local/bin).
+#    Cleans up the source directory after install.
+#    This is a mixed user/sudo pattern — configure runs as user to avoid
+#    root-owned build artifacts, install runs as root for /usr/local.
+#
+# DISTRO-SPECIFIC PACKAGE NAMES
+# -----------------------------
+# Some tools have different package names across distributions:
+#   bat:      "bat" everywhere except Debian/Ubuntu where it's "bat"
+#             but the binary is named "batcat" (→ symlink created)
+#   fd:       "fd" on Arch, "fd-find" on Debian/Ubuntu
+#   exiftool: "perl-image-exiftool" on Arch, "libimage-exiftool-perl" on Debian
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. Each task checks for the presence of its
+# binary or file artifact and skips if already satisfied. Cargo installs
+# are idempotent (rebuilds only if version changed).
+#
+# SCOPE
+# -----
+# Works on both local and remote targets. Includes zsh/core as a
+# prerequisite — Zsh and Oh My Zsh are installed first if missing.
+#
+# RECOVERY
+# --------
+# Tasks 1-4: "forward" — package or compile failure requires manual fix.
+# Task 5 (lesspipe): "ignore" — lesspipe is optional; failure does not
+# block the recipe.
+#
+# Usage: rsd recipe run zsh/tools
+#        rsd @target recipe run zsh/tools
+#
 # @see docs/recipes.md
 # @see AGENTS.md
 

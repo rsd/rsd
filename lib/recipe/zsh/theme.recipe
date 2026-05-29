@@ -1,5 +1,81 @@
 #!/usr/bin/env bash
 
+# ==============================================================================
+# Zsh Shell — Powerlevel10k Theme
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Installs and configures the Powerlevel10k (P10k) prompt theme for Zsh.
+# Deploys a pre-baked configuration file and patches .zshrc for instant
+# prompt support. After this recipe runs, new Zsh sessions display a
+# rich, informative prompt with instant rendering (no startup delay).
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+# 1. Task: clone_p10k
+#    Pre-check: P10k directory exists in $ZSH_CUSTOM/themes/powerlevel10k.
+#    Apply: git clones romkatv/powerlevel10k with depth 1 into the
+#    Oh My Zsh custom themes directory.
+#
+# 2. Task: configure_p10k (recovery: rollback)
+#    Pre-check: .zshrc contains ZSH_THEME="powerlevel10k/powerlevel10k".
+#    Apply: backs up .zshrc, then uses perl regex to replace the ZSH_THEME
+#    line in-place. Handles any existing theme value.
+#    Rollback: restores .zshrc from the backup (.zshrc.theme.bak).
+#
+# 3. Task: deploy_p10k_config
+#    Pre-check: ~/.p10k.zsh file exists on target.
+#    Apply: pushes the pre-baked P10k configuration from
+#    data/recipes/zsh/p10k.zsh to ~/.p10k.zsh on the target via
+#    rsd::l::target::file_push (cat | SSH tee pattern).
+#
+# 4. Task: patch_zshrc_for_p10k (recovery: rollback)
+#    Pre-check: .zshrc contains both 'p10k-instant-prompt' AND
+#    'source.*\.p10k\.zsh' (compound check).
+#    Apply: uses scan-based idempotent patching — checks each block
+#    independently and only adds what is missing:
+#      a. Prepends the instant-prompt initialization block near the top
+#         of .zshrc (uses mktemp + cat + mv for atomic prepend).
+#      b. Appends the `source ~/.p10k.zsh` line at the end if missing.
+#    Rollback: restores .zshrc from the backup (.zshrc.p10k.bak).
+#
+# 5. Task: adjust_p10k_context (recovery: ignore)
+#    Pre-check: ~/.p10k.zsh exists AND the CONTEXT expansion lines are
+#    already commented out.
+#    Apply: comments out the POWERLEVEL9K_CONTEXT_{DEFAULT,SUDO} expansion
+#    lines in the P10k config. This forces the prompt to show user@hostname
+#    even for local (non-SSH) sessions, which the pristine P10k config
+#    hides by default.
+#
+# INSTANT PROMPT
+# --------------
+# P10k's instant prompt feature renders the prompt immediately while Zsh
+# loads plugins in the background. This requires a specific initialization
+# block near the TOP of .zshrc (before any other code that produces output).
+# The patching task handles this by prepending the block atomically.
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. The scan-based patching in task 4 checks
+# each block independently, so partially-applied states are handled.
+# Task 5 uses "ignore" recovery — if the context adjustment fails (e.g.,
+# grep doesn't find the expected lines), the recipe continues.
+#
+# SCOPE
+# -----
+# Works on both local and remote targets. Includes zsh/core as a
+# prerequisite — Zsh and Oh My Zsh are installed first if missing.
+#
+# RECOVERY
+# --------
+# Tasks 1, 3: "forward" — failure requires manual resolution.
+# Tasks 2, 4: "rollback" — .zshrc is restored from backup on failure.
+# Task 5: "ignore" — context adjustment is cosmetic; failure is non-fatal.
+#
+# Usage: rsd recipe run zsh/theme
+#        rsd @target recipe run zsh/theme
+#
 # @see docs/recipes.md
 # @see AGENTS.md
 

@@ -1,5 +1,52 @@
 #!/usr/bin/env bash
 
+# ==============================================================================
+# Zsh Shell — Full Developer Setup (Master Compositor)
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# One-command provisioning of a complete, opinionated Zsh developer
+# environment. Transforms a bare-bones server or workstation into a
+# fully-configured shell with Zsh, Oh My Zsh, Powerlevel10k prompt,
+# fuzzy-finding plugins, and compiled CLI companion tools.
+#
+# This is the recommended entry point for new machine provisioning —
+# run it once and the entire Zsh stack is deployed.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+# Includes four sub-recipes in dependency order:
+#
+# 1. zsh/core — Installs Zsh, sets it as default shell, installs Oh My Zsh.
+# 2. zsh/theme — Clones Powerlevel10k, configures the ZSH_THEME, deploys
+#    a pre-baked p10k.zsh config, patches .zshrc for instant prompt, and
+#    adjusts context display (user@host on local sessions).
+# 3. zsh/plugins — Clones zsh-autosuggestions, fzf (with keybinding install),
+#    fzf-zsh-plugin, and injects the full plugin/binding configuration block
+#    into .zshrc (delimited by sentinel markers for idempotent updates).
+# 4. zsh/tools — Installs companion CLI packages (chafa, bat, fd, exiftool),
+#    Cargo/Rust toolchain, compiles eza (modern ls) and lesspipe from source.
+#
+# TASK DEDUPLICATION
+# ------------------
+# Each sub-recipe includes `rsd::r::include "zsh/core"` as a prerequisite.
+# The recipe engine deduplicates — zsh/core tasks run only once even though
+# all sub-recipes declare the dependency.
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. Every task in every sub-recipe has a pre_check
+# that detects if its desired state is already met. Re-running after a
+# partial failure resumes from the first unsatisfied task.
+#
+# SCOPE
+# -----
+# Works on both local and remote targets.
+#
+# Usage: rsd recipe run zsh/dev_setup
+#        rsd @target recipe run zsh/dev_setup
+#
 # @see docs/recipes.md
 # @see AGENTS.md
 

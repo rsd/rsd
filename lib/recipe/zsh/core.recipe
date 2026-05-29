@@ -1,5 +1,69 @@
 #!/usr/bin/env bash
 
+# ==============================================================================
+# Zsh Shell — Core Setup
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Bootstraps a complete Zsh environment on the target host: installs Zsh,
+# sets it as the user's default login shell, and installs Oh My Zsh as the
+# plugin/theme framework. This recipe is the foundational prerequisite for
+# all other zsh/* recipes (theme, plugins, tools).
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+# 1. Task: install_zsh
+#    Pre-check: `which zsh` on target.
+#    Apply: installs the `zsh` package via the distro package manager
+#    (rsd::l::r::install_pkg). Works on Debian/Ubuntu, Arch, Fedora,
+#    openSUSE, and Alpine.
+#
+# 2. Task: set_default_shell (recovery: rollback)
+#    Pre-check: checks if $SHELL already ends in "/zsh".
+#    Apply: resolves the Zsh binary path on the target (`which zsh`),
+#    then runs `chsh -s <path> $USER` via sudo. For remote targets, the
+#    Zsh path is resolved remotely to avoid local/remote path mismatches.
+#    Rollback: reverts to /bin/bash via `chsh -s /bin/bash $USER`.
+#
+# 3. Task: install_oh_my_zsh
+#    Pre-check: checks if ~/.oh-my-zsh directory exists on target.
+#    Apply: downloads and runs the Oh My Zsh installer in unattended mode.
+#    Uses rsd::l::target::fetch_and_exec for secure download:
+#      - Unpredictable temp file via mktemp (prevents CWE-377 symlink attacks)
+#      - Atomic download-then-execute (prevents CWE-367 TOCTOU races)
+#      - No curl-pipe-to-shell (prevents CWE-494 blind execution)
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. Each task has a pre_check that detects if
+# the desired state is already met (Zsh binary exists, default shell is
+# Zsh, Oh My Zsh directory exists) and skips accordingly.
+#
+# SCOPE
+# -----
+# Works on both local and remote targets. All operations route through
+# rsd::l::target::* for transparent local/remote execution.
+#
+# RECOVERY
+# --------
+# Task 1 (install_zsh): "forward" — package install failure requires
+# manual resolution.
+# Task 2 (set_default_shell): "rollback" — if chsh fails or subsequent
+# tasks fail, the shell is reverted to /bin/bash.
+# Task 3 (install_oh_my_zsh): "forward" — download failure requires
+# network troubleshooting.
+#
+# DEPENDENCY ROLE
+# ---------------
+# This recipe is included as a prerequisite by all other zsh/* recipes
+# (theme, plugins, tools) via `rsd::r::include "zsh/core"`. When run
+# as part of a compositor (zsh/dev_setup), its tasks are deduplicated
+# by the engine — they only run once even if multiple recipes include it.
+#
+# Usage: rsd recipe run zsh/core
+#        rsd @target recipe run zsh/core
+#
 # @see docs/recipes.md
 # @see AGENTS.md
 

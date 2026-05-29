@@ -1,5 +1,75 @@
 #!/usr/bin/env bash
 
+# ==============================================================================
+# Zsh Shell — Plugins & Configuration
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Installs Oh My Zsh plugins for fuzzy-finding and autosuggestions, then
+# injects a complete .zshrc configuration block with the plugin list,
+# keybindings, and FZF customization. Transforms a vanilla Oh My Zsh
+# installation into a productivity-focused shell.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+# 1. Task: clone_autosuggestions
+#    Pre-check: $ZSH_CUSTOM/plugins/zsh-autosuggestions directory exists.
+#    Apply: git clones zsh-users/zsh-autosuggestions into the Oh My Zsh
+#    custom plugins directory.
+#
+# 2. Task: clone_fzf
+#    Pre-check: ~/.fzf directory exists.
+#    Apply: git clones junegunn/fzf into ~/.fzf with depth 1, then runs
+#    the installer with --all (installs binary + keybindings + completions).
+#
+# 3. Task: clone_fzf_zsh_plugin
+#    Pre-check: $ZSH_CUSTOM/plugins/fzf-zsh-plugin directory exists.
+#    Apply: git clones unixorn/fzf-zsh-plugin into Oh My Zsh custom plugins.
+#
+# 4. Task: inject_zshrc_settings (recovery: rollback)
+#    Pre-check: .zshrc contains the sentinel marker "# --- BEGIN RSD
+#    CUSTOM CONFIG ---".
+#    Apply: appends a delimited configuration block to .zshrc containing:
+#      - Plugin list: composer, docker, docker-compose, git, laravel,
+#        rust, yarn, zsh-autosuggestions, fzf-zsh-plugin
+#      - SHIFT+UP/DOWN keybindings for history navigation
+#      - FZF customization: 40% height, reverse layout, border, smart
+#        preview (eza for dirs, chafa for images, bat for text, exiftool
+#        for binary files), Ctrl+/ toggle-preview binding
+#      - FZF command: fd-find excluding .git and node_modules
+#      - Ctrl+R history with no preview
+#      - PATH addition for Cargo binaries
+#    Rollback: removes the entire block between the BEGIN/END sentinel
+#    markers using rsd::l::target::sed_delete_block.
+#
+# SENTINEL-DELIMITED CONFIG BLOCK
+# --------------------------------
+# The .zshrc injection uses "# --- BEGIN RSD CUSTOM CONFIG ---" and
+# "# --- END RSD CUSTOM CONFIG ---" as delimiters. This enables:
+#   - Idempotent detection (pre_check searches for the BEGIN marker)
+#   - Clean rollback (sed deletes everything between markers)
+#   - User edits outside the block are preserved
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. Each task checks if its artifact already
+# exists (directory for clones, sentinel marker for config block).
+#
+# SCOPE
+# -----
+# Works on both local and remote targets. Includes zsh/core as a
+# prerequisite — Zsh and Oh My Zsh are installed first if missing.
+#
+# RECOVERY
+# --------
+# Tasks 1-3 (clones): "forward" — git clone failure requires network fix.
+# Task 4 (inject): "rollback" — if injection fails or subsequent tasks
+# fail, the config block is removed from .zshrc.
+#
+# Usage: rsd recipe run zsh/plugins
+#        rsd @target recipe run zsh/plugins
+#
 # @see docs/recipes.md
 # @see AGENTS.md
 
