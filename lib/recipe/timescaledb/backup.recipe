@@ -1,0 +1,415 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# TimescaleDB — Database Backup
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Creates a complete backup of a TimescaleDB/PostgreSQL database, including
+# cluster-level globals (roles with encrypted passwords) and the database.
+#
+# PREREQUISITES
+# -------------
+# PostgreSQL must be running on the target. Typically after timescaledb/core.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+#  1. validate_env  — Verifies pg_dump, compression support, output dir.
+#  2. dump_globals  — pg_dumpall --globals-only → globals_<ts>.sql
+#  3. dump_database — pg_dump -Fc --compress=<method> → <db>_<ts>_<method>.dump
+#  4. verify_dump   — pg_restore --list confirms the dump is readable.
+#  5. summary       — File sizes, paths, restore command hint.
+#
+# OUTPUT PATH SYNTAX (scp convention, colon required for remote)
+# ------------------
+#   backups/              Local, relative to $(pwd)
+#   /tmp/backups/         Local, absolute
+#   @bi:backups/          Remote 'bi', relative to $HOME
+#   @bi:/tmp/backups/     Remote 'bi', absolute
+#
+# COMPRESSION
+# -----------
+# Default: zstd (best ratio vs performance). Falls back to gzip if libzstd
+# is unavailable on the target. Override with --compress <method>.
+#
+#   zstd   — Best ratio/speed balance (default, requires libzstd)
+#   lz4    — Fastest, moderate ratio (requires liblz4)
+#   gzip   — Universal fallback, slowest
+#   none   — No compression
+#
+# NAMING CONVENTION
+# -----------------
+#   <db-name>_<YYYYMMDD_HHMMSS>_<compress>.dump
+#   globals_<YYYYMMDD_HHMMSS>.sql
+#
+# IDEMPOTENCY
+# -----------
+# Each run creates a new timestamped backup. Safe to run multiple times.
+#
+# Usage:
+#   rsd @bi recipe run timescaledb/backup --db-name crystal --output backups/
+#   rsd @bi recipe run timescaledb/backup --db-name crystal --output @bi:/tmp/backups/
+#   rsd @bi recipe run timescaledb/backup --db-name crystal --output backups/ --compress lz4
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Recipe-specific CLI options
+declare -g -A RSD_RECIPE_OPTIONS=(
+    ["db-name"]=1
+    ["output"]=1
+    ["compress"]=1
+)
+
+# ==============================================================================
+# Globals (populated during registration)
+# ==============================================================================
+
+declare -g RSD_BKP_DB_NAME=""
+declare -g RSD_BKP_COMPRESS=""
+declare -g RSD_BKP_TIMESTAMP=""
+declare -g RSD_BKP_OUTPUT_IS_REMOTE=0
+declare -g RSD_BKP_OUTPUT_HOST=""
+declare -g RSD_BKP_OUTPUT_DIR=""
+declare -g RSD_BKP_DUMP_FILENAME=""
+declare -g RSD_BKP_GLOBALS_FILENAME=""
+# Temp files on the database host (created by validate_env, cleaned by deliver)
+declare -g RSD_BKP_TMP_DUMP=""
+declare -g RSD_BKP_TMP_GLOBALS=""
+
+# ==============================================================================
+# Helpers
+# ==============================================================================
+
+# Parse a path string into host + resolved directory + remote flag.
+# Supports scp-style remote paths with mandatory colon separator.
+#
+# @param string  $1 Raw path (e.g., "backups/", "@bi:backups/", "@bi:/tmp/bk")
+# @param string& $2 nameref: host ("" for local, "bi" for remote).
+# @param string& $3 nameref: resolved absolute path.
+# @param int&    $4 nameref: 1 if remote, 0 if local.
+# @return int 0 on success, 1 on parse error.
+function rsd::l::r::bkp::parse_path() {
+    local input="$1"
+    declare -n __bkp_host="$2"
+    declare -n __bkp_path="$3"
+    declare -n __bkp_remote="$4"
+
+    if [[ "$input" == @* ]]; then
+        __bkp_remote=1
+        local after_at="${input#@}"
+
+        if [[ "$after_at" != *:* ]]; then
+            rsd::io::error "Remote path requires colon: @host:path (e.g., @bi:backups/ or @bi:/tmp/backups/)"
+            return 1
+        fi
+
+        __bkp_host="${after_at%%:*}"
+        __bkp_path="${after_at#*:}"
+
+        # Resolve relative paths against remote $HOME
+        if [[ "$__bkp_path" != /* ]]; then
+            local remote_home
+            remote_home=$(rsd::l::target::exec sh -c 'echo $HOME' 2>/dev/null)
+            if [[ -z "$remote_home" ]]; then
+                rsd::io::error "Could not resolve remote \$HOME."
+                return 1
+            fi
+            __bkp_path="${remote_home}/${__bkp_path}"
+        fi
+    else
+        __bkp_remote=0
+        __bkp_host=""
+        if [[ "$input" != /* ]]; then
+            __bkp_path="$(pwd)/${input}"
+        else
+            __bkp_path="$input"
+        fi
+    fi
+
+    # Normalize trailing slash
+    __bkp_path="${__bkp_path%/}"
+}
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::timescaledb_backup::register() {
+    RSD_BKP_DB_NAME="${RSD_COMMAND_ARGS[db-name]:-}"
+    local output="${RSD_COMMAND_ARGS[output]:-}"
+    RSD_BKP_COMPRESS="${RSD_COMMAND_ARGS[compress]:-zstd}"
+
+    if [[ -z "$RSD_BKP_DB_NAME" ]]; then
+        rsd::io::error "--db-name is required."
+        exit 2
+    fi
+    if [[ -z "$output" ]]; then
+        rsd::io::error "--output is required."
+        exit 2
+    fi
+
+    case "$RSD_BKP_COMPRESS" in
+        zstd|lz4|gzip|none) ;;
+        *)  rsd::io::error "Invalid --compress: $RSD_BKP_COMPRESS. Use: zstd, lz4, gzip, none."
+            exit 2 ;;
+    esac
+
+    if ! rsd::l::r::bkp::parse_path "$output" \
+        RSD_BKP_OUTPUT_HOST RSD_BKP_OUTPUT_DIR RSD_BKP_OUTPUT_IS_REMOTE; then
+        exit 2
+    fi
+
+    # Cross-host validation
+    if [[ "$RSD_BKP_OUTPUT_IS_REMOTE" == "1" ]]; then
+        local target_host="${RSD_REMOTE_TARGET#@}"
+        if [[ "$RSD_BKP_OUTPUT_HOST" != "$target_host" ]]; then
+            rsd::io::error "Cross-host backup not supported. DB on @${target_host}, output on @${RSD_BKP_OUTPUT_HOST}."
+            exit 2
+        fi
+    fi
+
+    # Shared timestamp for all output files
+    RSD_BKP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    RSD_BKP_GLOBALS_FILENAME="globals_${RSD_BKP_TIMESTAMP}.sql"
+    RSD_BKP_DUMP_FILENAME="${RSD_BKP_DB_NAME}_${RSD_BKP_TIMESTAMP}_${RSD_BKP_COMPRESS}.dump"
+
+    rsd::r::register_task "timescaledb_backup::validate_env"
+    rsd::r::register_task "timescaledb_backup::dump_globals"
+    rsd::r::register_task "timescaledb_backup::dump_database"
+    rsd::r::register_task "timescaledb_backup::verify_dump"
+    rsd::r::register_task "timescaledb_backup::summary"
+}
+
+# ==============================================================================
+# Task: validate_env
+# ==============================================================================
+
+function rsd::r::timescaledb_backup::validate_env() {
+    rsd::io::status "Validating backup environment..."
+
+    # PostgreSQL running?
+    if ! rsd::l::target::exec_sudo "" systemctl is-active --quiet postgresql; then
+        rsd::io::error "PostgreSQL is not running on the target."
+        return 1
+    fi
+
+    # Database exists?
+    local db_exists
+    db_exists=$(printf "SELECT 1 FROM pg_database WHERE datname = '%s'" "$RSD_BKP_DB_NAME" | \
+        rsd::l::target::exec_sudo "" sudo -u postgres psql -XAt -f - 2>/dev/null)
+    if [[ "$db_exists" != "1" ]]; then
+        rsd::io::error "Database '${RSD_BKP_DB_NAME}' does not exist."
+        return 1
+    fi
+    rsd::io::ok "Database '${RSD_BKP_DB_NAME}' found."
+
+    # pg_dump available?
+    if ! rsd::l::target::has_bin pg_dump; then
+        rsd::io::error "pg_dump not found on the target."
+        return 1
+    fi
+
+    # Compression support — test with a tiny dump of template1
+    if [[ "$RSD_BKP_COMPRESS" == "zstd" || "$RSD_BKP_COMPRESS" == "lz4" ]]; then
+        if ! rsd::l::target::exec_sudo "" sudo -u postgres \
+            pg_dump -Fc --compress="${RSD_BKP_COMPRESS}" template1 >/dev/null 2>/dev/null; then
+            rsd::io::warn "${RSD_BKP_COMPRESS} not available (missing lib?). Falling back to gzip."
+            RSD_BKP_COMPRESS="gzip"
+            RSD_BKP_DUMP_FILENAME="${RSD_BKP_DB_NAME}_${RSD_BKP_TIMESTAMP}_${RSD_BKP_COMPRESS}.dump"
+        else
+            rsd::io::ok "${RSD_BKP_COMPRESS} compression supported."
+        fi
+    fi
+
+    # Create output directory
+    if [[ "$RSD_BKP_OUTPUT_IS_REMOTE" == "1" ]]; then
+        if ! rsd::l::target::exec_sudo "" install -d -m 0755 "$RSD_BKP_OUTPUT_DIR"; then
+            rsd::io::error "Cannot create output dir: $RSD_BKP_OUTPUT_DIR"
+            return 1
+        fi
+    else
+        if ! mkdir -p "$RSD_BKP_OUTPUT_DIR"; then
+            rsd::io::error "Cannot create local output dir: $RSD_BKP_OUTPUT_DIR"
+            return 1
+        fi
+    fi
+    rsd::io::ok "Output: ${RSD_BKP_OUTPUT_DIR}"
+
+    # Temp files for pg_dump — must be writable by postgres
+    RSD_BKP_TMP_GLOBALS=$(rsd::l::target::mktemp "rsd-globals.XXXXXX") || return 14
+    rsd::l::target::exec_sudo "" chown postgres:postgres "$RSD_BKP_TMP_GLOBALS"
+
+    RSD_BKP_TMP_DUMP=$(rsd::l::target::mktemp "rsd-pgdump.XXXXXX") || return 14
+    rsd::l::target::exec_sudo "" chown postgres:postgres "$RSD_BKP_TMP_DUMP"
+
+    rsd::io::ok "Environment validated."
+}
+
+# ==============================================================================
+# Task: dump_globals
+# ==============================================================================
+# Dumps cluster-level objects: roles with encrypted passwords, tablespaces.
+# Small output (~KB) — safe to stream directly.
+
+function rsd::r::timescaledb_backup::dump_globals() {
+    rsd::io::status "Dumping cluster globals (roles, passwords)..."
+
+    if ! rsd::l::target::exec_sudo "" sudo -u postgres \
+        pg_dumpall --globals-only -f "$RSD_BKP_TMP_GLOBALS"; then
+        rsd::io::error "pg_dumpall --globals-only failed."
+        return 1
+    fi
+
+    local dest="${RSD_BKP_OUTPUT_DIR}/${RSD_BKP_GLOBALS_FILENAME}"
+
+    if [[ "$RSD_BKP_OUTPUT_IS_REMOTE" == "1" ]]; then
+        if ! rsd::l::target::exec_sudo "" mv "$RSD_BKP_TMP_GLOBALS" "$dest"; then
+            rsd::io::error "Failed to deliver globals to: $dest"
+            return 1
+        fi
+        # Restrictive permissions — contains hashed passwords
+        rsd::l::target::exec_sudo "" chmod 0640 "$dest"
+    else
+        if ! rsd::l::target::exec_sudo "" cat "$RSD_BKP_TMP_GLOBALS" > "$dest"; then
+            rsd::io::error "Failed to stream globals to: $dest"
+            return 1
+        fi
+        chmod 0640 "$dest"
+        rsd::l::target::exec_sudo "" rm -f "$RSD_BKP_TMP_GLOBALS"
+    fi
+
+    rsd::io::ok "Globals → ${dest}"
+}
+
+# ==============================================================================
+# Task: dump_database
+# ==============================================================================
+# Custom format (-Fc) with configurable compression. Dumps to a temp file on
+# the database host, then delivers to the output destination.
+
+function rsd::r::timescaledb_backup::dump_database() {
+    rsd::io::status "Dumping '${RSD_BKP_DB_NAME}' (compress=${RSD_BKP_COMPRESS})..."
+
+    local -a compress_args=()
+    [[ "$RSD_BKP_COMPRESS" != "none" ]] && compress_args=(--compress="${RSD_BKP_COMPRESS}")
+
+    if ! rsd::l::target::exec_sudo "" sudo -u postgres pg_dump \
+        -Fc "${compress_args[@]}" \
+        -f "$RSD_BKP_TMP_DUMP" \
+        "$RSD_BKP_DB_NAME"; then
+        rsd::io::error "pg_dump failed."
+        return 1
+    fi
+
+    local dest="${RSD_BKP_OUTPUT_DIR}/${RSD_BKP_DUMP_FILENAME}"
+
+    if [[ "$RSD_BKP_OUTPUT_IS_REMOTE" == "1" ]]; then
+        if ! rsd::l::target::exec_sudo "" mv "$RSD_BKP_TMP_DUMP" "$dest"; then
+            rsd::io::error "Failed to deliver dump to: $dest"
+            return 1
+        fi
+        rsd::l::target::exec_sudo "" chmod 0644 "$dest"
+    else
+        if ! rsd::l::target::exec_sudo "" cat "$RSD_BKP_TMP_DUMP" > "$dest"; then
+            rsd::io::error "Failed to stream dump to: $dest"
+            return 1
+        fi
+        rsd::l::target::exec_sudo "" rm -f "$RSD_BKP_TMP_DUMP"
+    fi
+
+    rsd::io::ok "Database → ${dest}"
+}
+
+# ==============================================================================
+# Task: verify_dump
+# ==============================================================================
+# Runs pg_restore --list to confirm the dump is structurally valid.
+
+function rsd::r::timescaledb_backup::verify_dump() {
+    rsd::io::status "Verifying dump integrity..."
+
+    local dump_path="${RSD_BKP_OUTPUT_DIR}/${RSD_BKP_DUMP_FILENAME}"
+
+    if [[ "$RSD_BKP_OUTPUT_IS_REMOTE" == "1" ]]; then
+        if ! rsd::l::target::exec_sudo "" pg_restore --list "$dump_path" >/dev/null 2>/dev/null; then
+            rsd::io::error "Dump verification failed. File may be corrupt: $dump_path"
+            return 1
+        fi
+    else
+        # Verify locally if pg_restore is available; skip gracefully if not
+        if type pg_restore >/dev/null 2>&1; then
+            if ! pg_restore --list "$dump_path" >/dev/null 2>/dev/null; then
+                rsd::io::error "Dump verification failed (local pg_restore)."
+                return 1
+            fi
+        else
+            rsd::io::warn "pg_restore not available locally. Skipping verification."
+            rsd::io::info "Manual check: pg_restore --list $dump_path"
+            return 0
+        fi
+    fi
+
+    rsd::io::ok "Dump integrity verified."
+}
+
+# ==============================================================================
+# Task: summary
+# ==============================================================================
+
+function rsd::r::timescaledb_backup::summary() {
+    local dump_path="${RSD_BKP_OUTPUT_DIR}/${RSD_BKP_DUMP_FILENAME}"
+    local globals_path="${RSD_BKP_OUTPUT_DIR}/${RSD_BKP_GLOBALS_FILENAME}"
+
+    # File sizes
+    local dump_size globals_size
+    if [[ "$RSD_BKP_OUTPUT_IS_REMOTE" == "1" ]]; then
+        dump_size=$(rsd::l::target::exec stat -c%s "$dump_path" 2>/dev/null)
+        globals_size=$(rsd::l::target::exec stat -c%s "$globals_path" 2>/dev/null)
+    else
+        dump_size=$(stat -c%s "$dump_path" 2>/dev/null)
+        globals_size=$(stat -c%s "$globals_path" 2>/dev/null)
+    fi
+
+    local dump_hr globals_hr
+    dump_hr=$(numfmt --to=iec-i --suffix=B "${dump_size:-0}" 2>/dev/null || echo "${dump_size:-0} bytes")
+    globals_hr=$(numfmt --to=iec-i --suffix=B "${globals_size:-0}" 2>/dev/null || echo "${globals_size:-0} bytes")
+
+    rsd::io::blank
+    rsd::io::banner "Backup Complete"
+    rsd::io::blank
+    rsd::io::info "Database:    ${RSD_BKP_DB_NAME}"
+    rsd::io::info "Compression: ${RSD_BKP_COMPRESS}"
+    rsd::io::info "Timestamp:   ${RSD_BKP_TIMESTAMP}"
+    rsd::io::blank
+    rsd::io::info "Files:"
+    rsd::io::info "  ${RSD_BKP_DUMP_FILENAME}  (${dump_hr})"
+    rsd::io::info "  ${RSD_BKP_GLOBALS_FILENAME}  (${globals_hr})"
+    rsd::io::blank
+
+    # Show restore command with correct path syntax
+    local target_flag=""
+    [[ -n "$RSD_REMOTE_TARGET" ]] && target_flag="@${RSD_REMOTE_TARGET#@} "
+
+    local from_prefix=""
+    local globals_prefix=""
+    if [[ "$RSD_BKP_OUTPUT_IS_REMOTE" == "1" ]]; then
+        from_prefix="@${RSD_BKP_OUTPUT_HOST}:"
+        globals_prefix="@${RSD_BKP_OUTPUT_HOST}:"
+    fi
+
+    rsd::io::banner "Restore Command"
+    rsd::io::blank
+    rsd::io::info "  rsd ${target_flag}recipe run timescaledb/restore \\"
+    rsd::io::info "    --db-name ${RSD_BKP_DB_NAME} --db-user <owner> \\"
+    rsd::io::info "    --from ${from_prefix}${dump_path} \\"
+    rsd::io::info "    --globals ${globals_prefix}${globals_path}"
+    rsd::io::blank
+}

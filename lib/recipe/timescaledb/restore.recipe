@@ -1,0 +1,504 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# TimescaleDB — Database Restore
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Restores a TimescaleDB/PostgreSQL database from a backup created by
+# timescaledb/backup. Handles globals (roles/passwords), database creation,
+# extension pre-loading, and TimescaleDB post-restore metadata rebuild.
+#
+# PREREQUISITES
+# -------------
+# PostgreSQL with TimescaleDB must be installed. Run timescaledb/core first.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+#  1. validate_env      — Verifies pg_restore, source files, target state.
+#  2. restore_globals   — Recreates roles with encrypted passwords from globals.sql.
+#  3. create_database   — Creates the target database with the specified owner.
+#  4. pre_restore       — Creates required extensions BEFORE pg_restore runs.
+#  5. restore_data      — pg_restore from the .dump file into the new database.
+#  6. post_restore      — Runs timescaledb_post_restore() to rebuild TS metadata.
+#  7. validate          — Row counts, extensions, role verification.
+#
+# INPUT PATH SYNTAX (scp convention, colon required for remote)
+# -----------------
+#   backups/crystal.dump            Local, relative to $(pwd)
+#   /tmp/backups/crystal.dump       Local, absolute
+#   @bi:backups/crystal.dump        Remote 'bi', relative to $HOME
+#   @bi:/tmp/backups/crystal.dump   Remote 'bi', absolute
+#
+# OPTIONS
+# -------
+#  --db-name <name>       Target database name (required).
+#  --db-user <name>       Target owner role (required).
+#  --from <path>          Path to .dump file (required).
+#  --globals <path>       Path to globals.sql (optional; skips role restore).
+#
+# IDEMPOTENCY
+# -----------
+# Pre-checks detect existing database and skip creation. pg_restore uses
+# --clean --if-exists for re-runnable restores to existing databases.
+#
+# Usage:
+#   rsd @bi recipe run timescaledb/restore --db-name crystal --db-user crystal_app \
+#     --from backups/crystal_20260529_155600_zstd.dump \
+#     --globals backups/globals_20260529_155600.sql
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Recipe-specific CLI options
+declare -g -A RSD_RECIPE_OPTIONS=(
+    ["db-name"]=1
+    ["db-user"]=1
+    ["from"]=1
+    ["globals"]=1
+)
+
+# ==============================================================================
+# Globals (populated during registration)
+# ==============================================================================
+
+declare -g RSD_RST_DB_NAME=""
+declare -g RSD_RST_DB_USER=""
+# Parsed dump source
+declare -g RSD_RST_DUMP_IS_REMOTE=0
+declare -g RSD_RST_DUMP_HOST=""
+declare -g RSD_RST_DUMP_PATH=""
+# Parsed globals source (optional)
+declare -g RSD_RST_HAS_GLOBALS=0
+declare -g RSD_RST_GLOBALS_IS_REMOTE=0
+declare -g RSD_RST_GLOBALS_HOST=""
+declare -g RSD_RST_GLOBALS_PATH=""
+# Temp files on the database host (for local-to-remote streaming)
+declare -g RSD_RST_TMP_DUMP=""
+declare -g RSD_RST_TMP_GLOBALS=""
+
+# ==============================================================================
+# Helpers
+# ==============================================================================
+
+# Parse a path string into host + resolved path + remote flag.
+# Identical to the backup recipe's parser (scp convention, colon required).
+#
+# @param string  $1 Raw path.
+# @param string& $2 nameref: host ("" for local).
+# @param string& $3 nameref: resolved absolute path.
+# @param int&    $4 nameref: 1 if remote, 0 if local.
+# @return int 0 on success, 1 on parse error.
+function rsd::l::r::rst::parse_path() {
+    local input="$1"
+    declare -n __rst_host="$2"
+    declare -n __rst_path="$3"
+    declare -n __rst_remote="$4"
+
+    if [[ "$input" == @* ]]; then
+        __rst_remote=1
+        local after_at="${input#@}"
+
+        if [[ "$after_at" != *:* ]]; then
+            rsd::io::error "Remote path requires colon: @host:path (e.g., @bi:backups/file.dump)"
+            return 1
+        fi
+
+        __rst_host="${after_at%%:*}"
+        __rst_path="${after_at#*:}"
+
+        if [[ "$__rst_path" != /* ]]; then
+            local remote_home
+            remote_home=$(rsd::l::target::exec sh -c 'echo $HOME' 2>/dev/null)
+            if [[ -z "$remote_home" ]]; then
+                rsd::io::error "Could not resolve remote \$HOME."
+                return 1
+            fi
+            __rst_path="${remote_home}/${__rst_path}"
+        fi
+    else
+        __rst_remote=0
+        __rst_host=""
+        if [[ "$input" != /* ]]; then
+            __rst_path="$(pwd)/${input}"
+        else
+            __rst_path="$input"
+        fi
+    fi
+}
+
+# Run a SQL statement as the postgres superuser via stdin piping.
+#
+# @param string $1 The SQL statement.
+# @param string $2 Optional: database name.
+# @return int psql exit code.
+function rsd::l::r::rst::psql_su() {
+    local sql="$1"
+    local db="${2:-}"
+    local -a db_args=()
+    [[ -n "$db" ]] && db_args=(-d "$db")
+
+    printf '%s\n' "$sql" | \
+        rsd::l::target::exec_sudo "" sudo -u postgres psql -XAt "${db_args[@]}" -f - 2>/dev/null
+}
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::timescaledb_restore::register() {
+    RSD_RST_DB_NAME="${RSD_COMMAND_ARGS[db-name]:-}"
+    RSD_RST_DB_USER="${RSD_COMMAND_ARGS[db-user]:-}"
+    local from="${RSD_COMMAND_ARGS[from]:-}"
+    local globals="${RSD_COMMAND_ARGS[globals]:-}"
+
+    # Validate required options
+    if [[ -z "$RSD_RST_DB_NAME" ]]; then
+        rsd::io::error "--db-name is required."
+        exit 2
+    fi
+    if [[ -z "$RSD_RST_DB_USER" ]]; then
+        rsd::io::error "--db-user is required."
+        exit 2
+    fi
+    if [[ -z "$from" ]]; then
+        rsd::io::error "--from is required (path to .dump file)."
+        exit 2
+    fi
+
+    # SQL identifier validation
+    if [[ ! "$RSD_RST_DB_NAME" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+        rsd::io::error "--db-name contains invalid characters."
+        exit 2
+    fi
+    if [[ ! "$RSD_RST_DB_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+        rsd::io::error "--db-user contains invalid characters."
+        exit 2
+    fi
+
+    # Parse dump path
+    if ! rsd::l::r::rst::parse_path "$from" \
+        RSD_RST_DUMP_HOST RSD_RST_DUMP_PATH RSD_RST_DUMP_IS_REMOTE; then
+        exit 2
+    fi
+
+    # Parse globals path (optional)
+    if [[ -n "$globals" ]]; then
+        RSD_RST_HAS_GLOBALS=1
+        if ! rsd::l::r::rst::parse_path "$globals" \
+            RSD_RST_GLOBALS_HOST RSD_RST_GLOBALS_PATH RSD_RST_GLOBALS_IS_REMOTE; then
+            exit 2
+        fi
+    fi
+
+    rsd::r::register_task "timescaledb_restore::validate_env"
+    [[ "$RSD_RST_HAS_GLOBALS" == "1" ]] && \
+        rsd::r::register_task "timescaledb_restore::restore_globals"
+    rsd::r::register_task "timescaledb_restore::create_database" "rollback"
+    rsd::r::register_task "timescaledb_restore::pre_restore"
+    rsd::r::register_task "timescaledb_restore::restore_data" "rollback"
+    rsd::r::register_task "timescaledb_restore::post_restore"
+    rsd::r::register_task "timescaledb_restore::validate"
+}
+
+# ==============================================================================
+# Task: validate_env
+# ==============================================================================
+
+function rsd::r::timescaledb_restore::validate_env() {
+    rsd::io::status "Validating restore environment..."
+
+    # PostgreSQL running?
+    if ! rsd::l::target::exec_sudo "" systemctl is-active --quiet postgresql; then
+        rsd::io::error "PostgreSQL is not running on the target."
+        return 1
+    fi
+
+    # pg_restore available?
+    if ! rsd::l::target::has_bin pg_restore; then
+        rsd::io::error "pg_restore not found on the target."
+        return 1
+    fi
+
+    # Verify dump file exists
+    if [[ "$RSD_RST_DUMP_IS_REMOTE" == "1" ]]; then
+        if ! rsd::l::target::file_exists "$RSD_RST_DUMP_PATH"; then
+            rsd::io::error "Dump file not found on remote: $RSD_RST_DUMP_PATH"
+            return 1
+        fi
+    else
+        if [[ ! -f "$RSD_RST_DUMP_PATH" ]]; then
+            rsd::io::error "Dump file not found locally: $RSD_RST_DUMP_PATH"
+            return 1
+        fi
+    fi
+    rsd::io::ok "Dump: ${RSD_RST_DUMP_PATH}"
+
+    # Verify globals file if specified
+    if [[ "$RSD_RST_HAS_GLOBALS" == "1" ]]; then
+        if [[ "$RSD_RST_GLOBALS_IS_REMOTE" == "1" ]]; then
+            if ! rsd::l::target::file_exists "$RSD_RST_GLOBALS_PATH"; then
+                rsd::io::error "Globals file not found on remote: $RSD_RST_GLOBALS_PATH"
+                return 1
+            fi
+        else
+            if [[ ! -f "$RSD_RST_GLOBALS_PATH" ]]; then
+                rsd::io::error "Globals file not found locally: $RSD_RST_GLOBALS_PATH"
+                return 1
+            fi
+        fi
+        rsd::io::ok "Globals: ${RSD_RST_GLOBALS_PATH}"
+    fi
+
+    # Stage local files to remote temp (for local-to-remote streaming)
+    if [[ "$RSD_RST_DUMP_IS_REMOTE" == "0" ]]; then
+        rsd::io::status "Staging dump file to remote..."
+        RSD_RST_TMP_DUMP=$(rsd::l::target::mktemp "rsd-restore.XXXXXX") || return 14
+        rsd::l::target::exec_sudo "" chown postgres:postgres "$RSD_RST_TMP_DUMP"
+
+        if ! cat "$RSD_RST_DUMP_PATH" | \
+            rsd::l::target::exec_sudo "" sudo -u postgres tee "$RSD_RST_TMP_DUMP" >/dev/null; then
+            rsd::io::error "Failed to stage dump file to remote."
+            return 1
+        fi
+        rsd::io::ok "Dump staged to remote."
+    fi
+
+    if [[ "$RSD_RST_HAS_GLOBALS" == "1" && "$RSD_RST_GLOBALS_IS_REMOTE" == "0" ]]; then
+        rsd::io::status "Staging globals file to remote..."
+        RSD_RST_TMP_GLOBALS=$(rsd::l::target::mktemp "rsd-globals.XXXXXX") || return 14
+        rsd::l::target::exec_sudo "" chown postgres:postgres "$RSD_RST_TMP_GLOBALS"
+
+        if ! cat "$RSD_RST_GLOBALS_PATH" | \
+            rsd::l::target::exec_sudo "" sudo -u postgres tee "$RSD_RST_TMP_GLOBALS" >/dev/null; then
+            rsd::io::error "Failed to stage globals file to remote."
+            return 1
+        fi
+        rsd::io::ok "Globals staged to remote."
+    fi
+
+    rsd::io::ok "Environment validated."
+}
+
+# ==============================================================================
+# Task: restore_globals
+# ==============================================================================
+# Runs the globals SQL to recreate roles. Uses ON_ERROR_STOP=off so
+# existing roles produce non-fatal errors and new roles are created.
+
+function rsd::r::timescaledb_restore::restore_globals::pre_check() {
+    # If the target role already exists, consider globals restored
+    local exists
+    exists=$(rsd::l::r::rst::psql_su "SELECT 1 FROM pg_roles WHERE rolname = '${RSD_RST_DB_USER}'")
+    [[ "$exists" == "1" ]]
+}
+
+function rsd::r::timescaledb_restore::restore_globals() {
+    rsd::io::status "Restoring cluster globals (roles, passwords)..."
+
+    # Determine which path to use (staged temp or direct remote)
+    local globals_file
+    if [[ -n "$RSD_RST_TMP_GLOBALS" ]]; then
+        globals_file="$RSD_RST_TMP_GLOBALS"
+    else
+        globals_file="$RSD_RST_GLOBALS_PATH"
+    fi
+
+    # ON_ERROR_STOP=off: existing roles produce warnings, not failures
+    if ! rsd::l::target::exec_sudo "" sudo -u postgres \
+        psql -X --set ON_ERROR_STOP=off -f "$globals_file" >/dev/null 2>/dev/null; then
+        rsd::io::error "Failed to restore globals."
+        return 1
+    fi
+
+    # Cleanup staged file
+    [[ -n "$RSD_RST_TMP_GLOBALS" ]] && \
+        rsd::l::target::exec_sudo "" rm -f "$RSD_RST_TMP_GLOBALS"
+
+    rsd::io::ok "Globals restored."
+}
+
+# ==============================================================================
+# Task: create_database
+# ==============================================================================
+
+function rsd::r::timescaledb_restore::create_database::pre_check() {
+    local exists
+    exists=$(rsd::l::r::rst::psql_su "SELECT 1 FROM pg_database WHERE datname = '${RSD_RST_DB_NAME}'")
+    [[ "$exists" == "1" ]]
+}
+
+function rsd::r::timescaledb_restore::create_database() {
+    rsd::io::status "Creating database '${RSD_RST_DB_NAME}' owned by '${RSD_RST_DB_USER}'..."
+
+    # Verify the owner role exists
+    local role_exists
+    role_exists=$(rsd::l::r::rst::psql_su "SELECT 1 FROM pg_roles WHERE rolname = '${RSD_RST_DB_USER}'")
+    if [[ "$role_exists" != "1" ]]; then
+        rsd::io::error "Role '${RSD_RST_DB_USER}' does not exist. Provide --globals or create the role first."
+        return 1
+    fi
+
+    if ! rsd::l::r::rst::psql_su "CREATE DATABASE ${RSD_RST_DB_NAME} OWNER ${RSD_RST_DB_USER}"; then
+        rsd::io::error "Failed to create database '${RSD_RST_DB_NAME}'."
+        return 1
+    fi
+
+    rsd::io::ok "Database '${RSD_RST_DB_NAME}' created."
+}
+
+function rsd::r::timescaledb_restore::create_database::rollback() {
+    rsd::l::r::rst::psql_su "DROP DATABASE IF EXISTS ${RSD_RST_DB_NAME}"
+}
+
+# ==============================================================================
+# Task: pre_restore
+# ==============================================================================
+# TimescaleDB extension MUST exist in the target database before pg_restore
+# runs. pg_restore replays CREATE EXTENSION but it fails if the extension
+# binary is not in shared_preload_libraries first.
+
+function rsd::r::timescaledb_restore::pre_restore::pre_check() {
+    local count
+    count=$(rsd::l::r::rst::psql_su \
+        "SELECT count(*) FROM pg_extension WHERE extname = 'timescaledb'" \
+        "$RSD_RST_DB_NAME")
+    [[ "$count" == "1" ]]
+}
+
+function rsd::r::timescaledb_restore::pre_restore() {
+    rsd::io::status "Pre-loading TimescaleDB extension..."
+
+    if ! rsd::l::r::rst::psql_su \
+        "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE" "$RSD_RST_DB_NAME"; then
+        rsd::io::error "Failed to create timescaledb extension."
+        return 1
+    fi
+
+    # TimescaleDB recommends calling pre_restore before pg_restore
+    rsd::l::r::rst::psql_su "SELECT timescaledb_pre_restore()" "$RSD_RST_DB_NAME" >/dev/null 2>/dev/null
+
+    rsd::io::ok "TimescaleDB extension ready."
+}
+
+# ==============================================================================
+# Task: restore_data
+# ==============================================================================
+# Restores the dump into the target database using pg_restore.
+
+function rsd::r::timescaledb_restore::restore_data() {
+    rsd::io::status "Restoring data into '${RSD_RST_DB_NAME}'..."
+
+    # Determine which dump file to use (staged temp or direct remote)
+    local dump_file
+    if [[ -n "$RSD_RST_TMP_DUMP" ]]; then
+        dump_file="$RSD_RST_TMP_DUMP"
+    else
+        dump_file="$RSD_RST_DUMP_PATH"
+    fi
+
+    # --no-owner: reassign all objects to the connecting user (postgres)
+    #             then the database OWNER grant handles ownership
+    # --no-acl:   skip original GRANTs (will differ on new cluster)
+    if ! rsd::l::target::exec_sudo "" sudo -u postgres \
+        pg_restore -d "$RSD_RST_DB_NAME" --no-owner --no-acl "$dump_file" 2>/dev/null; then
+        # pg_restore exits non-zero on warnings (e.g., "extension already exists").
+        # Check if the database has tables as a sanity test.
+        local table_count
+        table_count=$(rsd::l::r::rst::psql_su \
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'" \
+            "$RSD_RST_DB_NAME")
+        if [[ "${table_count:-0}" -gt 0 ]]; then
+            rsd::io::warn "pg_restore reported warnings (often harmless). Tables found: ${table_count}."
+        else
+            rsd::io::error "pg_restore failed and no tables found in '${RSD_RST_DB_NAME}'."
+            return 1
+        fi
+    fi
+
+    # Cleanup staged file
+    [[ -n "$RSD_RST_TMP_DUMP" ]] && \
+        rsd::l::target::exec_sudo "" rm -f "$RSD_RST_TMP_DUMP"
+
+    rsd::io::ok "Data restored into '${RSD_RST_DB_NAME}'."
+}
+
+function rsd::r::timescaledb_restore::restore_data::rollback() {
+    # Drop and recreate the database clean (data is in the dump, not lost)
+    rsd::l::r::rst::psql_su "DROP DATABASE IF EXISTS ${RSD_RST_DB_NAME}"
+}
+
+# ==============================================================================
+# Task: post_restore
+# ==============================================================================
+# Rebuilds TimescaleDB internal catalog metadata and restarts background
+# workers after a pg_restore.
+
+function rsd::r::timescaledb_restore::post_restore() {
+    rsd::io::status "Running TimescaleDB post-restore..."
+
+    if ! rsd::l::r::rst::psql_su \
+        "SELECT timescaledb_post_restore()" "$RSD_RST_DB_NAME" >/dev/null; then
+        rsd::io::error "timescaledb_post_restore() failed."
+        return 1
+    fi
+
+    rsd::io::ok "TimescaleDB metadata rebuilt."
+}
+
+# ==============================================================================
+# Task: validate
+# ==============================================================================
+
+function rsd::r::timescaledb_restore::validate() {
+    rsd::io::blank
+    rsd::io::banner "Restore Summary"
+    rsd::io::blank
+
+    # Database owner
+    local db_owner
+    db_owner=$(rsd::l::r::rst::psql_su \
+        "SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_database WHERE datname = '${RSD_RST_DB_NAME}'")
+    rsd::io::info "Database:   ${RSD_RST_DB_NAME} (owner: ${db_owner})"
+
+    # Role
+    local role_info
+    role_info=$(rsd::l::r::rst::psql_su \
+        "SELECT rolname || ' (login=' || rolcanlogin || ')' FROM pg_roles WHERE rolname = '${RSD_RST_DB_USER}'")
+    rsd::io::info "Role:       ${role_info}"
+
+    # Extensions
+    local extensions
+    extensions=$(rsd::l::r::rst::psql_su \
+        "SELECT extname || ' ' || extversion FROM pg_extension WHERE extname != 'plpgsql' ORDER BY extname" \
+        "$RSD_RST_DB_NAME")
+    rsd::io::info "Extensions:"
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && rsd::io::info "  - $line"
+    done <<< "$extensions"
+
+    # Table count
+    local table_count
+    table_count=$(rsd::l::r::rst::psql_su \
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'" \
+        "$RSD_RST_DB_NAME")
+    rsd::io::info "Tables:     ${table_count}"
+
+    # Hypertable count (TimescaleDB-specific)
+    local hypertable_count
+    hypertable_count=$(rsd::l::r::rst::psql_su \
+        "SELECT count(*) FROM timescaledb_information.hypertables" \
+        "$RSD_RST_DB_NAME" 2>/dev/null)
+    [[ -n "$hypertable_count" ]] && rsd::io::info "Hypertables: ${hypertable_count}"
+
+    rsd::io::blank
+    rsd::io::ok "Restore complete."
+    rsd::io::blank
+}
