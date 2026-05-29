@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# UFW Firewall Management Library
+# ==============================================================================
+#
+# Target-aware primitives for querying and configuring UFW (Uncomplicated
+# Firewall). All operations route through rsd::l::target::exec_sudo, so
+# they work transparently on both local and remote targets.
+#
+# UFW is a user-friendly frontend to iptables/nftables. It simplifies
+# firewall rule management on Linux systems. This library wraps the common
+# UFW operations needed by provisioning recipes.
+#
+# Dependencies:
+#   - target.lib  (loaded automatically by the RSD framework)
+#   - sudo.lib    (loaded on-demand by exec_sudo for local targets)
+#   - remote.lib  (loaded by the framework when $RSD_REMOTE_TARGET is set)
+#
+# All functions require the 'ufw' binary on the target host. Callers
+# should verify availability with rsd::l::target::has_bin before invoking.
+#
+# namespace rsd::l::ufw::
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+RSD_UFW_LIB=1
+RSD_UFW_LIB_VERSION="0.1.0"
+
+# ==============================================================================
+# Query Functions
+# ==============================================================================
+
+# Capture the full UFW status output (verbose mode).
+# Returns status line, default policies, logging level, and all active rules.
+#
+# Typical output when active:
+#   Status: active
+#   Logging: on (low)
+#   Default: deny (incoming), allow (outgoing), disabled (routed)
+#   ...
+#   22/tcp                     ALLOW IN    Anywhere
+#
+# @param string& $1 nameref output variable for the status text.
+# @return int 0 on success, non-zero if ufw command fails.
+function rsd::l::ufw::get_status() {
+    local _out_var="$1"
+    declare -n _r_status="$_out_var"
+    _r_status=$(rsd::l::target::exec_sudo "" ufw status verbose 2>/dev/null)
+}
+
+# ==============================================================================
+# Action Functions — Firewall State Mutations
+# ==============================================================================
+
+# Reset UFW to factory defaults.
+# Disables the firewall and removes ALL user-defined rules.
+# Uses --force to prevent interactive confirmation over SSH.
+#
+# WARNING: This briefly leaves the host without any firewall rules.
+#          Always re-configure and re-enable immediately after reset.
+#
+# @return int 0 on success.
+function rsd::l::ufw::reset() {
+    rsd::l::target::exec_sudo "" ufw --force reset
+}
+
+# Set the default policy for a traffic direction.
+#
+# @param string $1 Policy: "allow", "deny", or "reject".
+# @param string $2 Direction: "incoming", "outgoing", or "routed".
+# @return int 0 on success.
+function rsd::l::ufw::default_policy() {
+    local policy="$1"
+    local direction="$2"
+    rsd::l::target::exec_sudo "" ufw default "$policy" "$direction"
+}
+
+# Add an allow rule to the firewall.
+# Accepts port numbers, port/proto combinations, or service names.
+#
+# Examples:
+#   rsd::l::ufw::allow "22/tcp"      — Allow SSH
+#   rsd::l::ufw::allow "ssh"         — Allow SSH by service name
+#   rsd::l::ufw::allow "80/tcp"      — Allow HTTP
+#   rsd::l::ufw::allow "443"         — Allow HTTPS (TCP + UDP)
+#
+# @param string $1 Rule specification (port, port/proto, or service name).
+# @return int 0 on success.
+function rsd::l::ufw::allow() {
+    local rule="$1"
+    rsd::l::target::exec_sudo "" ufw allow "$rule"
+}
+
+# Add a deny rule to the firewall.
+#
+# @param string $1 Rule specification (port, port/proto, or service name).
+# @return int 0 on success.
+function rsd::l::ufw::deny() {
+    local rule="$1"
+    rsd::l::target::exec_sudo "" ufw deny "$rule"
+}
+
+# Delete an existing rule from the firewall.
+#
+# @param string $1 Rule type: "allow", "deny", or "reject".
+# @param string $2 Rule specification (port, port/proto, or service name).
+# @return int 0 on success.
+function rsd::l::ufw::delete_rule() {
+    local rule_type="$1"
+    local rule="$2"
+    rsd::l::target::exec_sudo "" ufw delete "$rule_type" "$rule"
+}
+
+# Enable the UFW firewall.
+# Uses --force to prevent interactive "are you sure?" prompts that
+# would hang non-interactive SSH sessions.
+#
+# @return int 0 on success.
+function rsd::l::ufw::enable() {
+    rsd::l::target::exec_sudo "" ufw --force enable
+}
+
+# Disable the UFW firewall.
+# Stops enforcing all rules but preserves the rule configuration.
+#
+# @return int 0 on success.
+function rsd::l::ufw::disable() {
+    rsd::l::target::exec_sudo "" ufw disable
+}

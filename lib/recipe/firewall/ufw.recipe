@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# Firewall Hardening Recipe — UFW
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Configures a strict deny-all-incoming firewall using UFW (Uncomplicated
+# Firewall), allowing only SSH access. Designed for new server provisioning
+# where a clean, secure baseline is needed before opening additional ports
+# for application services.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+# 1. Verifies UFW is installed on the target host. If not, prints distro-
+#    specific install commands and aborts — it will NOT install UFW for you.
+# 2. Detects the SSH port from the remote target spec (e.g., @ssh://user@host:2222).
+#    Port 22 is always allowed. Custom ports detected from the pathway are
+#    also allowed as a safety net to prevent lockout.
+# 3. Resets UFW to factory defaults (ufw --force reset). This clears ALL
+#    existing rules and briefly disables the firewall.
+# 4. Sets default policies:
+#      - incoming → DENY  (block everything by default)
+#      - outgoing → ALLOW (server can reach the internet)
+# 5. Adds allow rules for SSH port(s) (TCP only).
+# 6. Enables UFW with --force (no interactive prompt).
+# 7. Prints the resulting firewall status for verification.
+#
+# IDEMPOTENCY
+# -----------
+# Running this recipe multiple times is safe. The pre_check detects if the
+# desired state is already achieved (active + deny incoming + allow outgoing
+# + SSH port(s) allowed) and skips. If the recipe runs, the reset ensures
+# a deterministic end state regardless of prior configuration.
+#
+# SAFETY
+# ------
+# - The reset window (firewall briefly disabled) is milliseconds. SSH traffic
+#   continues uninterrupted because the absence of a firewall means all ports
+#   are open, not closed.
+# - Custom SSH ports are auto-detected from the remote target specification
+#   to prevent lockout on non-standard setups.
+# - Port 22 is ALWAYS allowed even when a custom port is detected, as a
+#   fallback safety measure.
+# - Recovery mode is "forward" — if the recipe fails mid-way, fix the issue
+#   and re-run. Already-satisfied tasks will be skipped.
+#
+# SCOPE
+# -----
+# Works on both local and remote targets. For remote targets, uses the
+# RSD target routing infrastructure (rsd::l::target::exec_sudo).
+#
+# AFTER THIS RECIPE
+# -----------------
+# To open additional ports for services (e.g., HTTP, HTTPS):
+#   rsd @target -- sudo ufw allow 80/tcp
+#   rsd @target -- sudo ufw allow 443/tcp
+#   rsd @target -- sudo ufw status
+#
+# Usage: rsd recipe run firewall/ufw
+#        rsd @target recipe run firewall/ufw
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load dependencies
+[[ "$RSD_UFW_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/ufw.lib)"
+
+# ==============================================================================
+# Helpers
+# ==============================================================================
+
+# Detect SSH port(s) that should be allowed through the firewall.
+# Always includes port 22. For remote targets, inspects the pathway
+# spec for custom port mappings (e.g., ssh://user@host:2222).
+# Results are cached globally to avoid redundant pathway resolution.
+#
+# After calling, the global array RSD_FIREWALL_SSH_PORTS contains
+# the port numbers to allow (e.g., (22) or (22 2222)).
+function rsd::l::r::firewall_ufw::detect_ssh_ports() {
+    # Return cached if already resolved
+    if [[ ${#RSD_FIREWALL_SSH_PORTS[@]} -gt 0 ]]; then
+        return 0
+    fi
+
+    declare -g -a RSD_FIREWALL_SSH_PORTS=(22)
+
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        local -a hops=()
+        rsd::l::remote::resolve_pathway "$RSD_REMOTE_TARGET" hops
+
+        # Walk hops backwards to find the last SSH connection (closest to
+        # the target server). Skip sudo/lxc hops.
+        local i proto="" user="" host="" port=""
+        for (( i=${#hops[@]}-1; i>=0; i-- )); do
+            rsd::l::remote::parse_spec "${hops[i]}" proto user host port
+            if [[ "$proto" == "ssh" ]]; then
+                if [[ -n "$port" && "$port" != "22" ]]; then
+                    RSD_FIREWALL_SSH_PORTS+=("$port")
+                fi
+                break
+            fi
+        done
+    fi
+}
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::firewall_ufw::register() {
+    rsd::r::register_task "firewall_ufw::harden" "forward"
+}
+
+# ==============================================================================
+# Task: harden
+# ==============================================================================
+
+# Pre-check: skip if UFW is already active with the desired configuration.
+# Verifies: installed, active, deny incoming, allow outgoing, SSH port(s) allowed.
+function rsd::r::firewall_ufw::harden::pre_check() {
+    rsd::l::target::has_bin ufw || return 1
+
+    local status=""
+    rsd::l::ufw::get_status status
+
+    # Must be active with correct default policies
+    [[ "$status" == *"Status: active"* ]]    || return 1
+    [[ "$status" == *"deny (incoming)"* ]]   || return 1
+    [[ "$status" == *"allow (outgoing)"* ]]  || return 1
+
+    # All required SSH ports must have allow rules
+    rsd::l::r::firewall_ufw::detect_ssh_ports
+    local p
+    for p in "${RSD_FIREWALL_SSH_PORTS[@]}"; do
+        [[ "$status" == *"${p}/tcp"*"ALLOW"* ]] || return 1
+    done
+
+    return 0
+}
+
+# Apply: reset firewall and configure deny-all + allow-SSH policy.
+function rsd::r::firewall_ufw::harden() {
+    # --- Gate: UFW must be installed ---
+    if ! rsd::l::target::has_bin ufw; then
+        rsd::warn ""
+        rsd::warn "  ┌─────────────────────────────────────────────────┐"
+        rsd::warn "  │  UFW is not installed on the target host.       │"
+        rsd::warn "  └─────────────────────────────────────────────────┘"
+        rsd::warn ""
+        rsd::warn "  Install UFW using your distribution's package manager:"
+        rsd::warn ""
+        rsd::warn "    Debian / Ubuntu :  sudo apt install ufw"
+        rsd::warn "    Arch Linux      :  sudo pacman -S ufw"
+        rsd::warn "    Fedora / RHEL   :  sudo dnf install ufw"
+        rsd::warn "    Alpine Linux    :  sudo apk add ufw"
+        rsd::warn "    openSUSE        :  sudo zypper install ufw"
+        rsd::warn ""
+        rsd::warn "  Then re-run this recipe."
+        return 3
+    fi
+
+    # --- Detect SSH port(s) ---
+    rsd::l::r::firewall_ufw::detect_ssh_ports
+
+    rsd::warn ""
+    rsd::warn "  Firewall hardening: deny all incoming, allow SSH only."
+    rsd::warn "  SSH port(s) to allow: ${RSD_FIREWALL_SSH_PORTS[*]}"
+    rsd::warn ""
+
+    # --- Phase 1: Reset to clean slate ---
+    rsd::warn "  [1/5] Resetting UFW to factory defaults..."
+    if ! rsd::l::ufw::reset; then
+        rsd::warn "  [ERROR] ufw reset failed."
+        return 1
+    fi
+
+    # --- Phase 2: Set default policies ---
+    rsd::warn "  [2/5] Setting default policy: deny incoming..."
+    if ! rsd::l::ufw::default_policy "deny" "incoming"; then
+        rsd::warn "  [ERROR] Failed to set default deny incoming."
+        return 1
+    fi
+
+    rsd::warn "  [3/5] Setting default policy: allow outgoing..."
+    if ! rsd::l::ufw::default_policy "allow" "outgoing"; then
+        rsd::warn "  [ERROR] Failed to set default allow outgoing."
+        return 1
+    fi
+
+    # --- Phase 3: Allow SSH port(s) ---
+    local p
+    for p in "${RSD_FIREWALL_SSH_PORTS[@]}"; do
+        rsd::warn "  [4/5] Allowing SSH on port ${p}/tcp..."
+        if ! rsd::l::ufw::allow "${p}/tcp"; then
+            rsd::warn "  [ERROR] Failed to allow port ${p}/tcp."
+            return 1
+        fi
+    done
+
+    # --- Phase 4: Enable firewall ---
+    rsd::warn "  [5/5] Enabling UFW..."
+    if ! rsd::l::ufw::enable; then
+        rsd::warn "  [ERROR] Failed to enable UFW."
+        return 1
+    fi
+
+    # --- Verification: show final state ---
+    rsd::warn ""
+    rsd::warn "  ┌─────────────────────────────────────────────────┐"
+    rsd::warn "  │  Firewall hardened successfully.                │"
+    rsd::warn "  └─────────────────────────────────────────────────┘"
+    rsd::warn ""
+
+    local final_status=""
+    rsd::l::ufw::get_status final_status
+    rsd::warn "$final_status"
+
+    return 0
+}
