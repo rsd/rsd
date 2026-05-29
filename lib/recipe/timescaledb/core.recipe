@@ -1,0 +1,530 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# TimescaleDB on PostgreSQL — Core Provisioning Recipe
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Installs PostgreSQL 18 from the PGDG upstream repository and TimescaleDB
+# from Timescale's official packagecloud repository on Ubuntu 26.04 LTS.
+# Configures the extension, tunes the server, and validates the install.
+#
+# WHY TWO THIRD-PARTY REPOSITORIES?
+# ----------------------------------
+# Ubuntu 26.04 ships PostgreSQL 18 in its own repos, but Timescale's
+# extension packages are compiled against the PGDG build of PostgreSQL.
+# Mixing Ubuntu's PG build with Timescale's extension can cause ABI
+# mismatches. Timescale's own install docs add PGDG first, then install
+# their extension on top. This recipe follows the same path:
+#   1. PGDG (apt.postgresql.org)  → postgresql-18, postgresql-client-18
+#   2. Timescale (packagecloud.io) → timescaledb-2-postgresql-18
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+#  1. add_pgdg_repo       — Downloads the PGDG signing key and creates the
+#                           DEB822-format APT sources file for resolute-pgdg.
+#  2. add_timescale_repo  — Downloads and dearmors the Timescale signing key,
+#                           creates the DEB822 sources file for packagecloud.
+#  3. verify_repos        — Runs apt-get update and verifies that both
+#                           postgresql-18 and timescaledb-2-postgresql-18
+#                           have installable candidates. FAIL-CLOSED: if
+#                           Timescale doesn't publish for this codename yet,
+#                           the recipe removes the broken source file and halts.
+#  4. install_packages    — Installs PostgreSQL 18, TimescaleDB, contrib,
+#                           tools, and optionally the toolkit extension.
+#  5. configure_preload   — Sets shared_preload_libraries to include
+#                           timescaledb and pg_stat_statements.
+#  6. run_tune            — Runs timescaledb-tune for server-aware defaults.
+#  7. disable_telemetry   — Sets timescaledb.telemetry_level = off.
+#  8. restart_service     — Restarts and enables the PostgreSQL service.
+#  9. validate_install    — Smoke-tests: PG version, preload status,
+#                           extension availability.
+#
+# NETWORK POSTURE
+# ---------------
+# This recipe configures a localhost-only PostgreSQL server. No pg_hba
+# changes, no listen_addresses changes, no TLS, no firewall rules.
+# Ubuntu 26.04 defaults to localhost + scram-sha-256, which is exactly
+# the desired end state.
+#
+# PLATFORM SUPPORT
+# ----------------
+# Ubuntu 26.04 LTS (resolute) only. amd64 and arm64 architectures.
+# The platform guard in ::register() enforces this.
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. Each task has a pre_check that detects
+# whether the desired state is already satisfied.
+#
+# SCOPE
+# -----
+# Works on both local and remote targets.
+#
+# Usage: rsd recipe run timescaledb/core
+#        rsd @dbserver recipe run timescaledb/core
+#        rsd @dbserver recipe run timescaledb/core --dry-run --verbose
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load dependencies
+[[ "$RSD_HOST_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/host.lib)"
+[[ "$RSD_APT_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/apt.lib)"
+
+# ==============================================================================
+# Constants
+# ==============================================================================
+
+declare -g RSD_TSDB_PG_VERSION="18"
+declare -g RSD_TSDB_PG_CONF="/etc/postgresql/${RSD_TSDB_PG_VERSION}/main/postgresql.conf"
+
+declare -g RSD_TSDB_PGDG_KEY_URL="https://www.postgresql.org/media/keys/ACCC4CF8.asc"
+declare -g RSD_TSDB_PGDG_KEY_PATH="/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc"
+declare -g RSD_TSDB_PGDG_SOURCE_PATH="/etc/apt/sources.list.d/pgdg.sources"
+
+declare -g RSD_TSDB_TIMESCALE_KEY_URL="https://packagecloud.io/timescale/timescaledb/gpgkey"
+declare -g RSD_TSDB_TIMESCALE_KEY_PATH="/usr/share/keyrings/timescale_timescaledb.gpg"
+declare -g RSD_TSDB_TIMESCALE_SOURCE_PATH="/etc/apt/sources.list.d/timescale_timescaledb.sources"
+
+# ==============================================================================
+# Helpers
+# ==============================================================================
+
+# Resolve target platform properties for install decisions.
+# Results are cached globally to avoid redundant SSH round-trips.
+#
+# @param string& $1 nameref output: codename (e.g., "resolute").
+# @param string& $2 nameref output: arch (e.g., "amd64").
+# @return int 0 on success.
+function rsd::l::r::tsdb::resolve_platform() {
+    local _out_code="$1"
+    local _out_arch="$2"
+    declare -n _r_code="$_out_code"
+    declare -n _r_arch="$_out_arch"
+
+    # Return cached values if available
+    if [[ -n "${RSD_TSDB_CODENAME:-}" ]]; then
+        _r_code="$RSD_TSDB_CODENAME"
+        _r_arch="$RSD_TSDB_ARCH"
+        return 0
+    fi
+
+    local host_alias="localhost"
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        host_alias="${RSD_REMOTE_TARGET#@}"
+    fi
+
+    local distro="" family="" version=""
+    rsd::l::host::get_property "$host_alias" "family" family
+    rsd::l::host::get_property "$host_alias" "distro" distro
+    rsd::l::host::get_property "$host_alias" "version" version
+
+    # Platform guards
+    if [[ "$family" != "debian" || "$distro" != "ubuntu" ]]; then
+        rsd::warn "Error: This recipe requires Ubuntu. Detected: family=$family, distro=$distro."
+        exit 2
+    fi
+
+    if ! rsd::l::host::version_gte "$version" "26.04"; then
+        rsd::warn "Error: This recipe requires Ubuntu 26.04+. Detected version: $version."
+        exit 2
+    fi
+
+    # Resolve codename — for Ubuntu 26.04 this is "resolute"
+    # We derive it from the target rather than hardcoding
+    local codename=""
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        codename=$(rsd::l::target::exec lsb_release -cs 2>/dev/null)
+        bash::trim codename
+    else
+        codename=$(lsb_release -cs 2>/dev/null)
+    fi
+
+    if [[ -z "$codename" ]]; then
+        rsd::warn "Error: Could not determine Ubuntu codename via lsb_release."
+        exit 2
+    fi
+
+    # Resolve architecture
+    local arch=""
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        arch=$(rsd::l::target::exec dpkg --print-architecture 2>/dev/null)
+        bash::trim arch
+    else
+        arch=$(dpkg --print-architecture 2>/dev/null)
+    fi
+
+    case "$arch" in
+        amd64|arm64) ;;
+        *)
+            rsd::warn "Error: Unsupported architecture: $arch. PGDG and Timescale support amd64 and arm64."
+            exit 2
+            ;;
+    esac
+
+    # Cache for subsequent tasks
+    declare -g RSD_TSDB_CODENAME="$codename"
+    declare -g RSD_TSDB_ARCH="$arch"
+    _r_code="$codename"
+    _r_arch="$arch"
+}
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::tsdb_core::register() {
+    # Pre-resolve platform — validates OS/arch/codename before registering tasks.
+    # Exits early with code 2 if platform requirements are not met.
+    local codename="" arch=""
+    rsd::l::r::tsdb::resolve_platform codename arch
+
+    rsd::r::register_task "tsdb_core::add_pgdg_repo" "rollback"
+    rsd::r::register_task "tsdb_core::add_timescale_repo" "rollback"
+    rsd::r::register_task "tsdb_core::verify_repos"
+    rsd::r::register_task "tsdb_core::install_packages"
+    rsd::r::register_task "tsdb_core::configure_preload" "rollback"
+    rsd::r::register_task "tsdb_core::run_tune" "ignore"
+    rsd::r::register_task "tsdb_core::disable_telemetry" "rollback"
+    rsd::r::register_task "tsdb_core::restart_service"
+    rsd::r::register_task "tsdb_core::validate_install"
+}
+
+# ==============================================================================
+# Task: add_pgdg_repo
+# ==============================================================================
+
+function rsd::r::tsdb_core::add_pgdg_repo::pre_check() {
+    rsd::l::target::file_exists "$RSD_TSDB_PGDG_SOURCE_PATH"
+}
+
+function rsd::r::tsdb_core::add_pgdg_repo() {
+    local codename="" arch=""
+    rsd::l::r::tsdb::resolve_platform codename arch
+
+    rsd::warn "  Adding PGDG repository (apt.postgresql.org)..."
+
+    # Download the PGDG signing key (armored .asc)
+    if ! rsd::l::apt::download_key "$RSD_TSDB_PGDG_KEY_URL" "$RSD_TSDB_PGDG_KEY_PATH"; then
+        rsd::warn "  [ERROR] Failed to download PGDG signing key."
+        return 1
+    fi
+
+    # Write DEB822-format sources file
+    local source_content
+    source_content="Types: deb
+URIs: https://apt.postgresql.org/pub/repos/apt
+Suites: ${codename}-pgdg
+Components: main
+Architectures: ${arch}
+Signed-By: ${RSD_TSDB_PGDG_KEY_PATH}"
+
+    if ! rsd::l::apt::write_source "$RSD_TSDB_PGDG_SOURCE_PATH" "$source_content"; then
+        rsd::warn "  [ERROR] Failed to write PGDG sources file."
+        return 1
+    fi
+
+    rsd::warn "  [OK] PGDG repository added."
+}
+
+function rsd::r::tsdb_core::add_pgdg_repo::rollback() {
+    rsd::l::apt::remove_source "$RSD_TSDB_PGDG_SOURCE_PATH"
+    rsd::l::apt::remove_key "$RSD_TSDB_PGDG_KEY_PATH"
+}
+
+# ==============================================================================
+# Task: add_timescale_repo
+# ==============================================================================
+
+function rsd::r::tsdb_core::add_timescale_repo::pre_check() {
+    rsd::l::target::file_exists "$RSD_TSDB_TIMESCALE_SOURCE_PATH"
+}
+
+function rsd::r::tsdb_core::add_timescale_repo() {
+    local codename="" arch=""
+    rsd::l::r::tsdb::resolve_platform codename arch
+
+    rsd::warn "  Adding Timescale repository (packagecloud.io)..."
+
+    # Download and dearmor the Timescale signing key
+    if ! rsd::l::apt::download_key_dearmored "$RSD_TSDB_TIMESCALE_KEY_URL" "$RSD_TSDB_TIMESCALE_KEY_PATH"; then
+        rsd::warn "  [ERROR] Failed to download Timescale signing key."
+        return 1
+    fi
+
+    # Write DEB822-format sources file
+    local source_content
+    source_content="Types: deb
+URIs: https://packagecloud.io/timescale/timescaledb/ubuntu/
+Suites: ${codename}
+Components: main
+Architectures: ${arch}
+Signed-By: ${RSD_TSDB_TIMESCALE_KEY_PATH}"
+
+    if ! rsd::l::apt::write_source "$RSD_TSDB_TIMESCALE_SOURCE_PATH" "$source_content"; then
+        rsd::warn "  [ERROR] Failed to write Timescale sources file."
+        return 1
+    fi
+
+    rsd::warn "  [OK] Timescale repository added."
+}
+
+function rsd::r::tsdb_core::add_timescale_repo::rollback() {
+    rsd::l::apt::remove_source "$RSD_TSDB_TIMESCALE_SOURCE_PATH"
+    rsd::l::apt::remove_key "$RSD_TSDB_TIMESCALE_KEY_PATH"
+}
+
+# ==============================================================================
+# Task: verify_repos
+# ==============================================================================
+# Fail-closed verification: if Timescale doesn't publish packages for this
+# codename, the recipe removes the broken source file and halts cleanly.
+
+function rsd::r::tsdb_core::verify_repos::pre_check() {
+    rsd::l::apt::has_candidate "timescaledb-2-postgresql-${RSD_TSDB_PG_VERSION}"
+}
+
+function rsd::r::tsdb_core::verify_repos() {
+    rsd::warn "  Updating APT package index..."
+
+    if ! rsd::l::apt::update; then
+        rsd::warn ""
+        rsd::warn "  ┌─────────────────────────────────────────────────────────────┐"
+        rsd::warn "  │  APT update failed after adding repositories.              │"
+        rsd::warn "  │  Timescale may not publish packages for this codename yet. │"
+        rsd::warn "  └─────────────────────────────────────────────────────────────┘"
+        rsd::warn ""
+        rsd::warn "  Removing Timescale source file to avoid breaking normal apt operations."
+        rsd::l::apt::remove_source "$RSD_TSDB_TIMESCALE_SOURCE_PATH"
+        return 1
+    fi
+
+    # Verify PGDG candidate
+    if ! rsd::l::apt::has_candidate "postgresql-${RSD_TSDB_PG_VERSION}"; then
+        rsd::warn "  [ERROR] postgresql-${RSD_TSDB_PG_VERSION} has no APT candidate."
+        rsd::warn "  PGDG may not support this platform yet."
+        return 1
+    fi
+    rsd::warn "  [OK] postgresql-${RSD_TSDB_PG_VERSION} candidate found."
+
+    # Verify Timescale candidate (fail-closed)
+    if ! rsd::l::apt::has_candidate "timescaledb-2-postgresql-${RSD_TSDB_PG_VERSION}"; then
+        rsd::warn ""
+        rsd::warn "  ┌─────────────────────────────────────────────────────────────┐"
+        rsd::warn "  │  timescaledb-2-postgresql-${RSD_TSDB_PG_VERSION} has no APT candidate.     │"
+        rsd::warn "  │  Timescale does not publish for this codename yet.          │"
+        rsd::warn "  └─────────────────────────────────────────────────────────────┘"
+        rsd::warn ""
+        rsd::warn "  Removing Timescale source file to avoid breaking normal apt operations."
+        rsd::warn "  Options:"
+        rsd::warn "    A. Wait for official packages."
+        rsd::warn "    B. Use a TimescaleDB Docker image."
+        rsd::warn "    C. Build TimescaleDB from source."
+        rsd::warn ""
+        rsd::l::apt::remove_source "$RSD_TSDB_TIMESCALE_SOURCE_PATH"
+        return 1
+    fi
+    rsd::warn "  [OK] timescaledb-2-postgresql-${RSD_TSDB_PG_VERSION} candidate found."
+}
+
+# ==============================================================================
+# Task: install_packages
+# ==============================================================================
+
+function rsd::r::tsdb_core::install_packages::pre_check() {
+    rsd::l::target::exec dpkg -l "timescaledb-2-postgresql-${RSD_TSDB_PG_VERSION}" 2>/dev/null | grep -q '^ii'
+}
+
+function rsd::r::tsdb_core::install_packages() {
+    rsd::warn "  Installing PostgreSQL ${RSD_TSDB_PG_VERSION} and TimescaleDB..."
+
+    if ! rsd::l::apt::install \
+        "postgresql-${RSD_TSDB_PG_VERSION}" \
+        "postgresql-client-${RSD_TSDB_PG_VERSION}" \
+        "postgresql-contrib-${RSD_TSDB_PG_VERSION}" \
+        "timescaledb-2-postgresql-${RSD_TSDB_PG_VERSION}" \
+        "timescaledb-tools"; then
+        rsd::warn "  [ERROR] Package installation failed."
+        return 1
+    fi
+    rsd::warn "  [OK] Core packages installed."
+
+    # Toolkit: optional, install if available
+    if rsd::l::apt::has_candidate "timescaledb-toolkit-postgresql-${RSD_TSDB_PG_VERSION}"; then
+        rsd::warn "  Installing TimescaleDB Toolkit..."
+        if rsd::l::apt::install "timescaledb-toolkit-postgresql-${RSD_TSDB_PG_VERSION}"; then
+            rsd::warn "  [OK] Toolkit installed."
+        else
+            rsd::warn "  [WARNING] Toolkit installation failed; continuing without it."
+        fi
+    else
+        rsd::warn "  [INFO] timescaledb-toolkit-postgresql-${RSD_TSDB_PG_VERSION} not available; skipping."
+    fi
+}
+
+# ==============================================================================
+# Task: configure_preload
+# ==============================================================================
+# Ensures shared_preload_libraries includes timescaledb and pg_stat_statements.
+# TimescaleDB REQUIRES being in shared_preload_libraries — CREATE EXTENSION
+# will fail without it. pg_stat_statements provides query-level observability
+# and must also be preloaded at server start (cannot be added live).
+
+function rsd::r::tsdb_core::configure_preload::pre_check() {
+    rsd::l::target::file_contains "timescaledb" "$RSD_TSDB_PG_CONF" && \
+    rsd::l::target::file_contains "pg_stat_statements" "$RSD_TSDB_PG_CONF"
+}
+
+function rsd::r::tsdb_core::configure_preload() {
+    rsd::warn "  Configuring shared_preload_libraries..."
+
+    if ! rsd::l::target::file_exists "$RSD_TSDB_PG_CONF"; then
+        rsd::warn "  [ERROR] PostgreSQL config not found at: $RSD_TSDB_PG_CONF"
+        return 1
+    fi
+
+    # Backup before modifying
+    rsd::l::target::exec_sudo "" cp "$RSD_TSDB_PG_CONF" "${RSD_TSDB_PG_CONF}.rsd.bak"
+
+    # Replace or append shared_preload_libraries
+    local preload_value="'timescaledb,pg_stat_statements'"
+
+    if rsd::l::target::exec grep -Eq "^[[:space:]]*shared_preload_libraries[[:space:]]*=" "$RSD_TSDB_PG_CONF"; then
+        rsd::l::target::exec_sudo "" sed -i \
+            "s/^[[:space:]]*shared_preload_libraries[[:space:]]*=.*/shared_preload_libraries = ${preload_value}/" \
+            "$RSD_TSDB_PG_CONF"
+    else
+        # Append if not present (including commented-out lines)
+        rsd::l::target::exec_sudo "" sh -c \
+            "'echo \"shared_preload_libraries = ${preload_value}\" >> $RSD_TSDB_PG_CONF'"
+    fi
+
+    rsd::warn "  [OK] shared_preload_libraries set to: ${preload_value}"
+}
+
+function rsd::r::tsdb_core::configure_preload::rollback() {
+    if rsd::l::target::file_exists "${RSD_TSDB_PG_CONF}.rsd.bak"; then
+        rsd::l::target::exec_sudo "" mv "${RSD_TSDB_PG_CONF}.rsd.bak" "$RSD_TSDB_PG_CONF"
+    fi
+}
+
+# ==============================================================================
+# Task: run_tune
+# ==============================================================================
+# timescaledb-tune adjusts PostgreSQL memory/worker settings for TimescaleDB.
+# Recovery: ignore — tuning is advisory, failure should not block the install.
+
+function rsd::r::tsdb_core::run_tune() {
+    rsd::warn "  Running timescaledb-tune..."
+
+    if ! rsd::l::target::has_bin timescaledb-tune; then
+        rsd::warn "  [WARNING] timescaledb-tune not found in PATH. Skipping."
+        return 1
+    fi
+
+    rsd::l::target::exec_sudo "" timescaledb-tune --quiet --yes
+    rsd::warn "  [OK] TimescaleDB tuning applied."
+}
+
+# ==============================================================================
+# Task: disable_telemetry
+# ==============================================================================
+
+function rsd::r::tsdb_core::disable_telemetry::pre_check() {
+    rsd::l::target::file_contains "timescaledb.telemetry_level = off" "$RSD_TSDB_PG_CONF"
+}
+
+function rsd::r::tsdb_core::disable_telemetry() {
+    rsd::warn "  Disabling TimescaleDB telemetry..."
+
+    rsd::l::target::exec_sudo "" sh -c \
+        "'echo \"timescaledb.telemetry_level = off\" >> $RSD_TSDB_PG_CONF'"
+
+    rsd::warn "  [OK] Telemetry disabled."
+}
+
+function rsd::r::tsdb_core::disable_telemetry::rollback() {
+    rsd::l::target::exec_sudo "" sed -i \
+        '/^timescaledb\.telemetry_level = off$/d' "$RSD_TSDB_PG_CONF"
+}
+
+# ==============================================================================
+# Task: restart_service
+# ==============================================================================
+
+function rsd::r::tsdb_core::restart_service() {
+    rsd::warn "  Restarting PostgreSQL service..."
+
+    rsd::l::target::exec_sudo "" systemctl restart postgresql
+    rsd::l::target::exec_sudo "" systemctl enable postgresql
+
+    # Brief sanity check — is it running?
+    if ! rsd::l::target::exec_sudo "" systemctl is-active --quiet postgresql; then
+        rsd::warn "  [ERROR] PostgreSQL failed to start after restart."
+        rsd::warn "  Check: journalctl -xeu postgresql"
+        return 1
+    fi
+
+    rsd::warn "  [OK] PostgreSQL restarted and enabled."
+}
+
+# ==============================================================================
+# Task: validate_install
+# ==============================================================================
+# Read-only smoke test. Does NOT create databases or extensions — that's
+# application-layer work outside this recipe's scope.
+
+function rsd::r::tsdb_core::validate_install() {
+    rsd::warn ""
+    rsd::warn "  ┌─────────────────────────────────────────────────┐"
+    rsd::warn "  │  Validating TimescaleDB Installation            │"
+    rsd::warn "  └─────────────────────────────────────────────────┘"
+    rsd::warn ""
+
+    # 1. PostgreSQL version
+    local pg_version=""
+    pg_version=$(rsd::l::target::exec_sudo "" sudo -u postgres psql -XAtc "SELECT version();" 2>/dev/null)
+    if [[ -z "$pg_version" ]]; then
+        rsd::warn "  [ERROR] Could not connect to PostgreSQL."
+        return 1
+    fi
+    rsd::warn "  PostgreSQL: $pg_version"
+
+    # 2. shared_preload_libraries
+    local preload=""
+    preload=$(rsd::l::target::exec_sudo "" sudo -u postgres psql -XAtc "SHOW shared_preload_libraries;" 2>/dev/null)
+    rsd::warn "  Preloaded:  $preload"
+
+    if [[ "$preload" != *"timescaledb"* ]]; then
+        rsd::warn "  [ERROR] timescaledb is NOT in shared_preload_libraries."
+        return 1
+    fi
+
+    # 3. Extension availability
+    local extensions=""
+    extensions=$(rsd::l::target::exec_sudo "" sudo -u postgres psql -XAtc \
+        "SELECT name || ' ' || default_version FROM pg_available_extensions WHERE name IN ('timescaledb','timescaledb_toolkit','pg_stat_statements') ORDER BY name;" 2>/dev/null)
+    rsd::warn "  Available extensions:"
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && rsd::warn "    - $line"
+    done <<< "$extensions"
+
+    rsd::warn ""
+    rsd::warn "  ┌─────────────────────────────────────────────────┐"
+    rsd::warn "  │  TimescaleDB install completed successfully.    │"
+    rsd::warn "  └─────────────────────────────────────────────────┘"
+    rsd::warn ""
+    rsd::warn "  Next steps:"
+    rsd::warn "    1. Create a database:  sudo -u postgres createdb mydb"
+    rsd::warn "    2. Enable extension:   sudo -u postgres psql -d mydb -c 'CREATE EXTENSION IF NOT EXISTS timescaledb;'"
+    rsd::warn "    3. Enable stats:       sudo -u postgres psql -d mydb -c 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements;'"
+    rsd::warn ""
+}

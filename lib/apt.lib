@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# APT Package Management Library
+# ==============================================================================
+#
+# Target-aware primitives for managing Debian/Ubuntu APT repositories,
+# signing keys, and package installation. All operations route through
+# rsd::l::target::exec_sudo, so they work transparently on both local
+# and remote targets.
+#
+# This library handles third-party APT repository setup — the signing
+# key import and DEB822 source file creation that must happen before
+# packages from external publishers (PGDG, Timescale, Docker, etc.)
+# become installable via apt-get.
+#
+# Dependencies:
+#   - target.lib  (loaded automatically by the RSD framework)
+#   - sudo.lib    (loaded on-demand by exec_sudo for local targets)
+#   - remote.lib  (loaded by the framework when $RSD_REMOTE_TARGET is set)
+#
+# namespace rsd::l::apt::
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+if [[ "$RSD_APT_LIB" == "1" ]]; then
+    return 0
+fi
+RSD_APT_LIB=1
+RSD_APT_LIB_VERSION="0.1.0"
+
+# ==============================================================================
+# Signing Key Management
+# ==============================================================================
+
+# Download an ASCII-armored GPG signing key to a target path.
+# The key is stored as-is (armored .asc format). Use this for repositories
+# that reference armored keys in their Signed-By field (e.g., PGDG).
+#
+# Creates the parent directory if it does not exist.
+#
+# @param string $1 URL of the GPG key to download.
+# @param string $2 Destination file path on the target (e.g., /usr/share/keyrings/foo.asc).
+# @return int 0 on success, non-zero on failure.
+function rsd::l::apt::download_key() {
+    local url="$1"
+    local dest="$2"
+    local dest_dir
+    dest_dir=$(dirname "$dest")
+
+    rsd::l::target::exec_sudo "" install -d -m 0755 "$dest_dir"
+    rsd::l::target::exec_sudo "" curl -fsSL "$url" -o "$dest"
+}
+
+# Download a GPG signing key and convert it to binary (dearmored .gpg) format.
+# Use this for repositories that require a binary keyring file in their
+# Signed-By field (e.g., packagecloud.io repos).
+#
+# Uses a secure temp file to avoid piping curl directly into gpg --dearmor
+# on the target. The temp file is cleaned up on success or failure.
+#
+# @param string $1 URL of the GPG key to download.
+# @param string $2 Destination file path on the target (e.g., /usr/share/keyrings/foo.gpg).
+# @return int 0 on success, non-zero on failure.
+function rsd::l::apt::download_key_dearmored() {
+    local url="$1"
+    local dest="$2"
+    local dest_dir
+    dest_dir=$(dirname "$dest")
+
+    rsd::l::target::exec_sudo "" install -d -m 0755 "$dest_dir"
+
+    # Download to temp, dearmor, cleanup — avoids pipe-through-SSH issues
+    local tmpkey
+    tmpkey=$(rsd::l::target::mktemp "rsd-aptkey.XXXXXX") || return 14
+
+    local rc=0
+    if ! rsd::l::target::exec curl -fsSL "$url" -o "$tmpkey"; then
+        rsd::warn "  [ERROR] Failed to download signing key from: $url"
+        rsd::l::target::exec rm -f "$tmpkey"
+        return 1
+    fi
+
+    if ! rsd::l::target::exec_sudo "" sh -c "'gpg --dearmor < \"$tmpkey\" > \"$dest\"'"; then
+        rsd::warn "  [ERROR] Failed to dearmor signing key."
+        rsd::l::target::exec rm -f "$tmpkey"
+        return 1
+    fi
+
+    rsd::l::target::exec rm -f "$tmpkey"
+    rsd::l::target::exec_sudo "" chmod 0644 "$dest"
+}
+
+# Remove a signing key file from the target.
+#
+# @param string $1 Path to the key file to remove.
+# @return int 0 on success.
+function rsd::l::apt::remove_key() {
+    local path="$1"
+    rsd::l::target::exec_sudo "" rm -f "$path"
+}
+
+# ==============================================================================
+# Source File Management
+# ==============================================================================
+
+# Write a DEB822-format APT sources file to the target.
+# The content is base64-encoded for safe transport through SSH + sudo
+# pipelines, avoiding quoting issues with multi-line heredocs.
+#
+# @param string $1 Destination file path (e.g., /etc/apt/sources.list.d/pgdg.sources).
+# @param string $2 The full DEB822-format content to write.
+# @return int 0 on success, non-zero on failure.
+function rsd::l::apt::write_source() {
+    local dest="$1"
+    local content="$2"
+
+    local encoded
+    encoded=$(printf '%s\n' "$content" | base64 -w0)
+
+    rsd::l::target::exec_sudo "" sh -c "'echo $encoded | base64 -d > $dest'"
+}
+
+# Remove an APT sources file from the target.
+#
+# @param string $1 Path to the sources file to remove.
+# @return int 0 on success.
+function rsd::l::apt::remove_source() {
+    local path="$1"
+    rsd::l::target::exec_sudo "" rm -f "$path"
+}
+
+# ==============================================================================
+# Package Operations
+# ==============================================================================
+
+# Run apt-get update on the target.
+#
+# @return int 0 on success, non-zero if apt update fails.
+function rsd::l::apt::update() {
+    rsd::l::target::exec_sudo "" apt-get update
+}
+
+# Check if a package has an installable candidate in the APT cache.
+# Returns success if apt-cache policy shows a non-(none) candidate version.
+#
+# @param string $1 Package name to check.
+# @return int 0 if candidate exists, 1 if not.
+function rsd::l::apt::has_candidate() {
+    local package="$1"
+    rsd::l::target::exec sh -c "'apt-cache policy $package | grep -q \"Candidate:\" && ! apt-cache policy $package | grep -q \"Candidate: (none)\"'"
+}
+
+# Install one or more packages via apt-get.
+# Uses -y for non-interactive mode. All packages are installed in a
+# single apt-get invocation.
+#
+# @param string $@ Package names to install.
+# @return int 0 on success, non-zero on failure.
+function rsd::l::apt::install() {
+    rsd::l::target::exec_sudo "" env DEBIAN_FRONTEND=noninteractive \
+        apt-get install -y "$@"
+}
