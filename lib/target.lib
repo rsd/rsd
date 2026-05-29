@@ -18,6 +18,9 @@ fi
 RSD_TARGET_LIB=1
 RSD_TARGET_LIB_VERSION="0.4.0"
 
+# Load structured IO messaging
+[[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
+
 # ==============================================================================
 # Target-Aware Dispatch Primitives
 # ==============================================================================

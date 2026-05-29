@@ -12,6 +12,9 @@ fi
 RSD_REMOTE_LIB=1
 RSD_REMOTE_LIB_VERSION="0.1.3"
 
+# Load structured IO messaging
+[[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
+
 # Load necessary static libraries with short-circuit evaluation
 [[ "$RSD_PROTOCOL_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/protocol.lib)"
 
