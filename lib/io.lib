@@ -72,15 +72,22 @@ if [[ "$RSD_IO_COLOR" -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# fd 3 — Dedicated RSD output channel
-# rsd::io::* functions write to fd 3 (direct stderr copy).
+# fd 7 — Dedicated RSD output channel
+# rsd::io::* functions write to fd 7 (direct stderr copy).
 # External command output goes through stdout/stderr and can be piped
 # through rsd::l::io::frame_lines without double-prefixing rsd messages.
+#
+# WHY fd 7?
+# fd 3 is used by BATS-core for TAP stream, fd 4-5 by various test harnesses.
+# fd 7 is high enough to avoid framework collisions while staying within
+# the POSIX single-digit range for shell redirection portability.
 # ---------------------------------------------------------------------------
 
-if [[ ! -e /dev/fd/3 ]]; then
-    exec 3>&2
-fi
+# Unconditionally dup stderr → fd 7.
+# Parent processes (IDE terminals, SSH) may leave low fds pointing at unrelated
+# resources (e.g., a read-only data file), so existence checks are unreliable.
+# RSD owns fd 7 as its messaging channel.
+exec 7>&2
 
 # ---------------------------------------------------------------------------
 # Origin Tag Computation
@@ -120,10 +127,10 @@ rsd::l::io::compute_tag
 
 # ---------------------------------------------------------------------------
 # Core Emitter
-# All semantic functions route through this. Writes to fd 3.
+# All semantic functions route through this. Writes to fd 7.
 # ---------------------------------------------------------------------------
 
-# Emit a formatted message to fd 3 (stderr bypass).
+# Emit a formatted message to fd 7 (stderr bypass).
 # Intent: Single output pathway for all RSD-originated messages.
 #
 # @param string $1 Color code (pre-computed ANSI escape, or empty)
@@ -154,11 +161,11 @@ function rsd::l::io::emit() {
     if [[ -n "$symbol" ]]; then
         printf '%s%s %s%s%s%s\n' \
             "$tag_display" "$pad" \
-            "$color" "$symbol " "$msg" "$_RSD_C_RESET" >&3
+            "$color" "$symbol " "$msg" "$_RSD_C_RESET" >&7
     else
         printf '%s%s %s%s%s\n' \
             "$tag_display" "$pad" \
-            "$color" "$msg" "$_RSD_C_RESET" >&3
+            "$color" "$msg" "$_RSD_C_RESET" >&7
     fi
 }
 
@@ -247,15 +254,15 @@ function rsd::io::banner() {
     fi
 
     local color="${_RSD_C_BOLD_WHITE}"
-    printf '%s%s %s┌%s┐%s\n' "$tag_display" "$pad" "$color" "$horiz" "$_RSD_C_RESET" >&3
-    printf '%s%s %s│  %s  │%s\n' "$tag_display" "$pad" "$color" "$text" "$_RSD_C_RESET" >&3
-    printf '%s%s %s└%s┘%s\n' "$tag_display" "$pad" "$color" "$horiz" "$_RSD_C_RESET" >&3
+    printf '%s%s %s┌%s┐%s\n' "$tag_display" "$pad" "$color" "$horiz" "$_RSD_C_RESET" >&7
+    printf '%s%s %s│  %s  │%s\n' "$tag_display" "$pad" "$color" "$text" "$_RSD_C_RESET" >&7
+    printf '%s%s %s└%s┘%s\n' "$tag_display" "$pad" "$color" "$horiz" "$_RSD_C_RESET" >&7
 }
 
 # Empty line — replaces embedded \n hacks in rsd::warn calls.
 # @return void
 function rsd::io::blank() {
-    printf '\n' >&3
+    printf '\n' >&7
 }
 
 # Horizontal rule separator.
@@ -273,7 +280,7 @@ function rsd::io::rule() {
     if [[ $tag_len -lt $target_width ]]; then
         printf -v pad '%*s' $(( target_width - tag_len )) ''
     fi
-    printf '%s%s %s%s%s\n' "$tag_display" "$pad" "$_RSD_C_DIM" "────────────────────────────────────────" "$_RSD_C_RESET" >&3
+    printf '%s%s %s%s%s\n' "$tag_display" "$pad" "$_RSD_C_DIM" "────────────────────────────────────────" "$_RSD_C_RESET" >&7
 }
 
 # ---------------------------------------------------------------------------
@@ -286,7 +293,7 @@ function rsd::io::rule() {
 declare -g RSD_IO_FRAME_CMD=""
 
 # Frame external command output lines with origin tag and [cmd] secondary tag.
-# Reads from stdin, writes to fd 3.
+# Reads from stdin, writes to fd 7.
 #
 # @return void
 function rsd::l::io::frame_lines() {
@@ -319,7 +326,7 @@ function rsd::l::io::frame_lines() {
         printf '%s%s%s %s│%s %s\n' \
             "$tag_display" "$pad" "$cmd_tag" \
             "$_RSD_C_DIM" "$_RSD_C_RESET" \
-            "$line" >&3
+            "$line" >&7
     done
 }
 

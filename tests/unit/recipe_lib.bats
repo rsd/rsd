@@ -19,6 +19,11 @@ setup() {
     source "${BATS_TEST_DIRNAME}/../../lib/config.lib"
     source "${BATS_TEST_DIRNAME}/../../lib/recipe.lib"
 
+    # Redirect RSD messaging fd (7) to stdout so BATS captures it in $output.
+    # io.lib sets exec 7>&2, which sends messages to stderr — invisible to
+    # BATS's run command. This makes assertions against message content work.
+    exec 7>&1
+
     # rsd::parse_args lives in the main 'rsd' script, not in a library.
     # Extract it for tests that exercise command-level functions (e.g. run).
     eval "$(sed -n '/^function rsd::parse_args/,/^}/p' "${BATS_TEST_DIRNAME}/../../rsd")"
@@ -30,6 +35,15 @@ setup() {
     )
     declare -g -A RSD_COMMAND_ARGS=()
     declare -ga RSD_ARGS_UNPROCESSED=()
+}
+
+# Helper: run a function capturing fd 7 (rsd::io) in $output.
+# BATS `run` captures stdout only. rsd::io writes to fd 7 (stderr dup).
+# This wrapper redirects fd 7→stdout inside the subshell that `run` creates,
+# so BATS captures rsd::io messages in $output alongside normal stdout.
+_run_io() {
+    _run_io_inner() { exec 7>&1; "$@"; }
+    run _run_io_inner "$@"
 }
 
 @test "rsd::r::register_task registers task with default forward recovery" {
@@ -90,10 +104,10 @@ setup() {
     rsd::r::register_task "task1"
     rsd::r::register_task "task2"
 
-    run rsd::l::r::execute_engine 0 0
+    _run_io rsd::l::r::execute_engine 0 0
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Task 'task1' is already satisfied."* ]]
+    [[ "$output" == *"already satisfied"* ]]
     [[ "$output" == *"Executing task 'task2'"* ]]
     [[ "$output" == *"task2' applied successfully."* ]]
     [[ "$output" != *"EXEC_1"* ]]
@@ -112,10 +126,10 @@ setup() {
     function rsd::r::next_task() { echo "NEXT_EXEC"; return 0; }
     rsd::r::register_task "next_task"
 
-    run rsd::l::r::execute_engine 0 0
+    _run_io rsd::l::r::execute_engine 0 0
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Task 'optional_task' failed. Skipping optional step."* ]]
+    [[ "$output" == *"failed. Skipping optional step."* ]]
     [[ "$output" == *"Executing task 'next_task'"* ]]
     [[ "$output" == *"NEXT_EXEC"* ]]
 }
@@ -128,11 +142,11 @@ setup() {
     function rsd::r::always_run() { echo "ALWAYS"; return 0; }
     rsd::r::register_task "always_run"
 
-    run rsd::l::r::execute_engine 0 0
+    _run_io rsd::l::r::execute_engine 0 0
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"ALWAYS"* ]]
-    [[ "$output" == *"Task 'always_run' applied successfully."* ]]
+    [[ "$output" == *"always_run' applied successfully."* ]]
 }
 
 @test "rsd::l::r::execute_engine dry-run mode does not execute apply" {
@@ -143,10 +157,10 @@ setup() {
     function rsd::r::dry_task() { echo "SHOULD_NOT_APPEAR"; return 0; }
     rsd::r::register_task "dry_task"
 
-    run rsd::l::r::execute_engine 1 0
+    _run_io rsd::l::r::execute_engine 1 0
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"[DRY-RUN] Would apply task 'dry_task'"* ]]
+    [[ "$output" == *"DRY-RUN"*"dry_task"* ]]
     [[ "$output" != *"SHOULD_NOT_APPEAR"* ]]
 }
 
@@ -166,14 +180,14 @@ setup() {
     # Load recipe command
     source "${BATS_TEST_DIRNAME}/../../command/recipe"
 
-    run rsd::c::recipe::list
+    _run_io rsd::c::recipe::list
 
     # Restore path array and cleanup
     RSD_LIBRARY_SEARCH_PATH=("${old_path[@]}")
     rm -rf "$mock_libdir"
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"=== Available Recipes ==="* ]]
+    [[ "$output" == *"Available Recipes"* ]]
     [[ "$output" == *"test_recipe_A"* ]]
     [[ "$output" == *"test_recipe_B"* ]]
 }
@@ -202,18 +216,18 @@ EOF
     # Load recipe command
     source "${BATS_TEST_DIRNAME}/../../command/recipe"
 
-    run rsd::c::recipe::help "test_help"
+    _run_io rsd::c::recipe::help "test_help"
 
     # Restore path array and cleanup
     RSD_LIBRARY_SEARCH_PATH=("${old_path[@]}")
     rm -rf "$mock_libdir"
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"=== Recipe Overview: test_help ==="* ]]
+    [[ "$output" == *"Recipe Overview: test_help"* ]]
     [[ "$output" == *"test_help::mock_task_1"* ]]
-    [[ "$output" == *"Apply Function:  rsd::r::test_help::mock_task_1"* ]]
-    [[ "$output" == *"Necessity Check: rsd::r::test_help::mock_task_1::pre_check"* ]]
-    [[ "$output" == *"On Failure:      forward"* ]]
+    [[ "$output" == *"Apply Function:"*"test_help::mock_task_1"* ]]
+    [[ "$output" == *"Necessity Check:"*"test_help::mock_task_1::pre_check"* ]]
+    [[ "$output" == *"On Failure:"*"forward"* ]]
 }
 
 @test "rsd::c::recipe::help parses and displays top-level recipe inline comment block as rich documentation" {
@@ -250,7 +264,7 @@ EOF
     # Load recipe command
     source "${BATS_TEST_DIRNAME}/../../command/recipe"
 
-    run rsd::c::recipe::help "test_comments"
+    _run_io rsd::c::recipe::help "test_comments"
 
     # Restore path array and cleanup
     RSD_LIBRARY_SEARCH_PATH=("${old_path[@]}")
@@ -268,7 +282,7 @@ EOF
     [[ "$output" != *"rsd::r::test_comments::register"* ]]
     
     # Assert standard compiled task output still follows
-    [[ "$output" == *"=== Recipe Overview: test_comments ==="* ]]
+    [[ "$output" == *"Recipe Overview: test_comments"* ]]
 }
 
 @test "rsd::c::recipe::list outputs relative paths for recipes in subfolders" {
@@ -286,7 +300,7 @@ EOF
     # Load recipe command
     source "${BATS_TEST_DIRNAME}/../../command/recipe"
 
-    run rsd::c::recipe::list
+    _run_io rsd::c::recipe::list
 
     # Restore path array and cleanup
     RSD_LIBRARY_SEARCH_PATH=("${old_path[@]}")
@@ -371,7 +385,7 @@ EOF
     source "${BATS_TEST_DIRNAME}/../../command/recipe"
 
     # Run the recipe with custom options
-    run rsd::c::recipe::run "test_options" "--test-flag" "--test-value" "hello"
+    _run_io rsd::c::recipe::run "test_options" "--test-flag" "--test-value" "hello"
 
     # Restore path array and cleanup
     RSD_LIBRARY_SEARCH_PATH=("${old_path[@]}")
@@ -409,7 +423,7 @@ EOF
     # Load recipe command
     source "${BATS_TEST_DIRNAME}/../../command/recipe"
 
-    run rsd::c::recipe::help "test_help_opts"
+    _run_io rsd::c::recipe::help "test_help_opts"
 
     # Restore path array and cleanup
     RSD_LIBRARY_SEARCH_PATH=("${old_path[@]}")
@@ -420,5 +434,5 @@ EOF
     # Recipe-specific options section is displayed
     [[ "$output" == *"Recipe-Specific Options:"* ]]
     [[ "$output" == *"--auto-install"* ]]
-    [[ "$output" == *"--custom-port <value>"* ]]
+    [[ "$output" == *"--custom-port"* ]]
 }

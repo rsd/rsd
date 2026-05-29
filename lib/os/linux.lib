@@ -15,6 +15,9 @@ fi
 RSD_OS_LINUX_LIB=1
 RSD_OS_LINUX_LIB_VERSION="0.1.0"
 
+# Load structured IO messaging
+[[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
+
 # Install a package dynamically.
 # Intent: Fallback generic Linux package manager execution.
 #

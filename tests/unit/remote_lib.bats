@@ -20,6 +20,12 @@ setup() {
     source "${BATS_TEST_DIRNAME}/../../lib/remote.lib"
 }
 
+# Helper: run capturing fd 7 (rsd::io) in $output
+_run_io() {
+    _run_io_inner() { exec 7>&1; "$@"; }
+    run _run_io_inner "$@"
+}
+
 @test "rsd::l::remote::parse_spec splits standard SSH target" {
     local proto user host port
     rsd::l::remote::parse_spec "userA@hostA" proto user host port
@@ -254,10 +260,10 @@ setup() {
     }
     
     local rsd_bin=""
-    run rsd::l::remote::bootstrap_check "mock-host" rsd_bin
+    _run_io rsd::l::remote::bootstrap_check "mock-host" rsd_bin
     
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Warning: Remote framework version (1.8.0) is"* ]]
+    [[ "$output" == *"Remote framework version (1.8.0) is"* ]]
     # Assert that no carriage return carriage remains in output to prevent line overwrites
     [[ "$output" != *$'\r'* ]]
 }

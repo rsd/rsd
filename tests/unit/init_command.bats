@@ -46,10 +46,17 @@ setup() {
     # Source core libraries and our command files
     source "${BATS_TEST_DIRNAME}/../../lib/rsd.lib"
     source "${BATS_TEST_DIRNAME}/../../lib/config.lib"
+    source "${BATS_TEST_DIRNAME}/../../lib/io.lib"
     source "${BATS_TEST_DIRNAME}/../../command/gpg"
     source "${BATS_TEST_DIRNAME}/../../command/kpx"
     source "${BATS_TEST_DIRNAME}/../../command/config"
     source "${BATS_TEST_DIRNAME}/../../command/init"
+}
+
+# Helper: run capturing fd 7 (rsd::io) in $output
+_run_io() {
+    _run_io_inner() { exec 7>&1; "$@"; }
+    run _run_io_inner "$@"
 }
 
 @test "rsd::c::init skips setups cleanly when GPG and KPX vault are already active" {
@@ -70,7 +77,7 @@ setup() {
     }
     export -f rsd::check_binaries_or_fail
     
-    run rsd::c::init
+    _run_io rsd::c::init
     echo "STATUS: $status"
     echo "OUTPUT: $output"
     [ "$status" -eq 0 ]
@@ -89,7 +96,7 @@ setup() {
     }
     export -f rsd::check_binaries_or_fail
     
-    run rsd::c::init <<< "q"
+    _run_io rsd::c::init <<< "q"
     echo "STATUS: $status"
     echo "OUTPUT: $output"
     [ "$status" -eq 0 ]
@@ -126,7 +133,7 @@ setup() {
     }
     export -f rsd::l::kpx::init
     
-    run rsd::c::init <<< "1"
+    _run_io rsd::c::init <<< "1"
     echo "STATUS: $status"
     echo "OUTPUT: $output"
     [ "$status" -eq 0 ]
@@ -170,7 +177,7 @@ setup() {
     }
     export -f rsd::l::kpx::init
     
-    run rsd::c::init <<< $'2\nexisting@key.com'
+    _run_io rsd::c::init <<< $'2\nexisting@key.com'
     echo "STATUS: $status"
     echo "OUTPUT: $output"
     [ "$status" -eq 0 ]

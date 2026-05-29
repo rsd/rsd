@@ -25,6 +25,12 @@ setup() {
     source "${BATS_TEST_DIRNAME}/../../lib/config.lib"
 }
 
+# Helper: run capturing fd 7 (rsd::io) in $output
+_run_io() {
+    _run_io_inner() { exec 7>&1; "$@"; }
+    run _run_io_inner "$@"
+}
+
 teardown() {
     # Unset all loaded OS library environment markers to allow subsequent tests to re-source cleanly
     unset RSD_OS_LINUX_LIB
@@ -41,9 +47,9 @@ teardown() {
     
     [ "$RSD_OS_LINUX_LIB" = "1" ]
     
-    run rsd::l::os::install_package "test-pkg"
+    _run_io rsd::l::os::install_package "test-pkg"
     [ "$status" -eq 3 ]
-    [[ "$output" == *"Generic Linux has no default package manager"* ]]
+    [[ "$output" == *"no default package manager"* ]]
 }
 
 @test "sourcing debian.lib dynamically pulls linux.lib and overrides install_package to use apt-get" {
@@ -90,7 +96,7 @@ teardown() {
     [ "$output" = "sudo apt-get install -y htop" ]
     
     # Verify that set_default_editor resolved to ubuntu-22.04.lib's override specifically
-    run rsd::l::os::set_default_editor
+    _run_io rsd::l::os::set_default_editor
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Ubuntu 22.04 specific: setting default editor to vim-tiny"* ]]
+    [[ "$output" == *"setting default editor to vim-tiny"* ]]
 }

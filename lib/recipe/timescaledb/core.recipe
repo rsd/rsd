@@ -139,17 +139,34 @@ function rsd::l::r::tsdb::resolve_platform() {
     fi
 
     # Resolve codename — for Ubuntu 26.04 this is "resolute"
-    # We derive it from the target rather than hardcoding
+    # 3-tier fallback: hosts.ini → /etc/os-release → lsb_release
     local codename=""
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        codename=$(rsd::l::target::exec lsb_release -cs 2>/dev/null)
+
+    # Tier 1: INI property (zero SSH cost for known hosts)
+    rsd::l::host::get_property "$host_alias" "codename" codename || true
+
+    # Tier 2: /etc/os-release VERSION_CODENAME (present on every systemd system)
+    if [[ -z "$codename" ]]; then
+        if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+            codename=$(rsd::l::target::exec sh -c 'grep "^VERSION_CODENAME=" /etc/os-release 2>/dev/null | cut -d= -f2' 2>/dev/null)
+        else
+            codename=$(grep "^VERSION_CODENAME=" /etc/os-release 2>/dev/null | cut -d= -f2)
+        fi
         bash::trim codename
-    else
-        codename=$(lsb_release -cs 2>/dev/null)
+    fi
+
+    # Tier 3: lsb_release (may not be installed on minimal server images)
+    if [[ -z "$codename" ]]; then
+        if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+            codename=$(rsd::l::target::exec lsb_release -cs 2>/dev/null)
+        else
+            codename=$(lsb_release -cs 2>/dev/null)
+        fi
+        bash::trim codename
     fi
 
     if [[ -z "$codename" ]]; then
-        rsd::io::error "Could not determine Ubuntu codename via lsb_release."
+        rsd::io::error "Could not determine Ubuntu codename. Tried: hosts.ini, /etc/os-release, lsb_release."
         exit 2
     fi
 

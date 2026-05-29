@@ -24,12 +24,14 @@ RSD_HOST_LIB_VERSION="0.1.1"
 # @return void
 # @throws 5 Sourced library file cannot be resolved during config delegation.
 function rsd::l::host::load_config() {
+    [[ "${RSD_HOST_CONFIG_LOADED:-}" == "1" ]] && return 0
     if [[ ! -v "R_INI_hosts" ]]; then
         declare -gA R_INI_hosts
     fi
     if bash::is_function rsd::config::get_file; then
         eval "$(rsd::config::get_file hosts)"
     fi
+    RSD_HOST_CONFIG_LOADED=1
 }
 
 # Performs host platform identification.

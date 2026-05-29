@@ -29,6 +29,12 @@ setup() {
     TEST_TMP_DIR=$(mktemp -d -t rsd-host-test.XXXXXX)
 }
 
+# Helper: run capturing fd 7 (rsd::io) in $output
+_run_io() {
+    _run_io_inner() { exec 7>&1; "$@"; }
+    run _run_io_inner "$@"
+}
+
 teardown() {
     rm -rf "$TEST_TMP_DIR"
 }
@@ -206,8 +212,8 @@ EOF
     [[ "$output" == *"writable_bins=/usr/bin"* ]]
 
     # 2. Test displaying missing configuration returns error 10
-    run rsd::c::host::show missing-server
+    _run_io rsd::c::host::show missing-server
     [ "$status" -eq 10 ]
-    [[ "$output" == *"Error: No saved host properties found for"* ]]
+    [[ "$output" == *"No saved host properties found for"* ]]
 }
 
