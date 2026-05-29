@@ -1,15 +1,71 @@
 #!/usr/bin/env bash
 
-# Terminfo provisioning for Kitty terminal.
-# Installs the xterm-kitty terminfo entry on remote SSH targets.
+# ==============================================================================
+# Terminfo Provisioning — Kitty
+# ==============================================================================
 #
-# Package-first strategy with tic fallback. Uses kitty-terminfo packages
-# where available — never installs the full terminal application.
+# PURPOSE
+# -------
+# Installs the "xterm-kitty" terminfo entry on a remote SSH target so that
+# Kitty terminal features (true-color, styled underlines, image protocol,
+# keyboard protocol, etc.) work correctly over SSH. Without this entry,
+# the remote host cannot interpret Kitty's TERM value and falls back to
+# degraded rendering.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+# 1. Pre-check: runs `infocmp xterm-kitty` on the remote target. If the
+#    entry already exists, the task is skipped (idempotent).
+# 2. Resolves the target platform (distro, family, version) from hosts.ini.
+# 3. Phase 1 — Package install: attempts to install the `kitty-terminfo`
+#    package, which exists on most modern distros as a lightweight package
+#    containing only the terminfo entry (no GUI dependencies). On Alpine,
+#    cascades to `ncurses-terminfo-base` if kitty-terminfo is unavailable.
+# 4. Verifies the entry appeared after package install.
+# 5. Phase 2 — tic fallback: if the package didn't provide the entry,
+#    extracts the terminfo source from the LOCAL machine via
+#    `infocmp -a xterm-kitty` (note: Kitty uses `-a` for all aliases,
+#    not `-x` like Ghostty/Alacritty) and pipes it to the remote `tic`.
+# 6. If the local machine does not have Kitty installed, the tic fallback
+#    is gracefully skipped with a [SKIP] message.
+#
+# PACKAGE MATRIX
+# --------------
+#   Debian >= 11           → kitty-terminfo
+#   Ubuntu >= 20.04        → kitty-terminfo
+#   Arch (rolling)         → kitty-terminfo
+#   Fedora (any)           → kitty-terminfo
+#   RHEL/Alma/Rocky >= 8   → kitty-terminfo (via EPEL)
+#   openSUSE               → kitty-terminfo
+#   Alpine                 → kitty-terminfo → ncurses-terminfo-base (fallback)
+#
+# KITTY-SPECIFIC: infocmp -a
+# --------------------------
+# Kitty's terminfo uses `-a` (all aliases) instead of `-x` (extended) when
+# extracting via infocmp. This preserves additional terminal capability
+# aliases that Kitty registers. Using `-x` would lose them.
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. The pre_check detects an existing xterm-kitty
+# entry and skips.
+#
+# SCOPE
+# -----
+# Remote-only. Exits with code 2 if no $RSD_REMOTE_TARGET is set.
+#
+# RECOVERY
+# --------
+# Uses "ignore" recovery mode — failure does not block other terminals.
+#
+# CLIENT-SIDE ALTERNATIVE
+# -----------------------
+# Kitty provides its own SSH wrapper that handles terminfo automatically:
+#   kitty +kitten ssh user@remote-host
+# This recipe is for cases where you want permanent support without
+# requiring the Kitty-specific SSH kitten.
 #
 # Usage: rsd @target recipe run terminfo/kitty
-#
-# Client-side alternative (no provisioning needed):
-#   kitty +kitten ssh user@remote-host
 #
 # @see docs/recipes.md
 # @see AGENTS.md

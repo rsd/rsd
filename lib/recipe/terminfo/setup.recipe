@@ -1,13 +1,59 @@
 #!/usr/bin/env bash
 
-# Terminfo provisioning master compositor.
-# Installs xterm-ghostty, xterm-kitty, alacritty, and alacritty-direct
-# terminfo entries on remote SSH targets.
+# ==============================================================================
+# Terminfo Provisioning — Master Compositor
+# ==============================================================================
 #
-# Combines all three terminal recipes into a single run. Each terminal's
-# task uses "ignore" recovery — if one terminal's terminfo cannot be
-# installed (package unavailable + local terminal not installed for tic),
-# the engine logs a warning and continues to the next.
+# PURPOSE
+# -------
+# Provisions terminfo entries for all three supported modern terminal
+# emulators (Ghostty, Kitty, Alacritty) on a remote SSH target in a
+# single run. This is the recommended entry point for server provisioning
+# — run it once after setting up a new server and all terminals will
+# work correctly over SSH.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+# 1. Verifies a remote target is set (exits code 2 if local).
+# 2. Includes and runs three sub-recipes in order:
+#    a. terminfo/ghostty   → installs "xterm-ghostty"
+#    b. terminfo/kitty     → installs "xterm-kitty"
+#    c. terminfo/alacritty → installs "alacritty" + "alacritty-direct"
+# 3. Each sub-recipe follows the same two-phase strategy:
+#    Phase 1: Try installing a terminfo-only package (distro-specific).
+#    Phase 2: Fall back to piping local infocmp → remote tic via SSH.
+# 4. Each terminal task uses "ignore" recovery — if one terminal's
+#    terminfo cannot be installed (e.g., package unavailable AND the
+#    terminal isn't installed locally for tic fallback), the engine logs
+#    a [SKIP] warning and continues to the next terminal.
+#
+# TERMINALS & ENTRIES
+# -------------------
+#   Ghostty   → xterm-ghostty      (single entry)
+#   Kitty     → xterm-kitty        (single entry, uses infocmp -a)
+#   Alacritty → alacritty           (standard capabilities)
+#              + alacritty-direct   (24-bit true-color via direct-color)
+#
+# SAFETY CONSTRAINTS
+# ------------------
+# - NEVER installs full terminal applications on remote hosts (prevents
+#   pulling Wayland/X11/GPU dependencies on headless servers).
+# - NEVER downloads terminfo from the internet (no curl). All data comes
+#   from the local machine's compiled terminfo database.
+# - If the local machine lacks a terminal, its tic fallback is skipped
+#   gracefully — no error, just a [SKIP] message.
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. Each sub-recipe checks if its entries
+# already exist on the remote target and skips if satisfied. Platform
+# resolution is cached globally (RSD_TERMINFO_*) to avoid redundant
+# SSH round-trips across sub-recipes.
+#
+# SCOPE
+# -----
+# Remote-only. Exits with code 2 if no $RSD_REMOTE_TARGET is set.
+# There is no reason to run this locally — terminals are already installed.
 #
 # Usage: rsd @target recipe run terminfo/setup
 #

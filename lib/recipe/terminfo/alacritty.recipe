@@ -1,12 +1,67 @@
 #!/usr/bin/env bash
 
-# Terminfo provisioning for Alacritty terminal.
-# Installs alacritty and alacritty-direct terminfo entries on remote SSH targets.
+# ==============================================================================
+# Terminfo Provisioning — Alacritty
+# ==============================================================================
 #
-# Package-first strategy with tic fallback. Uses ncurses-term/ncurses packages
-# where available — never downloads terminfo sources from the internet.
-# Instead, the tic fallback extracts entries from the local machine's compiled
-# terminfo database via infocmp.
+# PURPOSE
+# -------
+# Installs the "alacritty" and "alacritty-direct" terminfo entries on a
+# remote SSH target. The "alacritty" entry provides standard terminal
+# capabilities. The "alacritty-direct" entry provides direct-color (24-bit
+# true-color) support via a separate TERM value. Both entries are installed
+# to ensure the remote host handles either TERM setting correctly.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+# 1. Pre-check: runs `infocmp alacritty` AND `infocmp alacritty-direct`
+#    on the remote target. BOTH must exist to skip — if either is missing,
+#    the task runs.
+# 2. Resolves the target platform (distro, family, version) from hosts.ini.
+# 3. Phase 1 — Package install: attempts to install terminfo packages
+#    (e.g., `ncurses-term` on Debian, `ncurses` on Arch). These are system
+#    packages containing many terminfo entries — they never pull terminal
+#    GUI dependencies. On Alpine, cascades `ncurses-terminfo-base` →
+#    `ncurses-terminfo` if the first doesn't include alacritty.
+# 4. Verifies BOTH entries appeared after package install.
+# 5. Phase 2 — tic fallback: for each MISSING entry independently, extracts
+#    the terminfo source from the LOCAL machine via `infocmp -x <entry>`
+#    and pipes it through SSH to the remote `tic` compiler.
+#    No files are downloaded from the internet — unlike the commonly
+#    documented `curl alacritty.info | tic` approach, this recipe uses
+#    the already-compiled entries from the local terminfo database.
+# 6. If the local machine does not have Alacritty installed, the tic
+#    fallback is gracefully skipped with a [SKIP] message per entry.
+#
+# PACKAGE MATRIX
+# --------------
+#   Debian >= 11           → ncurses-term
+#   Ubuntu >= 20.04        → ncurses-term
+#   Arch (rolling)         → ncurses
+#   Fedora / RHEL / CentOS → ncurses-term
+#   openSUSE               → terminfo
+#   Alpine                 → ncurses-terminfo-base → ncurses-terminfo (fallback)
+#
+# TWO ENTRIES, ONE TASK
+# ---------------------
+# Alacritty is unique among the supported terminals: it registers TWO
+# terminfo entries (alacritty and alacritty-direct). The pre_check gates
+# on BOTH entries. The tic fallback pushes each missing entry independently,
+# so partially-installed states are handled correctly.
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. The pre_check detects existing entries and
+# skips. Package installs are idempotent. The tic fallback only pushes
+# entries that are actually missing.
+#
+# SCOPE
+# -----
+# Remote-only. Exits with code 2 if no $RSD_REMOTE_TARGET is set.
+#
+# RECOVERY
+# --------
+# Uses "ignore" recovery mode — failure does not block other terminals.
 #
 # Usage: rsd @target recipe run terminfo/alacritty
 #

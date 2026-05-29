@@ -1,16 +1,76 @@
 #!/usr/bin/env bash
 
-# Terminfo provisioning for Ghostty terminal.
-# Installs the xterm-ghostty terminfo entry on remote SSH targets.
+# ==============================================================================
+# Terminfo Provisioning — Ghostty
+# ==============================================================================
 #
-# Package-first strategy with tic fallback. Only installs terminfo-specific
-# packages — never the full terminal application (prevents pulling Wayland/X11
-# dependencies on headless servers).
+# PURPOSE
+# -------
+# Installs the "xterm-ghostty" terminfo entry on a remote SSH target so that
+# Ghostty terminal features (italic, undercurl, true-color, etc.) work
+# correctly when SSHing into the host. Without this entry, the remote host
+# falls back to generic xterm behavior, causing rendering glitches.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+# 1. Pre-check: runs `infocmp xterm-ghostty` on the remote target. If the
+#    entry already exists, the task is skipped (idempotent).
+# 2. Resolves the target platform (distro, family, version) from hosts.ini
+#    to select the correct terminfo package.
+# 3. Phase 1 — Package install: attempts to install a terminfo-only package
+#    (e.g., `ncurses-term` on Debian, `ghostty-terminfo` on Arch). NEVER
+#    installs the full Ghostty terminal application to avoid pulling
+#    Wayland/X11 dependencies on headless servers.
+# 4. Verifies the entry appeared after package install.
+# 5. Phase 2 — tic fallback: if the package didn't provide the entry (old
+#    distro, missing from repo), extracts the terminfo source from the LOCAL
+#    machine's database via `infocmp -x xterm-ghostty` and pipes it through
+#    SSH to the remote `tic` compiler. No files are downloaded from the
+#    internet — all data comes from the local terminfo database.
+# 6. If the local machine does not have Ghostty installed (infocmp fails
+#    locally), the tic fallback is gracefully skipped with a [SKIP] message.
+#
+# PACKAGE MATRIX
+# --------------
+#   Debian >= 13           → ncurses-term
+#   Ubuntu >= 25.10        → ncurses-term
+#   Arch (rolling)         → ghostty-terminfo
+#   Fedora (any)           → ncurses-term
+#   RHEL/Alma/Rocky >= 10  → ncurses-term
+#   openSUSE Tumbleweed    → ncurses
+#   Alpine                 → tic fallback only (full package pulls GUI deps)
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. The pre_check detects an existing xterm-ghostty
+# entry and skips. Package installs are idempotent (no-op if already installed).
+#
+# SCOPE
+# -----
+# Remote-only. Exits with code 2 if no $RSD_REMOTE_TARGET is set. There is
+# no reason to run this locally — the terminal is already installed.
+#
+# RECOVERY
+# --------
+# Uses "ignore" recovery mode. If this task fails, the recipe engine logs
+# a warning and continues to the next terminal. This prevents one terminal's
+# terminfo failure from blocking the others when run via terminfo/setup.
+#
+# CLIENT-SIDE ALTERNATIVE
+# -----------------------
+# Ghostty can handle terminfo on-the-fly without pre-provisioning:
+#   ghostty +ssh -- user@example.com
+# This recipe is for cases where you want permanent support without
+# requiring the Ghostty-specific SSH wrapper.
+#
+# SHARED HELPERS
+# --------------
+# This file defines shared helper functions (rsd::l::r::terminfo::*) used
+# by all terminfo recipes. They are guarded against double-definition so
+# that kitty.recipe and alacritty.recipe can source this file safely when
+# run standalone.
 #
 # Usage: rsd @target recipe run terminfo/ghostty
-#
-# Client-side alternative (no provisioning needed):
-#   ghostty +ssh -- user@example.com
 #
 # @see docs/recipes.md
 # @see AGENTS.md
