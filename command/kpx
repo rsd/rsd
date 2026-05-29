@@ -19,6 +19,7 @@ function rsd::c::kpx::help() {
     echo -e "\t\t\trotate-key <new-id>    Rotates the GPG recipient key ID encrypting the database"
     echo -e "\t\t\tadd <path> <user> <pw> Adds a password entry to the database securely"
     echo -e "\t\t\tshow <path>            Safely displays a password entry from the database"
+    echo -e "\t\t\tls [-R] [group]        Lists entries in the vault (default: root)"
 }
 
 function rsd::c::kpx::check() {
@@ -63,5 +64,21 @@ function rsd::c::kpx::show() {
         unset secret
         return 0
     fi
+    return $?
+}
+
+function rsd::c::kpx::ls() {
+    local _kpx_recursive=0
+    local group="/"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -R|--recursive) _kpx_recursive=1; shift ;;
+            -*) rsd::io::error "Unknown option: $1"; return 2 ;;
+            *)  group="$1"; shift ;;
+        esac
+    done
+
+    rsd::l::kpx::list_entries "$group"
     return $?
 }

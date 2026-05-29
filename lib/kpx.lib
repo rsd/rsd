@@ -293,6 +293,65 @@ function rsd::l::kpx::add_password() {
     return 0
 }
 
+# List entries in the KeePass vault
+# Arguments:
+#   $1: (optional) Group path to list (default: root "/")
+#   $2: (optional) Nameref output variable; if omitted, prints to stdout
+# Options read from caller scope:
+#   _kpx_recursive: set to 1 for recursive listing
+# Returns:
+#   0: Success
+#   1: Vault not initialized or decryption failure
+function rsd::l::kpx::list_entries() {
+    local group_path="${1:-/}"
+    local output_var="${2:-}"
+
+    local config_dir
+    config_dir="$(rsd::l::kpx::vault_dir)"
+    local vault_key="$config_dir/vault.key.gpg"
+    local vault_db="$config_dir/vault.kdbx"
+
+    if [[ ! -f "$vault_key" || ! -f "$vault_db" ]]; then
+        rsd::io::error "KeePass vault has not been initialized. Please run 'rsd kpx init' first."
+        return 1
+    fi
+
+    if [[ ! -s "$vault_key" ]]; then
+        rsd::io::error "Vault key file is empty (corrupted). Please re-initialize: rm ~/.config/rsd/vault.* && rsd kpx init"
+        return 1
+    fi
+
+    rsd::l::gpg::validate_agent_or_fail || return $?
+
+    trap 'unset master_key; trap - EXIT INT TERM' EXIT INT TERM
+
+    local master_key
+    if ! rsd::l::kpx::decrypt_key "$vault_key" master_key; then
+        rsd::io::error "Failed to decrypt KeePass master key via GPG."
+        return 1
+    fi
+
+    local -a ls_opts=()
+    if [[ "${_kpx_recursive:-0}" == "1" ]]; then
+        ls_opts+=(-R -f)
+    fi
+
+    local _kpx_listing
+    if ! _kpx_listing=$(keepassxc-cli ls "${ls_opts[@]}" "$vault_db" "$group_path" <<< "$master_key" 2>/dev/null); then
+        rsd::io::error "Failed to list entries in vault group '$group_path'."
+        return 1
+    fi
+
+    if [[ -n "$output_var" ]]; then
+        declare -n _le_out="$output_var"
+        _le_out="$_kpx_listing"
+    else
+        echo "$_kpx_listing"
+    fi
+
+    return 0
+}
+
 # Rotates GPG keys for encrypting vault.key.gpg
 # Arguments:
 #   $1: The new GPG user ID recipient
