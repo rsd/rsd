@@ -16,7 +16,7 @@ if [[ "$RSD_TARGET_LIB" == "1" ]]; then
     return 0
 fi
 RSD_TARGET_LIB=1
-RSD_TARGET_LIB_VERSION="0.3.0"
+RSD_TARGET_LIB_VERSION="0.4.0"
 
 # ==============================================================================
 # Target-Aware Dispatch Primitives
@@ -97,6 +97,45 @@ function rsd::l::target::file_exists() {
 # @return int 0 if matched, 1 if no match.
 function rsd::l::target::file_contains() {
     rsd::l::target::exec grep -q "$1" "$2"
+}
+
+# Run an in-place sed substitution on a target file.
+#
+# @param string $1 The sed expression (e.g., 's/old/new/g').
+# @param string $2 The file path.
+# @return int Exit code of sed.
+function rsd::l::target::sed_inline() {
+    rsd::l::target::exec sed -i "$1" "$2"
+}
+
+# Delete all lines between two sentinel markers in a file (inclusive).
+#
+# @param string $1 The start sentinel string.
+# @param string $2 The end sentinel string.
+# @param string $3 The file path.
+# @return int Exit code of sed.
+function rsd::l::target::sed_delete_block() {
+    local start_marker="$1"
+    local end_marker="$2"
+    local file="$3"
+    rsd::l::target::exec sed -i "/${start_marker}/,/${end_marker}/d" "$file"
+}
+
+# Apply an in-place perl regex substitution on a target file.
+#
+# @param string $1 The perl expression (e.g., "'s/old/new/g'").
+# @param string $2 The file path.
+# @return int Exit code of perl.
+function rsd::l::target::perl_filter() {
+    rsd::l::target::exec perl -pi -e "$1" "$2"
+}
+
+# Apply a streaming perl regex filter (stdin → stdout).
+#
+# @param string $1 The perl expression.
+# @return int Exit code of perl.
+function rsd::l::target::perl_pipe() {
+    rsd::l::target::exec perl -pe "$1"
 }
 
 # Clone a git repository on the target host.
@@ -189,9 +228,8 @@ function rsd::l::target::mktemp() {
         result=$(rsd::l::target::exec mktemp -t "$template") || return 14
     fi
 
-    # Trim whitespace from remote execution output
-    result="${result#"${result%%[![:space:]]*}"}"
-    result="${result%"${result##*[![:space:]]}"}"
+    # Trim leading/trailing whitespace from remote output (pure Bash, no subshell)
+    bash::trim result
 
     if [[ -z "$result" ]]; then
         rsd::warn "Error: mktemp returned an empty path."

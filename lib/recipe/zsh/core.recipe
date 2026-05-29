@@ -43,8 +43,8 @@ function rsd::r::zsh_core::set_default_shell() {
     local zsh_path=""
     if [[ -n "$RSD_REMOTE_TARGET" ]]; then
         zsh_path=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "which" "zsh" 2>/dev/null)
-        zsh_path="${zsh_path#"${zsh_path%%[![:space:]]*}"}"
-        zsh_path="${zsh_path%"${zsh_path##*[![:space:]]}"}"
+        # Trim leading/trailing whitespace from remote output (pure Bash, no subshell)
+        bash::trim zsh_path
 
         if [[ -z "$zsh_path" ]]; then
             rsd::warn "Error: Zsh binary was not found on remote target."

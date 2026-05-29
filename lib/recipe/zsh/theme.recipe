@@ -41,7 +41,9 @@ function rsd::r::zsh_theme::configure_p10k::pre_check() {
 
 function rsd::r::zsh_theme::configure_p10k() {
     rsd::l::target::exec cp "\$HOME/.zshrc" "\$HOME/.zshrc.theme.bak"
-    rsd::l::target::exec perl -pi -e \
+
+    # Replace ZSH_THEME value with powerlevel10k (in-place via perl regex)
+    rsd::l::target::perl_filter \
         "'s@^ZSH_THEME=.*\$@ZSH_THEME=\"powerlevel10k/powerlevel10k\"@'" "\$HOME/.zshrc"
 }
 
@@ -119,7 +121,8 @@ function rsd::r::zsh_theme::adjust_p10k_context::pre_check() {
 }
 
 function rsd::r::zsh_theme::adjust_p10k_context() {
-    rsd::l::target::exec perl -pi -e \
+    # Comment out CONTEXT expansion lines so user@host shows on local sessions
+    rsd::l::target::perl_filter \
         "'s@^\\s+(typeset -g POWERLEVEL9K_CONTEXT_{DEFAULT,SUDO}_{CONTENT,VISUAL_IDENTIFIER}_EXPANSION=)@# \$1@'" \
         "\$HOME/.p10k.zsh"
 }

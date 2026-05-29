@@ -347,9 +347,8 @@ function rsd::l::remote::bootstrap_install() {
     #       $remote_spec (a parameter), not $RSD_REMOTE_TARGET (a global).
     local remote_tmp
     remote_tmp=$(rsd::l::remote::execute "$remote_spec" "mktemp" "-d" "-t" "rsd-bootstrap.XXXXXX" 2>/dev/null)
-    # Trim whitespace from remote output
-    remote_tmp="${remote_tmp#"${remote_tmp%%[![:space:]]*}"}"
-    remote_tmp="${remote_tmp%"${remote_tmp##*[![:space:]]}"}"
+    # Trim leading/trailing whitespace from remote output
+    bash::trim remote_tmp
     if [[ -z "$remote_tmp" ]]; then
         rsd::warn "Error: Failed to create secure temp directory on remote host."
         return 14
@@ -463,8 +462,7 @@ function rsd::l::remote::bootstrap_check() {
     
     # 3. Parity & Version Compliance check
     # Trim leading/trailing whitespace
-    remote_ver="${remote_ver#"${remote_ver%%[![:space:]]*}"}"
-    remote_ver="${remote_ver%"${remote_ver##*[![:space:]]}"}"
+    bash::trim remote_ver
     
     if rsd::version_gt "$RSD_VERSION" "$remote_ver"; then
         rsd::warn "Warning: Remote framework version ($remote_ver) is older than your local version ($RSD_VERSION)."

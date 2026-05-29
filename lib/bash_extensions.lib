@@ -9,10 +9,20 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
     exit 12
 fi
 
-BASH_EXTENSIONS_VERSION='0.2.3'
+BASH_EXTENSIONS_VERSION='0.3.0'
 
 # functions to help bash as a language
 # prefixed with bash::
+
+# Strip leading/trailing whitespace from a variable in-place via nameref.
+#
+# @param string& $1 Variable name to trim (modified in-place).
+# @return void
+function bash::trim() {
+    declare -n _trim_ref="$1"
+    _trim_ref="${_trim_ref#"${_trim_ref%%[![:space:]]*}"}"
+    _trim_ref="${_trim_ref%"${_trim_ref##*[![:space:]]}"}"
+}
 
 function bash::is_function() {
 	local func=$1

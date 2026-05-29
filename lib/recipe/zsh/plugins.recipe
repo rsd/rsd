@@ -121,7 +121,10 @@ EOF
     fi
 }
 
-# Zshrc settings rollback using sed block removal
+# Zshrc settings rollback — remove the RSD config block between sentinel markers
 function rsd::r::zsh_plugins::inject_zshrc_settings::rollback() {
-    rsd::l::target::exec sed -i '/# --- BEGIN RSD CUSTOM CONFIG ---/,/# --- END RSD CUSTOM CONFIG ---/d' "\$HOME/.zshrc"
+    rsd::l::target::sed_delete_block \
+        '# --- BEGIN RSD CUSTOM CONFIG ---' \
+        '# --- END RSD CUSTOM CONFIG ---' \
+        "\$HOME/.zshrc"
 }

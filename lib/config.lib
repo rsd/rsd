@@ -150,9 +150,8 @@ function rsd::config::read_ini() {
 
     while IFS= read -r line || [[ -n "$line" ]]; do
 
-        # Trim leading and trailing whitespace using Bash parameter expansion
-        line="${line#"${line%%[![:space:]]*}"}"
-        line="${line%"${line##*[![:space:]]}"}"
+        # Trim leading/trailing whitespace
+        bash::trim line
 
         if [[ -z "$line" || "$line" =~ ^[\;#] ]]; then
             continue  # Skip blank lines and lines starting with ';' or '#'
