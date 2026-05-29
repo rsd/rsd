@@ -417,19 +417,29 @@ function rsd::r::timescaledb_core::configure_preload() {
     fi
 
     # Backup before modifying
-    rsd::l::target::exec_sudo "" cp "$RSD_TSDB_PG_CONF" "${RSD_TSDB_PG_CONF}.rsd.bak"
+    if ! rsd::l::target::exec_sudo "" cp "$RSD_TSDB_PG_CONF" "${RSD_TSDB_PG_CONF}.rsd.bak"; then
+        rsd::io::error "Failed to create backup of postgresql.conf"
+        return 1
+    fi
 
     # Replace or append shared_preload_libraries
     local preload_value="'timescaledb,pg_stat_statements'"
 
-    if rsd::l::target::exec grep -Eq "^[[:space:]]*shared_preload_libraries[[:space:]]*=" "$RSD_TSDB_PG_CONF"; then
-        rsd::l::target::exec_sudo "" sed -i \
+    if rsd::l::target::exec_sudo "" grep -q "shared_preload_libraries" "$RSD_TSDB_PG_CONF"; then
+        if ! rsd::l::target::exec_sudo "" sed -i \
             "s/^[[:space:]]*shared_preload_libraries[[:space:]]*=.*/shared_preload_libraries = ${preload_value}/" \
-            "$RSD_TSDB_PG_CONF"
+            "$RSD_TSDB_PG_CONF"; then
+            rsd::io::error "Failed to update shared_preload_libraries via sed."
+            return 1
+        fi
     else
-        # Append if not present (including commented-out lines)
-        rsd::l::target::exec_sudo "" sh -c \
-            "'echo \"shared_preload_libraries = ${preload_value}\" >> $RSD_TSDB_PG_CONF'"
+        # Append if not present — uses printf|tee -a to avoid shell redirections
+        # (>> collapses into a command name under multi-layer SSH+sudo escaping)
+        if ! printf '%s\n' "shared_preload_libraries = ${preload_value}" | \
+            rsd::l::target::exec_sudo "" tee -a "$RSD_TSDB_PG_CONF" >/dev/null; then
+            rsd::io::error "Failed to append shared_preload_libraries to postgresql.conf"
+            return 1
+        fi
     fi
 
     rsd::io::ok "shared_preload_libraries set to: ${preload_value}"
@@ -470,8 +480,13 @@ function rsd::r::timescaledb_core::disable_telemetry::pre_check() {
 function rsd::r::timescaledb_core::disable_telemetry() {
     rsd::io::status "Disabling TimescaleDB telemetry..."
 
-    rsd::l::target::exec_sudo "" sh -c \
-        "'echo \"timescaledb.telemetry_level = off\" >> $RSD_TSDB_PG_CONF'"
+    # Uses printf|tee -a to avoid shell redirections (>> collapses into a
+    # command name under multi-layer SSH+sudo escaping)
+    if ! printf '%s\n' "timescaledb.telemetry_level = off" | \
+        rsd::l::target::exec_sudo "" tee -a "$RSD_TSDB_PG_CONF" >/dev/null; then
+        rsd::io::error "Failed to append telemetry setting to postgresql.conf"
+        return 1
+    fi
 
     rsd::io::ok "Telemetry disabled."
 }
