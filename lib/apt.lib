@@ -122,10 +122,18 @@ function rsd::l::apt::write_source() {
     local dest="$1"
     local content="$2"
 
-    local encoded
-    encoded=$(printf '%s\n' "$content" | base64 -w0)
+    # Stage through a temp file to avoid inline data in the sh -c pipeline.
+    # Long base64 strings break under multi-layer SSH+sudo escaping (the pipe
+    # and redirect chars become literal inside collapsed quotes → "File name too long").
+    local tmpfile
+    tmpfile=$(rsd::l::target::mktemp "rsd-aptsrc.XXXXXX") || return 14
 
-    rsd::l::target::exec_sudo "" sh -c "'echo $encoded | base64 -d > $dest'"
+    # Write content to temp file via stdin pipe (non-elevated, user-owned tmp)
+    printf '%s\n' "$content" | rsd::l::target::exec tee "$tmpfile" >/dev/null
+
+    # Move to destination with sudo (tiny command, no quoting issues)
+    rsd::l::target::exec_sudo "" mv "$tmpfile" "$dest"
+    rsd::l::target::exec_sudo "" chmod 0644 "$dest"
 }
 
 # Remove an APT sources file from the target.
