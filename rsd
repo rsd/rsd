@@ -926,6 +926,13 @@ if [[ "${RSD_ARGS[command]}" ]]; then
     if [[ "${RSD_ARGS[command]}" =~ ^@ || "${RSD_ARGS[command]}" =~ .@. ]]; then
         RSD_REMOTE_TARGET="${RSD_ARGS[command]}"
 
+        # Recompute IO origin tag now that the remote target is known.
+        # io.lib was sourced earlier (line ~909) before the target was parsed,
+        # so the tag was frozen as [rsd]. Update it to [rsd@<host>].
+        if bash::is_function rsd::l::io::compute_tag; then
+            rsd::l::io::compute_tag
+        fi
+
         # real command is the first unprocessed argument
         if [[ ${#RSD_ARGS_UNPROCESSED[@]} -eq 0 ]]; then
             rsd::warn "Error: Remote target specified, but no command provided."

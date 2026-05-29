@@ -192,9 +192,12 @@ function rsd::l::r::handle_failure() {
             rollback_func="rsd::r::${completed}::rollback"
             if bash::is_function "$rollback_func"; then
                 rsd::io::warn "Undoing changes for task '$completed'..."
-                if ! "$rollback_func"; then
+                RSD_IO_FRAME_CMD="${completed##*::}"
+                if ! "$rollback_func" > >(rsd::l::io::frame_lines) 2> >(rsd::l::io::frame_lines >&2); then
                     rsd::io::fatal "Rollback failed for task '$completed'! Manual cleanup required."
                 fi
+                RSD_IO_FRAME_CMD=""
+                sleep 0.05
             fi
         done
         exit 10

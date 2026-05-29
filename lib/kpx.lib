@@ -211,7 +211,7 @@ function rsd::l::kpx::get_password() {
     # Use highly unique local variable name to prevent dynamic nameref variable shadowing bug
     local _kpx_ret_secret
     if ! _kpx_ret_secret=$(keepassxc-cli show -a Password "$vault_db" "$entry_path" <<< "$master_key" 2>/dev/null); then
-         rsd::io::warn "Entry '$entry_path' not found in vault."
+         rsd::debug "Vault entry '$entry_path' not found." 10
          return 2
     fi
 

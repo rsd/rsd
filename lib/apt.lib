@@ -75,6 +75,16 @@ function rsd::l::apt::download_key_dearmored() {
     local dest_dir
     dest_dir=$(dirname "$dest")
 
+    # Validate required binaries on the target before starting
+    if ! rsd::l::target::has_bin gpg; then
+        rsd::io::error "gpg is not installed on the target. Install it with: apt-get install gnupg"
+        return 3
+    fi
+    if ! rsd::l::target::has_bin curl; then
+        rsd::io::error "curl is not installed on the target. Install it with: apt-get install curl"
+        return 3
+    fi
+
     rsd::l::target::exec_sudo "" install -d -m 0755 "$dest_dir"
 
     # Download to temp, dearmor, cleanup — avoids pipe-through-SSH issues
@@ -88,7 +98,10 @@ function rsd::l::apt::download_key_dearmored() {
         return 1
     fi
 
-    if ! rsd::l::target::exec_sudo "" sh -c "'gpg --dearmor < \"$tmpkey\" > \"$dest\"'"; then
+    # Dearmor using gpg's --output flag instead of shell redirections.
+    # Shell redirections (< >) collapse into a single token under
+    # multi-layer SSH+sudo escaping, causing "command not found" (exit 127).
+    if ! rsd::l::target::exec_sudo "" gpg --batch --yes --dearmor --output "$dest" "$tmpkey"; then
         rsd::io::error "Failed to dearmor signing key."
         rsd::l::target::exec rm -f "$tmpkey"
         return 1
