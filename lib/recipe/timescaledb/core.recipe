@@ -181,32 +181,32 @@ function rsd::l::r::tsdb::resolve_platform() {
 # Recipe Registration
 # ==============================================================================
 
-function rsd::r::tsdb_core::register() {
+function rsd::r::timescaledb_core::register() {
     # Pre-resolve platform — validates OS/arch/codename before registering tasks.
     # Exits early with code 2 if platform requirements are not met.
     local codename="" arch=""
     rsd::l::r::tsdb::resolve_platform codename arch
 
-    rsd::r::register_task "tsdb_core::add_pgdg_repo" "rollback"
-    rsd::r::register_task "tsdb_core::add_timescale_repo" "rollback"
-    rsd::r::register_task "tsdb_core::verify_repos"
-    rsd::r::register_task "tsdb_core::install_packages"
-    rsd::r::register_task "tsdb_core::configure_preload" "rollback"
-    rsd::r::register_task "tsdb_core::run_tune" "ignore"
-    rsd::r::register_task "tsdb_core::disable_telemetry" "rollback"
-    rsd::r::register_task "tsdb_core::restart_service"
-    rsd::r::register_task "tsdb_core::validate_install"
+    rsd::r::register_task "timescaledb_core::add_pgdg_repo" "rollback"
+    rsd::r::register_task "timescaledb_core::add_timescale_repo" "rollback"
+    rsd::r::register_task "timescaledb_core::verify_repos"
+    rsd::r::register_task "timescaledb_core::install_packages"
+    rsd::r::register_task "timescaledb_core::configure_preload" "rollback"
+    rsd::r::register_task "timescaledb_core::run_tune" "ignore"
+    rsd::r::register_task "timescaledb_core::disable_telemetry" "rollback"
+    rsd::r::register_task "timescaledb_core::restart_service"
+    rsd::r::register_task "timescaledb_core::validate_install"
 }
 
 # ==============================================================================
 # Task: add_pgdg_repo
 # ==============================================================================
 
-function rsd::r::tsdb_core::add_pgdg_repo::pre_check() {
+function rsd::r::timescaledb_core::add_pgdg_repo::pre_check() {
     rsd::l::target::file_exists "$RSD_TSDB_PGDG_SOURCE_PATH"
 }
 
-function rsd::r::tsdb_core::add_pgdg_repo() {
+function rsd::r::timescaledb_core::add_pgdg_repo() {
     local codename="" arch=""
     rsd::l::r::tsdb::resolve_platform codename arch
 
@@ -235,7 +235,7 @@ Signed-By: ${RSD_TSDB_PGDG_KEY_PATH}"
     rsd::warn "  [OK] PGDG repository added."
 }
 
-function rsd::r::tsdb_core::add_pgdg_repo::rollback() {
+function rsd::r::timescaledb_core::add_pgdg_repo::rollback() {
     rsd::l::apt::remove_source "$RSD_TSDB_PGDG_SOURCE_PATH"
     rsd::l::apt::remove_key "$RSD_TSDB_PGDG_KEY_PATH"
 }
@@ -244,11 +244,11 @@ function rsd::r::tsdb_core::add_pgdg_repo::rollback() {
 # Task: add_timescale_repo
 # ==============================================================================
 
-function rsd::r::tsdb_core::add_timescale_repo::pre_check() {
+function rsd::r::timescaledb_core::add_timescale_repo::pre_check() {
     rsd::l::target::file_exists "$RSD_TSDB_TIMESCALE_SOURCE_PATH"
 }
 
-function rsd::r::tsdb_core::add_timescale_repo() {
+function rsd::r::timescaledb_core::add_timescale_repo() {
     local codename="" arch=""
     rsd::l::r::tsdb::resolve_platform codename arch
 
@@ -277,7 +277,7 @@ Signed-By: ${RSD_TSDB_TIMESCALE_KEY_PATH}"
     rsd::warn "  [OK] Timescale repository added."
 }
 
-function rsd::r::tsdb_core::add_timescale_repo::rollback() {
+function rsd::r::timescaledb_core::add_timescale_repo::rollback() {
     rsd::l::apt::remove_source "$RSD_TSDB_TIMESCALE_SOURCE_PATH"
     rsd::l::apt::remove_key "$RSD_TSDB_TIMESCALE_KEY_PATH"
 }
@@ -288,11 +288,11 @@ function rsd::r::tsdb_core::add_timescale_repo::rollback() {
 # Fail-closed verification: if Timescale doesn't publish packages for this
 # codename, the recipe removes the broken source file and halts cleanly.
 
-function rsd::r::tsdb_core::verify_repos::pre_check() {
+function rsd::r::timescaledb_core::verify_repos::pre_check() {
     rsd::l::apt::has_candidate "timescaledb-2-postgresql-${RSD_TSDB_PG_VERSION}"
 }
 
-function rsd::r::tsdb_core::verify_repos() {
+function rsd::r::timescaledb_core::verify_repos() {
     rsd::warn "  Updating APT package index..."
 
     if ! rsd::l::apt::update; then
@@ -339,11 +339,11 @@ function rsd::r::tsdb_core::verify_repos() {
 # Task: install_packages
 # ==============================================================================
 
-function rsd::r::tsdb_core::install_packages::pre_check() {
+function rsd::r::timescaledb_core::install_packages::pre_check() {
     rsd::l::target::exec dpkg -l "timescaledb-2-postgresql-${RSD_TSDB_PG_VERSION}" 2>/dev/null | grep -q '^ii'
 }
 
-function rsd::r::tsdb_core::install_packages() {
+function rsd::r::timescaledb_core::install_packages() {
     rsd::warn "  Installing PostgreSQL ${RSD_TSDB_PG_VERSION} and TimescaleDB..."
 
     if ! rsd::l::apt::install \
@@ -378,12 +378,12 @@ function rsd::r::tsdb_core::install_packages() {
 # will fail without it. pg_stat_statements provides query-level observability
 # and must also be preloaded at server start (cannot be added live).
 
-function rsd::r::tsdb_core::configure_preload::pre_check() {
+function rsd::r::timescaledb_core::configure_preload::pre_check() {
     rsd::l::target::file_contains "timescaledb" "$RSD_TSDB_PG_CONF" && \
     rsd::l::target::file_contains "pg_stat_statements" "$RSD_TSDB_PG_CONF"
 }
 
-function rsd::r::tsdb_core::configure_preload() {
+function rsd::r::timescaledb_core::configure_preload() {
     rsd::warn "  Configuring shared_preload_libraries..."
 
     if ! rsd::l::target::file_exists "$RSD_TSDB_PG_CONF"; then
@@ -410,7 +410,7 @@ function rsd::r::tsdb_core::configure_preload() {
     rsd::warn "  [OK] shared_preload_libraries set to: ${preload_value}"
 }
 
-function rsd::r::tsdb_core::configure_preload::rollback() {
+function rsd::r::timescaledb_core::configure_preload::rollback() {
     if rsd::l::target::file_exists "${RSD_TSDB_PG_CONF}.rsd.bak"; then
         rsd::l::target::exec_sudo "" mv "${RSD_TSDB_PG_CONF}.rsd.bak" "$RSD_TSDB_PG_CONF"
     fi
@@ -422,7 +422,7 @@ function rsd::r::tsdb_core::configure_preload::rollback() {
 # timescaledb-tune adjusts PostgreSQL memory/worker settings for TimescaleDB.
 # Recovery: ignore — tuning is advisory, failure should not block the install.
 
-function rsd::r::tsdb_core::run_tune() {
+function rsd::r::timescaledb_core::run_tune() {
     rsd::warn "  Running timescaledb-tune..."
 
     if ! rsd::l::target::has_bin timescaledb-tune; then
@@ -438,11 +438,11 @@ function rsd::r::tsdb_core::run_tune() {
 # Task: disable_telemetry
 # ==============================================================================
 
-function rsd::r::tsdb_core::disable_telemetry::pre_check() {
+function rsd::r::timescaledb_core::disable_telemetry::pre_check() {
     rsd::l::target::file_contains "timescaledb.telemetry_level = off" "$RSD_TSDB_PG_CONF"
 }
 
-function rsd::r::tsdb_core::disable_telemetry() {
+function rsd::r::timescaledb_core::disable_telemetry() {
     rsd::warn "  Disabling TimescaleDB telemetry..."
 
     rsd::l::target::exec_sudo "" sh -c \
@@ -451,7 +451,7 @@ function rsd::r::tsdb_core::disable_telemetry() {
     rsd::warn "  [OK] Telemetry disabled."
 }
 
-function rsd::r::tsdb_core::disable_telemetry::rollback() {
+function rsd::r::timescaledb_core::disable_telemetry::rollback() {
     rsd::l::target::exec_sudo "" sed -i \
         '/^timescaledb\.telemetry_level = off$/d' "$RSD_TSDB_PG_CONF"
 }
@@ -460,7 +460,7 @@ function rsd::r::tsdb_core::disable_telemetry::rollback() {
 # Task: restart_service
 # ==============================================================================
 
-function rsd::r::tsdb_core::restart_service() {
+function rsd::r::timescaledb_core::restart_service() {
     rsd::warn "  Restarting PostgreSQL service..."
 
     rsd::l::target::exec_sudo "" systemctl restart postgresql
@@ -482,7 +482,7 @@ function rsd::r::tsdb_core::restart_service() {
 # Read-only smoke test. Does NOT create databases or extensions — that's
 # application-layer work outside this recipe's scope.
 
-function rsd::r::tsdb_core::validate_install() {
+function rsd::r::timescaledb_core::validate_install() {
     rsd::warn ""
     rsd::warn "  ┌─────────────────────────────────────────────────┐"
     rsd::warn "  │  Validating TimescaleDB Installation            │"

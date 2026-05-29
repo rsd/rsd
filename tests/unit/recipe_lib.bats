@@ -204,6 +204,61 @@ EOF
     [[ "$output" == *"On Failure:      forward"* ]]
 }
 
+@test "rsd::c::recipe::help parses and displays top-level recipe inline comment block as rich documentation" {
+    # 1. Create an isolated mock recipe library directory
+    local mock_libdir
+    mock_libdir=$(mktemp -d -t rsd-recipe-help-comments.XXXXXX)
+    mkdir -p "${mock_libdir}/lib/recipe"
+    
+    # Write mock recipe file with a shebang and structured comments
+    cat << 'EOF' > "${mock_libdir}/lib/recipe/test_comments.recipe"
+#!/usr/bin/env bash
+
+# ==============================================================================
+# Test Recipe for Rich Comments
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# This is a mock recipe to verify that inline comment parsing works.
+# It should strip hashes and spaces correctly.
+
+function rsd::r::test_comments::register() {
+    rsd::r::register_task "test_comments::mock_task"
+}
+
+function rsd::r::test_comments::mock_task() { return 0; }
+EOF
+
+    # 2. Configure path array
+    local -a old_path
+    old_path=("${RSD_LIBRARY_SEARCH_PATH[@]}")
+    RSD_LIBRARY_SEARCH_PATH=("${mock_libdir}")
+
+    # Load recipe command
+    source "${BATS_TEST_DIRNAME}/../../command/recipe"
+
+    run rsd::c::recipe::help "test_comments"
+
+    # Restore path array and cleanup
+    RSD_LIBRARY_SEARCH_PATH=("${old_path[@]}")
+    rm -rf "$mock_libdir"
+
+    [ "$status" -eq 0 ]
+    
+    # Assert human-readable formatted comments are present and stripped of comment prefix
+    [[ "$output" == *"Test Recipe for Rich Comments"* ]]
+    [[ "$output" == *"PURPOSE"* ]]
+    [[ "$output" == *"This is a mock recipe to verify that inline comment parsing works."* ]]
+    [[ "$output" == *"It should strip hashes and spaces correctly."* ]]
+    
+    # Verify we stopped parsing at the first line of code (i.e. we do not print bash function definition)
+    [[ "$output" != *"rsd::r::test_comments::register"* ]]
+    
+    # Assert standard compiled task output still follows
+    [[ "$output" == *"=== Recipe Overview: test_comments ==="* ]]
+}
+
 @test "rsd::c::recipe::list outputs relative paths for recipes in subfolders" {
     # 1. Create an isolated mock recipe library directory
     local mock_libdir

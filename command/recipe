@@ -12,7 +12,7 @@ fi
 [[ "$RSD_RECIPE_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/recipe.lib)
 
 RSD_C_RECIPE_SHORT_DESC="Idempotent Recipe Provisioning Subsystem"
-RSD_C_RECIPE_VERSION="0.1.2"
+RSD_C_RECIPE_VERSION="0.1.3"
 
 # Recipe command is remote-aware (Mode A) to manage local/remote context dynamically
 RSD_C_RECIPE_REMOTE_AWARE=1
@@ -32,6 +32,29 @@ declare -g -A RSD_C_RECIPE_ARGS_PARAM=(
 function rsd::c::recipe::help() {
     local recipe="$1"
     if [[ -n "$recipe" ]]; then
+        # Extract and print top-level human-readable comments as rich documentation
+        local recipe_path
+        recipe_path="$(rsd::get_libdir_file "lib/recipe/${recipe}.recipe")"
+        if [[ -f "$recipe_path" ]]; then
+            awk '
+              NR == 1 { next }
+              /^[[:space:]]*#/ { 
+                sub(/^[[:space:]]*#[[:space:]]?/, "");
+                print;
+                has_comments = 1;
+                next;
+              }
+              /^[[:space:]]*$/ {
+                if (has_comments) {
+                  print "";
+                }
+                next;
+              }
+              { exit }
+            ' "$recipe_path"
+            echo ""
+        fi
+
         # Compile the recipe tasks recursively into the flat stack
         RSD_REGISTERED_TASKS=()
         declare -g -A RSD_TASKS_RECOVERY
