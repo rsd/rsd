@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+
+# Terminfo provisioning for Ghostty terminal.
+# Installs the xterm-ghostty terminfo entry on remote SSH targets.
+#
+# Package-first strategy with tic fallback. Only installs terminfo-specific
+# packages — never the full terminal application (prevents pulling Wayland/X11
+# dependencies on headless servers).
+#
+# Usage: rsd @target recipe run terminfo/ghostty
+#
+# Client-side alternative (no provisioning needed):
+#   ghostty +ssh -- user@example.com
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load dependencies
+[[ "$RSD_HOST_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/host.lib)"
+
+# --- Shared terminfo helpers (guarded against double-definition) ---
+
+if ! bash::is_function rsd::l::r::terminfo::resolve_platform; then
+
+# Cache and resolve target platform properties for terminfo decisions.
+# Results are stored globally to avoid redundant SSH round-trips when
+# multiple terminfo recipes run in the same session.
+#
+# @param string& $1 nameref output: family (e.g., "debian", "arch").
+# @param string& $2 nameref output: distro (e.g., "debian", "ubuntu", "rocky").
+# @param string& $3 nameref output: version (e.g., "13", "25.10", "rolling").
+# @return int 0 on success.
+function rsd::l::r::terminfo::resolve_platform() {
+    local _out_fam="$1"
+    local _out_dist="$2"
+    local _out_ver="$3"
+    declare -n _r_fam="$_out_fam"
+    declare -n _r_dist="$_out_dist"
+    declare -n _r_ver="$_out_ver"
+
+    # Return cached values if available
+    if [[ -n "${RSD_TERMINFO_FAMILY:-}" ]]; then
+        _r_fam="$RSD_TERMINFO_FAMILY"
+        _r_dist="$RSD_TERMINFO_DISTRO"
+        _r_ver="$RSD_TERMINFO_VERSION"
+        return 0
+    fi
+
+    local host_alias="${RSD_REMOTE_TARGET#@}"
+    rsd::l::host::get_property "$host_alias" "family" _r_fam
+    rsd::l::host::get_property "$host_alias" "distro" _r_dist
+    rsd::l::host::get_property "$host_alias" "version" _r_ver
+
+    # Persist for subsequent recipes in the same session
+    declare -g RSD_TERMINFO_FAMILY="$_r_fam"
+    declare -g RSD_TERMINFO_DISTRO="$_r_dist"
+    declare -g RSD_TERMINFO_VERSION="$_r_ver"
+}
+
+# Push a terminfo entry from local machine to remote target.
+# Runs infocmp locally, pipes through SSH tunnel to remote tic.
+# Skips gracefully if the entry is not available locally (terminal not installed).
+#
+# @param string $1 infocmp flags ("-x" for ghostty/alacritty, "-a" for kitty).
+# @param string $2 Terminfo entry name (e.g., "xterm-ghostty").
+# @return int 0 on success, 1 if local entry missing, 3 if remote tic missing.
+function rsd::l::r::terminfo::push_entry() {
+    local flags="$1"
+    local entry="$2"
+
+    # Pre-flight: verify entry exists on local machine
+    if ! infocmp $flags "$entry" &>/dev/null; then
+        rsd::warn "  [SKIP] Terminfo '$entry' not found locally (terminal not installed)."
+        return 1
+    fi
+
+    # Defensive binary validation on remote target
+    if ! rsd::l::target::has_bin tic; then
+        rsd::warn "  [ERROR] 'tic' not found on remote target. Install ncurses to enable tic fallback."
+        return 3
+    fi
+
+    # Ensure target directory exists
+    rsd::l::target::exec mkdir -p "\$HOME/.terminfo"
+
+    # Pipe local terminfo source through SSH tunnel to remote tic compiler
+    if infocmp $flags "$entry" | rsd::l::remote::execute "$RSD_REMOTE_TARGET" \
+        "tic" "-x" "-o" "\$HOME/.terminfo" "-"; then
+        rsd::warn "  [OK] Pushed '$entry' via tic fallback."
+        return 0
+    else
+        rsd::warn "  [ERROR] Failed to push '$entry' via tic on remote."
+        return 1
+    fi
+}
+
+fi  # end shared helpers guard
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::terminfo_ghostty::register() {
+    if [[ -z "$RSD_REMOTE_TARGET" ]]; then
+        rsd::warn "Error: Terminfo provisioning is remote-only. Use: rsd @target recipe run terminfo/ghostty"
+        exit 2
+    fi
+
+    rsd::r::register_task "terminfo_ghostty::install_entry" "ignore"
+}
+
+# --- Task: install_entry ---
+
+function rsd::r::terminfo_ghostty::install_entry::pre_check() {
+    rsd::l::target::exec infocmp xterm-ghostty &>/dev/null
+}
+
+# Installs xterm-ghostty terminfo via distro package or tic fallback.
+# Never installs full terminal packages on headless servers.
+function rsd::r::terminfo_ghostty::install_entry() {
+    local family="" distro="" version=""
+    rsd::l::r::terminfo::resolve_platform family distro version
+
+    local pkg=""
+    local try_package=0
+
+    case "$family" in
+        debian)
+            if [[ "$distro" == "ubuntu" ]]; then
+                rsd::l::host::version_gte "$version" "25.10" && try_package=1
+            else
+                # Debian proper and derivatives (trixie/13+)
+                rsd::l::host::version_gte "$version" "13" && try_package=1
+            fi
+            pkg="ncurses-term"
+            ;;
+        arch)
+            try_package=1
+            pkg="ghostty-terminfo"
+            ;;
+        fedora|rhel|centos)
+            if [[ "$distro" == "fedora" ]]; then
+                try_package=1
+            else
+                # EL 10+ (RHEL, Alma, Rocky, CentOS Stream)
+                rsd::l::host::version_gte "$version" "10" && try_package=1
+            fi
+            pkg="ncurses-term"
+            ;;
+        suse|opensuse)
+            # Tumbleweed (rolling) only — Leap unlikely to carry xterm-ghostty
+            [[ "$version" == "rolling" ]] && try_package=1
+            pkg="ncurses"
+            ;;
+        alpine)
+            # Full ghostty package pulls Wayland/X11 — skip to tic fallback
+            try_package=0
+            ;;
+    esac
+
+    # Phase 1: Package install attempt
+    if ((try_package)) && [[ -n "$pkg" ]]; then
+        rsd::l::r::install_pkg "$pkg" || \
+            rsd::warn "  [INFO] Package '$pkg' not available or install failed."
+
+        if rsd::l::target::exec infocmp xterm-ghostty &>/dev/null; then
+            rsd::warn "  [OK] xterm-ghostty installed via package '$pkg'."
+            return 0
+        fi
+        rsd::warn "  [INFO] Package installed but xterm-ghostty not found. Trying tic fallback..."
+    fi
+
+    # Phase 2: tic fallback (local infocmp → remote tic)
+    rsd::l::r::terminfo::push_entry "-x" "xterm-ghostty"
+}

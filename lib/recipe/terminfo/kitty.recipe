@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+
+# Terminfo provisioning for Kitty terminal.
+# Installs the xterm-kitty terminfo entry on remote SSH targets.
+#
+# Package-first strategy with tic fallback. Uses kitty-terminfo packages
+# where available — never installs the full terminal application.
+#
+# Usage: rsd @target recipe run terminfo/kitty
+#
+# Client-side alternative (no provisioning needed):
+#   kitty +kitten ssh user@remote-host
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load dependencies
+[[ "$RSD_HOST_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/host.lib)"
+
+# Shared helpers are defined in ghostty.recipe (guarded against double-definition).
+# When run standalone, this recipe defines them itself.
+if ! bash::is_function rsd::l::r::terminfo::resolve_platform; then
+    source "$(rsd::get_libdir_file lib/recipe/terminfo/ghostty.recipe)"
+fi
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::terminfo_kitty::register() {
+    if [[ -z "$RSD_REMOTE_TARGET" ]]; then
+        rsd::warn "Error: Terminfo provisioning is remote-only. Use: rsd @target recipe run terminfo/kitty"
+        exit 2
+    fi
+
+    rsd::r::register_task "terminfo_kitty::install_entry" "ignore"
+}
+
+# --- Task: install_entry ---
+
+function rsd::r::terminfo_kitty::install_entry::pre_check() {
+    rsd::l::target::exec infocmp xterm-kitty &>/dev/null
+}
+
+# Installs xterm-kitty terminfo via distro package or tic fallback.
+function rsd::r::terminfo_kitty::install_entry() {
+    local family="" distro="" version=""
+    rsd::l::r::terminfo::resolve_platform family distro version
+
+    local pkg=""
+    local try_package=0
+
+    case "$family" in
+        debian)
+            if [[ "$distro" == "ubuntu" ]]; then
+                # kitty-terminfo available since 20.04/focal
+                rsd::l::host::version_gte "$version" "20.04" && try_package=1
+            else
+                # Debian 11/bullseye+
+                rsd::l::host::version_gte "$version" "11" && try_package=1
+            fi
+            pkg="kitty-terminfo"
+            ;;
+        arch)
+            try_package=1
+            pkg="kitty-terminfo"
+            ;;
+        fedora|rhel|centos)
+            if [[ "$distro" == "fedora" ]]; then
+                # Available on all supported Fedora releases
+                try_package=1
+            else
+                # EL 8+ with EPEL
+                rsd::l::host::version_gte "$version" "8" && try_package=1
+            fi
+            pkg="kitty-terminfo"
+            ;;
+        suse|opensuse)
+            try_package=1
+            pkg="kitty-terminfo"
+            ;;
+        alpine)
+            # Try kitty-terminfo first; ncurses-terminfo-base as fallback package
+            try_package=1
+            pkg="kitty-terminfo"
+            ;;
+    esac
+
+    # Phase 1: Package install attempt
+    if ((try_package)) && [[ -n "$pkg" ]]; then
+        if ! rsd::l::r::install_pkg "$pkg"; then
+            rsd::warn "  [INFO] Package '$pkg' not available. Trying ncurses-terminfo-base..."
+
+            # Alpine fallback: ncurses-terminfo-base may carry xterm-kitty
+            if [[ "$family" == "alpine" ]]; then
+                rsd::l::r::install_pkg "ncurses-terminfo-base" || true
+            fi
+        fi
+
+        if rsd::l::target::exec infocmp xterm-kitty &>/dev/null; then
+            rsd::warn "  [OK] xterm-kitty installed via package."
+            return 0
+        fi
+        rsd::warn "  [INFO] Package installed but xterm-kitty not found. Trying tic fallback..."
+    fi
+
+    # Phase 2: tic fallback (local infocmp → remote tic)
+    # Kitty uses -a (all aliases) instead of -x (extended)
+    rsd::l::r::terminfo::push_entry "-a" "xterm-kitty"
+}

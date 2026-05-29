@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+# Terminfo provisioning master compositor.
+# Installs xterm-ghostty, xterm-kitty, alacritty, and alacritty-direct
+# terminfo entries on remote SSH targets.
+#
+# Combines all three terminal recipes into a single run. Each terminal's
+# task uses "ignore" recovery — if one terminal's terminfo cannot be
+# installed (package unavailable + local terminal not installed for tic),
+# the engine logs a warning and continues to the next.
+#
+# Usage: rsd @target recipe run terminfo/setup
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+function rsd::r::terminfo_setup::register() {
+    # Remote-only guard: terminfo provisioning targets SSH remote hosts
+    if [[ -z "$RSD_REMOTE_TARGET" ]]; then
+        rsd::warn "Error: Terminfo provisioning is remote-only. Use: rsd @target recipe run terminfo/setup"
+        exit 2
+    fi
+
+    rsd::r::include "terminfo/ghostty"
+    rsd::r::include "terminfo/kitty"
+    rsd::r::include "terminfo/alacritty"
+}

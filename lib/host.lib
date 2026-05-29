@@ -201,6 +201,22 @@ function rsd::l::host::get_property() {
     return 1
 }
 
+# Compare two dotted version strings (greater-than-or-equal).
+# Uses sort -V for natural version ordering, consistent with rsd::version_gt.
+# Treats "rolling" as always >= any threshold (Arch, Tumbleweed).
+#
+# @param string $1 Actual version (e.g., "13", "25.10", "rolling").
+# @param string $2 Minimum required version (e.g., "13", "25.10").
+# @return int 0 if $1 >= $2, 1 otherwise.
+function rsd::l::host::version_gte() {
+    local actual="$1"
+    local threshold="$2"
+    [[ "$actual" == "rolling" ]] && return 0
+    local smallest
+    smallest=$(printf '%s\n' "$actual" "$threshold" | sort -V | head -n 1)
+    [[ "$smallest" == "$threshold" ]]
+}
+
 # Generates a standalone, self-contained Bash script for platform discovery.
 # Intent: Construct a zero-dependency platform detection snippet that can be executed
 #         directly by bash -s on a remote system via standard input redirection.

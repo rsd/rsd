@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+
+# Terminfo provisioning for Alacritty terminal.
+# Installs alacritty and alacritty-direct terminfo entries on remote SSH targets.
+#
+# Package-first strategy with tic fallback. Uses ncurses-term/ncurses packages
+# where available — never downloads terminfo sources from the internet.
+# Instead, the tic fallback extracts entries from the local machine's compiled
+# terminfo database via infocmp.
+#
+# Usage: rsd @target recipe run terminfo/alacritty
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load dependencies
+[[ "$RSD_HOST_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/host.lib)"
+
+# Shared helpers are defined in ghostty.recipe (guarded against double-definition).
+# When run standalone, this recipe defines them itself.
+if ! bash::is_function rsd::l::r::terminfo::resolve_platform; then
+    source "$(rsd::get_libdir_file lib/recipe/terminfo/ghostty.recipe)"
+fi
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::terminfo_alacritty::register() {
+    if [[ -z "$RSD_REMOTE_TARGET" ]]; then
+        rsd::warn "Error: Terminfo provisioning is remote-only. Use: rsd @target recipe run terminfo/alacritty"
+        exit 2
+    fi
+
+    rsd::r::register_task "terminfo_alacritty::install_entry" "ignore"
+}
+
+# --- Task: install_entry ---
+
+# Both alacritty and alacritty-direct must be present to skip
+function rsd::r::terminfo_alacritty::install_entry::pre_check() {
+    rsd::l::target::exec infocmp alacritty &>/dev/null && \
+    rsd::l::target::exec infocmp alacritty-direct &>/dev/null
+}
+
+# Installs alacritty and alacritty-direct terminfo via distro package or tic fallback.
+function rsd::r::terminfo_alacritty::install_entry() {
+    local family="" distro="" version=""
+    rsd::l::r::terminfo::resolve_platform family distro version
+
+    local pkg=""
+    local try_package=0
+
+    case "$family" in
+        debian)
+            if [[ "$distro" == "ubuntu" ]]; then
+                # ncurses-term carries alacritty since 20.04/focal
+                rsd::l::host::version_gte "$version" "20.04" && try_package=1
+            else
+                # Debian 11/bullseye+
+                rsd::l::host::version_gte "$version" "11" && try_package=1
+            fi
+            pkg="ncurses-term"
+            ;;
+        arch)
+            try_package=1
+            pkg="ncurses"
+            ;;
+        fedora|rhel|centos)
+            try_package=1
+            pkg="ncurses-term"
+            ;;
+        suse|opensuse)
+            try_package=1
+            pkg="terminfo"
+            ;;
+        alpine)
+            # Try ncurses-terminfo-base first (smaller), full ncurses-terminfo as fallback
+            try_package=1
+            pkg="ncurses-terminfo-base"
+            ;;
+    esac
+
+    # Phase 1: Package install attempt
+    if ((try_package)) && [[ -n "$pkg" ]]; then
+        if ! rsd::l::r::install_pkg "$pkg"; then
+            rsd::warn "  [INFO] Package '$pkg' not available or install failed."
+
+            # Alpine fallback: try the full ncurses-terminfo package
+            if [[ "$family" == "alpine" ]]; then
+                rsd::l::r::install_pkg "ncurses-terminfo" || true
+            fi
+        fi
+
+        # Check both entries after package install
+        local pkg_ok=1
+        rsd::l::target::exec infocmp alacritty &>/dev/null || pkg_ok=0
+        rsd::l::target::exec infocmp alacritty-direct &>/dev/null || pkg_ok=0
+
+        if ((pkg_ok)); then
+            rsd::warn "  [OK] alacritty + alacritty-direct installed via package."
+            return 0
+        fi
+        rsd::warn "  [INFO] Package installed but entries incomplete. Trying tic fallback..."
+    fi
+
+    # Phase 2: tic fallback for each missing entry independently
+    local rc=0
+
+    if ! rsd::l::target::exec infocmp alacritty &>/dev/null; then
+        rsd::l::r::terminfo::push_entry "-x" "alacritty" || rc=$?
+    fi
+
+    if ! rsd::l::target::exec infocmp alacritty-direct &>/dev/null; then
+        rsd::l::r::terminfo::push_entry "-x" "alacritty-direct" || rc=$?
+    fi
+
+    return $rc
+}
