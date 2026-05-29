@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# TimescaleDB — Application Database Provisioning
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Creates a PostgreSQL role, database, and enables TimescaleDB extensions.
+# Companion to timescaledb/core, which handles server-level provisioning.
+#
+# PREREQUISITES
+# -------------
+# Run `rsd [@host] recipe run timescaledb/core` first.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+#  1. create_role       — Creates a PostgreSQL LOGIN role with SCRAM password.
+#  2. create_database   — Creates a database owned by the new role.
+#  3. enable_extensions — Enables timescaledb and pg_stat_statements in the db.
+#  4. validate          — Verifies role, database, and extensions are functional.
+#
+# OPTIONS
+# -------
+#  --db-name <name>       Database name (required).
+#  --db-user <name>       Role/user name (required).
+#  --db-password <pass>   Password for the role (optional; auto-generated if
+#                         omitted).
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. Each task checks whether the desired state
+# already exists before making changes.
+#
+# SCOPE
+# -----
+# Works on both local and remote targets.
+#
+# Usage:
+#   rsd @bi recipe run timescaledb/app --db-name crystal --db-user crystal_app
+#   rsd @bi recipe run timescaledb/app --db-name mydb --db-user myuser --db-password s3cret
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Recipe-specific CLI options
+declare -g -A RSD_RECIPE_OPTIONS=(
+    ["db-name"]=1
+    ["db-user"]=1
+    ["db-password"]=1
+)
+
+# ==============================================================================
+# Globals (populated during registration)
+# ==============================================================================
+
+declare -g RSD_APP_DB_NAME=""
+declare -g RSD_APP_DB_USER=""
+declare -g RSD_APP_DB_PASS=""
+
+# ==============================================================================
+# Helpers
+# ==============================================================================
+
+# Run a SQL statement as the postgres superuser via stdin piping.
+# Stdin piping avoids shell-escaping issues when SQL contains single quotes
+# (e.g., PASSWORD 'foo') — the SQL never passes through the argument pipeline.
+#
+# @param string $1 The SQL statement to execute.
+# @param string $2 Optional: database name to connect to.
+# @return int psql exit code. Stdout contains query results.
+function rsd::l::r::app::psql_su() {
+    local sql="$1"
+    local db="${2:-}"
+    local -a db_args=()
+    [[ -n "$db" ]] && db_args=(-d "$db")
+
+    printf '%s\n' "$sql" | \
+        rsd::l::target::exec_sudo "" sudo -u postgres psql -XAt "${db_args[@]}" -f - 2>/dev/null
+}
+
+# Validate that a value is a safe SQL identifier (prevents injection).
+# Allows only letters, digits, and underscores, starting with a letter or _.
+#
+# @param string $1 The identifier to validate.
+# @param string $2 Human-readable label for error messages.
+# @return int 0 if valid, 1 if invalid.
+function rsd::l::r::app::validate_identifier() {
+    local value="$1"
+    local label="$2"
+
+    if [[ -z "$value" ]]; then
+        rsd::io::error "$label is required. Use: --${label} <value>"
+        return 1
+    fi
+
+    if [[ ! "$value" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+        rsd::io::error "$label '$value' contains invalid characters. Use only [a-zA-Z0-9_], starting with a letter or underscore."
+        return 1
+    fi
+}
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::timescaledb_app::register() {
+    # Validate required options
+    RSD_APP_DB_NAME="${RSD_COMMAND_ARGS[db-name]:-}"
+    RSD_APP_DB_USER="${RSD_COMMAND_ARGS[db-user]:-}"
+    RSD_APP_DB_PASS="${RSD_COMMAND_ARGS[db-password]:-}"
+
+    rsd::l::r::app::validate_identifier "$RSD_APP_DB_NAME" "db-name" || exit 2
+    rsd::l::r::app::validate_identifier "$RSD_APP_DB_USER" "db-user" || exit 2
+
+    # Verify PostgreSQL is running on the target
+    if ! rsd::l::target::exec_sudo "" systemctl is-active --quiet postgresql; then
+        rsd::io::error "PostgreSQL is not running. Run timescaledb/core first."
+        exit 2
+    fi
+
+    # Auto-generate password if not provided
+    if [[ -z "$RSD_APP_DB_PASS" ]]; then
+        RSD_APP_DB_PASS=$(openssl rand -base64 24 2>/dev/null | tr -d '/+=' | head -c 24)
+        if [[ -z "$RSD_APP_DB_PASS" ]]; then
+            # Fallback if openssl is not available
+            RSD_APP_DB_PASS=$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 24)
+        fi
+        rsd::io::warn "No --db-password provided. Auto-generated one (shown at end)."
+    fi
+
+    rsd::r::register_task "timescaledb_app::create_role" "rollback"
+    rsd::r::register_task "timescaledb_app::create_database" "rollback"
+    rsd::r::register_task "timescaledb_app::enable_extensions"
+    rsd::r::register_task "timescaledb_app::validate"
+}
+
+# ==============================================================================
+# Task: create_role
+# ==============================================================================
+
+function rsd::r::timescaledb_app::create_role::pre_check() {
+    local exists
+    exists=$(rsd::l::r::app::psql_su "SELECT 1 FROM pg_roles WHERE rolname = '${RSD_APP_DB_USER}'")
+    [[ "$exists" == "1" ]]
+}
+
+function rsd::r::timescaledb_app::create_role() {
+    rsd::io::status "Creating PostgreSQL role '${RSD_APP_DB_USER}'..."
+
+    # Escape single quotes in password for SQL string literal
+    local safe_pass="${RSD_APP_DB_PASS//\'/\'\'}"
+
+    if ! rsd::l::r::app::psql_su "CREATE ROLE ${RSD_APP_DB_USER} LOGIN PASSWORD '${safe_pass}'"; then
+        rsd::io::error "Failed to create role '${RSD_APP_DB_USER}'."
+        return 1
+    fi
+
+    rsd::io::ok "Role '${RSD_APP_DB_USER}' created."
+}
+
+function rsd::r::timescaledb_app::create_role::rollback() {
+    rsd::l::r::app::psql_su "DROP ROLE IF EXISTS ${RSD_APP_DB_USER}"
+}
+
+# ==============================================================================
+# Task: create_database
+# ==============================================================================
+
+function rsd::r::timescaledb_app::create_database::pre_check() {
+    local exists
+    exists=$(rsd::l::r::app::psql_su "SELECT 1 FROM pg_database WHERE datname = '${RSD_APP_DB_NAME}'")
+    [[ "$exists" == "1" ]]
+}
+
+function rsd::r::timescaledb_app::create_database() {
+    rsd::io::status "Creating database '${RSD_APP_DB_NAME}' owned by '${RSD_APP_DB_USER}'..."
+
+    if ! rsd::l::r::app::psql_su "CREATE DATABASE ${RSD_APP_DB_NAME} OWNER ${RSD_APP_DB_USER}"; then
+        rsd::io::error "Failed to create database '${RSD_APP_DB_NAME}'."
+        return 1
+    fi
+
+    rsd::io::ok "Database '${RSD_APP_DB_NAME}' created."
+}
+
+function rsd::r::timescaledb_app::create_database::rollback() {
+    rsd::l::r::app::psql_su "DROP DATABASE IF EXISTS ${RSD_APP_DB_NAME}"
+}
+
+# ==============================================================================
+# Task: enable_extensions
+# ==============================================================================
+# Recovery: forward (default). Extensions are harmless and CREATE EXTENSION
+# IF NOT EXISTS is idempotent, so no rollback needed.
+
+function rsd::r::timescaledb_app::enable_extensions::pre_check() {
+    local count
+    count=$(rsd::l::r::app::psql_su \
+        "SELECT count(*) FROM pg_extension WHERE extname IN ('timescaledb','pg_stat_statements')" \
+        "$RSD_APP_DB_NAME")
+    [[ "$count" == "2" ]]
+}
+
+function rsd::r::timescaledb_app::enable_extensions() {
+    rsd::io::status "Enabling extensions in '${RSD_APP_DB_NAME}'..."
+
+    if ! rsd::l::r::app::psql_su \
+        "CREATE EXTENSION IF NOT EXISTS timescaledb" "$RSD_APP_DB_NAME"; then
+        rsd::io::error "Failed to enable timescaledb extension."
+        return 1
+    fi
+    rsd::io::ok "timescaledb enabled."
+
+    if ! rsd::l::r::app::psql_su \
+        "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" "$RSD_APP_DB_NAME"; then
+        rsd::io::error "Failed to enable pg_stat_statements extension."
+        return 1
+    fi
+    rsd::io::ok "pg_stat_statements enabled."
+}
+
+# ==============================================================================
+# Task: validate
+# ==============================================================================
+# Read-only smoke test. Displays connection details for application config.
+
+function rsd::r::timescaledb_app::validate() {
+    rsd::io::blank
+    rsd::io::banner "Application Database Summary"
+    rsd::io::blank
+
+    # Role info
+    local role_info
+    role_info=$(rsd::l::r::app::psql_su \
+        "SELECT rolname || ' (login=' || rolcanlogin || ')' FROM pg_roles WHERE rolname = '${RSD_APP_DB_USER}'")
+    rsd::io::info "Role:       $role_info"
+
+    # Database owner
+    local db_owner
+    db_owner=$(rsd::l::r::app::psql_su \
+        "SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_database WHERE datname = '${RSD_APP_DB_NAME}'")
+    rsd::io::info "Database:   ${RSD_APP_DB_NAME} (owner: ${db_owner})"
+
+    # Extensions
+    local extensions
+    extensions=$(rsd::l::r::app::psql_su \
+        "SELECT extname || ' ' || extversion FROM pg_extension WHERE extname IN ('timescaledb','pg_stat_statements') ORDER BY extname" \
+        "$RSD_APP_DB_NAME")
+    rsd::io::info "Extensions:"
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && rsd::io::info "  - $line"
+    done <<< "$extensions"
+
+    rsd::io::blank
+    rsd::io::banner "Connection Details"
+    rsd::io::blank
+    rsd::io::info "Host:       localhost"
+    rsd::io::info "Port:       5432"
+    rsd::io::info "Database:   ${RSD_APP_DB_NAME}"
+    rsd::io::info "User:       ${RSD_APP_DB_USER}"
+    rsd::io::info "Password:   ${RSD_APP_DB_PASS}"
+    rsd::io::blank
+    rsd::io::info "DSN:        postgresql://${RSD_APP_DB_USER}:<password>@localhost:5432/${RSD_APP_DB_NAME}"
+    rsd::io::blank
+}
