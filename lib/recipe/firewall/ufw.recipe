@@ -73,6 +73,13 @@ fi
 # Load dependencies
 [[ "$RSD_UFW_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/ufw.lib)"
 
+# Recipe-specific CLI options.
+# Parsed by the engine's Phase 3 re-parse of leftover arguments after
+# this recipe file is sourced. Format: ["name"]=0 (flag) or 1 (value).
+declare -g -A RSD_RECIPE_OPTIONS=(
+    ["install-ufw"]=0
+)
+
 # ==============================================================================
 # Helpers
 # ==============================================================================
@@ -150,21 +157,30 @@ function rsd::r::firewall_ufw::harden::pre_check() {
 function rsd::r::firewall_ufw::harden() {
     # --- Gate: UFW must be installed ---
     if ! rsd::l::target::has_bin ufw; then
-        rsd::warn ""
-        rsd::warn "  ┌─────────────────────────────────────────────────┐"
-        rsd::warn "  │  UFW is not installed on the target host.       │"
-        rsd::warn "  └─────────────────────────────────────────────────┘"
-        rsd::warn ""
-        rsd::warn "  Install UFW using your distribution's package manager:"
-        rsd::warn ""
-        rsd::warn "    Debian / Ubuntu :  sudo apt install ufw"
-        rsd::warn "    Arch Linux      :  sudo pacman -S ufw"
-        rsd::warn "    Fedora / RHEL   :  sudo dnf install ufw"
-        rsd::warn "    Alpine Linux    :  sudo apk add ufw"
-        rsd::warn "    openSUSE        :  sudo zypper install ufw"
-        rsd::warn ""
-        rsd::warn "  Then re-run this recipe."
-        return 3
+        if [[ "${RSD_COMMAND_ARGS[install-ufw]}" == "1" ]]; then
+            rsd::warn "  UFW not installed. Auto-installing (--install-ufw)..."
+            if ! rsd::l::r::install_pkg ufw; then
+                rsd::warn "  [ERROR] Failed to install UFW."
+                return 3
+            fi
+            rsd::warn "  [OK] UFW installed."
+        else
+            rsd::warn ""
+            rsd::warn "  ┌─────────────────────────────────────────────────┐"
+            rsd::warn "  │  UFW is not installed on the target host.       │"
+            rsd::warn "  └─────────────────────────────────────────────────┘"
+            rsd::warn ""
+            rsd::warn "  Install UFW using your distribution's package manager:"
+            rsd::warn ""
+            rsd::warn "    Debian / Ubuntu :  sudo apt install ufw"
+            rsd::warn "    Arch Linux      :  sudo pacman -S ufw"
+            rsd::warn "    Fedora / RHEL   :  sudo dnf install ufw"
+            rsd::warn "    Alpine Linux    :  sudo apk add ufw"
+            rsd::warn "    openSUSE        :  sudo zypper install ufw"
+            rsd::warn ""
+            rsd::warn "  Or re-run this recipe with --install-ufw to automate."
+            return 3
+        fi
     fi
 
     # --- Detect SSH port(s) ---

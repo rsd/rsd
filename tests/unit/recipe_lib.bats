@@ -18,6 +18,18 @@ setup() {
     source "${BATS_TEST_DIRNAME}/../../lib/rsd.lib"
     source "${BATS_TEST_DIRNAME}/../../lib/config.lib"
     source "${BATS_TEST_DIRNAME}/../../lib/recipe.lib"
+
+    # rsd::parse_args lives in the main 'rsd' script, not in a library.
+    # Extract it for tests that exercise command-level functions (e.g. run).
+    eval "$(sed -n '/^function rsd::parse_args/,/^}/p' "${BATS_TEST_DIRNAME}/../../rsd")"
+
+    # Matching global state required by rsd::parse_args and command/recipe
+    declare -g -A RSD_PARSE_CONFIG=(
+        ["unknown-option"]="ignore"
+        ["stop-on-command"]=1
+    )
+    declare -g -A RSD_COMMAND_ARGS=()
+    declare -ga RSD_ARGS_UNPROCESSED=()
 }
 
 @test "rsd::r::register_task registers task with default forward recovery" {
@@ -320,4 +332,93 @@ EOF
     [ "${#RSD_REGISTERED_TASKS[@]}" -eq 1 ]
     [ "${RSD_REGISTERED_TASKS[0]}" = "utils_sub_task::do_thing" ]
     [ "${RSD_TASKS_RECOVERY["utils_sub_task::do_thing"]}" = "forward" ]
+}
+
+@test "rsd::c::recipe::run re-parses leftover args using recipe-declared RSD_RECIPE_OPTIONS" {
+    # 1. Create an isolated mock recipe with custom options
+    local mock_libdir
+    mock_libdir=$(mktemp -d -t rsd-recipe-options.XXXXXX)
+    mkdir -p "${mock_libdir}/lib/recipe"
+
+    cat << 'EOF' > "${mock_libdir}/lib/recipe/test_options.recipe"
+declare -g -A RSD_RECIPE_OPTIONS=(
+    ["test-flag"]=0
+    ["test-value"]=1
+)
+
+function rsd::r::test_options::register() {
+    rsd::r::register_task "test_options::check_flag"
+}
+
+# Verify the flag was parsed into RSD_COMMAND_ARGS
+function rsd::r::test_options::check_flag() {
+    if [[ "${RSD_COMMAND_ARGS[test-flag]}" == "1" ]]; then
+        echo "FLAG_FOUND"
+    fi
+    if [[ "${RSD_COMMAND_ARGS[test-value]}" == "hello" ]]; then
+        echo "VALUE_FOUND"
+    fi
+    return 0
+}
+EOF
+
+    # 2. Configure path array
+    local -a old_path
+    old_path=("${RSD_LIBRARY_SEARCH_PATH[@]}")
+    RSD_LIBRARY_SEARCH_PATH=("${mock_libdir}")
+
+    # Load recipe command
+    source "${BATS_TEST_DIRNAME}/../../command/recipe"
+
+    # Run the recipe with custom options
+    run rsd::c::recipe::run "test_options" "--test-flag" "--test-value" "hello"
+
+    # Restore path array and cleanup
+    RSD_LIBRARY_SEARCH_PATH=("${old_path[@]}")
+    rm -rf "$mock_libdir"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"FLAG_FOUND"* ]]
+    [[ "$output" == *"VALUE_FOUND"* ]]
+}
+
+@test "rsd::c::recipe::help displays recipe-specific options when RSD_RECIPE_OPTIONS is declared" {
+    # 1. Create an isolated mock recipe with custom options
+    local mock_libdir
+    mock_libdir=$(mktemp -d -t rsd-recipe-help-options.XXXXXX)
+    mkdir -p "${mock_libdir}/lib/recipe"
+
+    cat << 'EOF' > "${mock_libdir}/lib/recipe/test_help_opts.recipe"
+declare -g -A RSD_RECIPE_OPTIONS=(
+    ["auto-install"]=0
+    ["custom-port"]=1
+)
+
+function rsd::r::test_help_opts::register() {
+    rsd::r::register_task "test_help_opts::noop"
+}
+
+function rsd::r::test_help_opts::noop() { return 0; }
+EOF
+
+    # 2. Configure path array
+    local -a old_path
+    old_path=("${RSD_LIBRARY_SEARCH_PATH[@]}")
+    RSD_LIBRARY_SEARCH_PATH=("${mock_libdir}")
+
+    # Load recipe command
+    source "${BATS_TEST_DIRNAME}/../../command/recipe"
+
+    run rsd::c::recipe::help "test_help_opts"
+
+    # Restore path array and cleanup
+    RSD_LIBRARY_SEARCH_PATH=("${old_path[@]}")
+    rm -rf "$mock_libdir"
+
+    [ "$status" -eq 0 ]
+
+    # Recipe-specific options section is displayed
+    [[ "$output" == *"Recipe-Specific Options:"* ]]
+    [[ "$output" == *"--auto-install"* ]]
+    [[ "$output" == *"--custom-port <value>"* ]]
 }
