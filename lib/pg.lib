@@ -180,6 +180,18 @@ function rsd::l::pg::resolve_from_args() {
 # Execute a SQL statement via psql on the target, routing through the
 # resolved connection method.
 #
+# STDIN CONTENTION: In sudo mode, sudo.lib may read stdin for the password
+# (when no vault/cache/askpass is configured). If we pipe SQL via stdin
+# (`printf ... | sudo psql -f -`), sudo consumes the SQL as a password
+# attempt and psql gets nothing. To avoid this, sudo mode uses `-c` which
+# passes SQL as a command-line argument, leaving stdin free for sudo.
+# The non-sudo paths use `-f -` (stdin pipe) which is safe since there's
+# no stdin consumer in that pipeline.
+#
+# CR STRIPPING: When routed via `ssh -t` (terminal allocation for sudo),
+# the pseudo-terminal injects `\r` into stdout. We strip it to ensure
+# callers get clean output regardless of transport.
+#
 # @param string $1 SQL to execute.
 # @param string $2 Optional: database name.
 # @return int psql exit code. Stdout contains query results.
@@ -189,13 +201,31 @@ function rsd::l::pg::psql() {
     local -a db_args=()
     [[ -n "$db" ]] && db_args=(-d "$db")
 
+    local _output
     if [[ "$RSD_PG_METHOD" == "sudo" ]]; then
-        printf '%s\n' "$sql" | \
-            rsd::l::target::exec_sudo "$RSD_PG_SUDO_USER" psql -XAt "${db_args[@]}" -f - 2>/dev/null
+        # Use -c to avoid stdin contention with sudo's password reader
+        _output=$(rsd::l::target::exec_sudo "$RSD_PG_SUDO_USER" psql -XAt "${db_args[@]}" -c "$sql" 2>/dev/null)
     else
-        printf '%s\n' "$sql" | \
-            rsd::l::target::exec psql -XAt "${RSD_PG_CONN[@]}" "${db_args[@]}" -f - 2>/dev/null
+        _output=$(printf '%s\n' "$sql" | \
+            rsd::l::target::exec psql -XAt "${RSD_PG_CONN[@]}" "${db_args[@]}" -f - 2>/dev/null)
     fi
+    local _exit=$?
+
+    # Clean transport artifacts from output:
+    #   1. Strip \r injected by ssh -t pseudo-terminal allocation
+    #   2. Remove leading/trailing blank lines from sudo -S echo leakage
+    _output="${_output//$'\r'/}"
+    # Remove leading blank lines
+    while [[ "$_output" == $'\n'* ]]; do
+        _output="${_output#$'\n'}"
+    done
+    # Remove trailing blank lines
+    while [[ "$_output" == *$'\n' ]]; do
+        _output="${_output%$'\n'}"
+    done
+
+    [[ -n "$_output" ]] && printf '%s\n' "$_output"
+    return $_exit
 }
 
 # Execute a PostgreSQL tool (pg_dump, pg_restore, pg_dumpall, etc.)
@@ -220,16 +250,26 @@ function rsd::l::pg::exec() {
 # ==============================================================================
 
 # Probe via sudo -u <user> peer auth.
+# Uses -c instead of stdin pipe to avoid contention with sudo's password reader.
+# Uses grep to match result — ssh -t and sudo -S inject CR and blank lines
+# that make exact string comparison unreliable.
 # @param string $1 OS user to sudo into.
 # @return int 0 if connection succeeds.
 function rsd::l::pg::_probe_sudo() {
     local user="$1"
     rsd::debug "pg::_probe_sudo: trying sudo -u $user psql..." 15
-    printf '%s\n' "SELECT 1" | \
-        rsd::l::target::exec_sudo "$user" psql -XAt -f - 2>/dev/null | grep -q '^1$'
+    local _result
+    _result=$(rsd::l::target::exec_sudo "$user" psql -XAt -c "SELECT 1" 2>/dev/null)
+    if echo "$_result" | tr -d '\r' | grep -q '^1$'; then
+        return 0
+    fi
+    rsd::debug "pg::_probe_sudo: failed" 15
+    return 1
 }
 
 # Probe via TCP connection.
+# Uses env to propagate PGCONNECT_TIMEOUT and PGPASSWORD through SSH,
+# and -w (no-password) to prevent interactive prompts that would hang.
 # @param string $1 Host to connect to.
 # @param string $2 User (empty = current OS user).
 # @return int 0 if connection succeeds.
@@ -240,14 +280,26 @@ function rsd::l::pg::_probe_tcp() {
     [[ -n "$user" ]] && args+=(-U "$user")
 
     rsd::debug "pg::_probe_tcp: trying psql ${args[*]}..." 15
-    printf '%s\n' "SELECT 1" | \
-        rsd::l::target::exec psql -XAt "${args[@]}" -f - 2>/dev/null | grep -q '^1$'
+    local _result
+    _result=$(rsd::l::target::exec env PGCONNECT_TIMEOUT=3 PGPASSWORD="" \
+        psql -XAt "${args[@]}" -w -c "SELECT 1" 2>/dev/null)
+    if echo "$_result" | tr -d '\r' | grep -q '^1$'; then
+        return 0
+    fi
+    rsd::debug "pg::_probe_tcp: failed" 15
+    return 1
 }
 
 # Probe via local socket as current OS user (peer auth, no sudo).
 # @return int 0 if connection succeeds.
 function rsd::l::pg::_probe_peer() {
     rsd::debug "pg::_probe_peer: trying psql as current user (local socket)..." 15
-    printf '%s\n' "SELECT 1" | \
-        rsd::l::target::exec psql -XAt -f - 2>/dev/null | grep -q '^1$'
+    local _result
+    _result=$(rsd::l::target::exec env PGCONNECT_TIMEOUT=3 \
+        psql -XAt -w -c "SELECT 1" 2>/dev/null)
+    if echo "$_result" | tr -d '\r' | grep -q '^1$'; then
+        return 0
+    fi
+    rsd::debug "pg::_probe_peer: failed" 15
+    return 1
 }

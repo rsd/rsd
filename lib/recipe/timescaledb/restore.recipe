@@ -344,6 +344,16 @@ function rsd::r::timescaledb_restore::resolve_input() {
             rsd::io::ok "Transferred: $(basename "$RSD_RST_ROLE_FILE")"
             RSD_RST_ROLE_FILE="$remote_role"
         fi
+
+        # When PG method is sudo, pg_restore runs as the postgres OS user.
+        # The temp dir is owned by the SSH user (0700), so postgres can't read
+        # the files. Relax permissions so the target OS user can access them.
+        # Safe: the temp dir has an unpredictable mktemp name and contains
+        # only backup data.
+        if [[ "$RSD_PG_METHOD" == "sudo" ]]; then
+            rsd::l::target::exec chmod 0755 "$remote_tmp"
+            rsd::l::target::exec sh -c "chmod 0644 '${remote_tmp}'/*"
+        fi
     fi
 
     rsd::io::ok "Input resolved."
