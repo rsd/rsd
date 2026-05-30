@@ -127,8 +127,7 @@ function rsd::command() {
 function rsd::passthru() {
     local command=$1
     shift
-    local arguments=$*
-    exec "$command" "$arguments"
+    exec "$command" "$@"
     exit 0
 }
 

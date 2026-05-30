@@ -405,7 +405,9 @@ function rsd::r::timescaledb_backup::_dump_role_attributes() {
 
     local dest="${RSD_BKP_OUTPUT_DIR}/${RSD_BKP_ROLE_FILENAME}"
 
-    cat > "$dest" <<EOSQL
+    # Build the SQL content into a variable to avoid heredoc-to-remote issues.
+    local sql_content
+    sql_content=$(cat <<EOSQL
 -- Role attributes dumped by rsd timescaledb/backup
 -- Timestamp: ${RSD_BKP_TIMESTAMP}
 -- NOTE: Password hash excluded (non-superuser dump).
@@ -420,7 +422,26 @@ END \$\$;
 
 ALTER ROLE "${r_name}" WITH${attrs};
 EOSQL
-    chmod 0640 "$dest"
+    )
+
+    if [[ "$RSD_BKP_OUTPUT_IS_REMOTE" == "1" ]]; then
+        # Write to local temp, push to remote, clean up.
+        local tmp
+        tmp=$(mktemp -t "rsd-role.XXXXXX") || return 14
+        printf '%s\n' "$sql_content" > "$tmp"
+        chmod 0640 "$tmp"
+
+        rsd::l::target::file_push "$tmp" "$dest" || {
+            rm -f "$tmp"
+            rsd::io::error "Failed to transfer role file to remote."
+            return 1
+        }
+        rm -f "$tmp"
+        rsd::l::target::exec_sudo "" chmod 0640 "$dest"
+    else
+        printf '%s\n' "$sql_content" > "$dest"
+        chmod 0640 "$dest"
+    fi
 
     rsd::io::ok "Role → ${dest}"
 }

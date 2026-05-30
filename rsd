@@ -968,6 +968,14 @@ if [[ "${RSD_ARGS[command]}" ]]; then
             is_aware="RSD_C_${RSD_COMMAND^^}_REMOTE_AWARE"
             if [[ "${!is_aware}" -eq 1 ]]; then
                 rsd::debug "Command $RSD_COMMAND is remote-aware (Mode A Local Orchestration)." 15
+
+                # Mode A still needs remote framework parity — probe and offer upgrade.
+                # Advisory only (|| true): Mode A commands SSH raw commands via target.lib,
+                # so a missing remote rsd binary should not block execution.
+                source "$(rsd::get_libdir_file lib/remote.lib)"
+                local _mode_a_rsd_bin="rsd"
+                rsd::l::remote::bootstrap_check "$RSD_REMOTE_TARGET" _mode_a_rsd_bin 2>/dev/null || true
+
                 rsd::command "$RSD_COMMAND"
                 exit $?
             else

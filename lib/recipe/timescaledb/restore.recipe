@@ -90,6 +90,7 @@ declare -g RSD_RST_DB_NAME=""
 declare -g RSD_RST_DB_USER=""           # database owner (--db-user or auto-detected)
 declare -g RSD_RST_DB_PASSWORD=""
 declare -g RSD_RST_FROM=""             # resolved --from path (host prefix stripped)
+declare -g RSD_RST_FROM_HOST=""        # host alias from @host:path ("" if local)
 declare -g RSD_RST_FROM_IS_REMOTE=0    # 1 if --from uses @host:path
 declare -g RSD_RST_DUMP_FILE=""        # resolved absolute path to .dump
 declare -g RSD_RST_ROLE_FILE=""        # resolved path to role_*.sql or globals_*.sql
@@ -141,6 +142,57 @@ function rsd::l::r::rst::pg_exec() {
     fi
 }
 
+# Parse a path string into host + resolved directory + remote flag.
+# Supports scp-style remote paths with mandatory colon separator.
+# Mirrors rsd::l::r::bkp::parse_path for consistency.
+#
+# @param string  $1 Raw path (e.g., "backups/", "@bi:backups/", "@bi:/tmp/bk")
+# @param string& $2 nameref: host ("" for local, "bi" for remote).
+# @param string& $3 nameref: resolved absolute path.
+# @param int&    $4 nameref: 1 if remote, 0 if local.
+# @return int 0 on success, 1 on parse error.
+function rsd::l::r::rst::parse_path() {
+    local input="$1"
+    declare -n __rst_host="$2"
+    declare -n __rst_path="$3"
+    declare -n __rst_remote="$4"
+
+    if [[ "$input" == @* ]]; then
+        __rst_remote=1
+        local after_at="${input#@}"
+
+        if [[ "$after_at" != *:* ]]; then
+            rsd::io::error "Remote path requires colon: @host:path (e.g., @bi:/tmp/backup)"
+            return 1
+        fi
+
+        __rst_host="${after_at%%:*}"
+        __rst_path="${after_at#*:}"
+
+        # Resolve relative paths against remote $HOME
+        if [[ "$__rst_path" != /* ]]; then
+            local remote_home
+            remote_home=$(rsd::l::target::exec sh -c 'echo $HOME' 2>/dev/null)
+            if [[ -z "$remote_home" ]]; then
+                rsd::io::error "Could not resolve remote \$HOME."
+                return 1
+            fi
+            __rst_path="${remote_home}/${__rst_path}"
+        fi
+    else
+        __rst_remote=0
+        __rst_host=""
+        if [[ "$input" != /* ]]; then
+            __rst_path="$(pwd)/${input}"
+        else
+            __rst_path="$input"
+        fi
+    fi
+
+    # Normalize trailing slash
+    __rst_path="${__rst_path%/}"
+}
+
 # Run a command on the host where --from files live.
 # Routes through rsd::l::target::exec when --from is remote.
 #
@@ -175,36 +227,19 @@ function rsd::r::timescaledb_restore::register() {
     fi
 
     # Parse @host:path syntax from --from
-    if [[ "$raw_from" == @* ]]; then
-        RSD_RST_FROM_IS_REMOTE=1
-        local after_at="${raw_from#@}"
+    if ! rsd::l::r::rst::parse_path "$raw_from" \
+        RSD_RST_FROM_HOST RSD_RST_FROM RSD_RST_FROM_IS_REMOTE; then
+        exit 2
+    fi
 
-        if [[ "$after_at" != *:* ]]; then
-            rsd::io::error "Remote path requires colon: @host:path (e.g., @bi:/tmp/backup)"
+    # Cross-host validation: --from host must match the recipe target
+    if [[ "$RSD_RST_FROM_IS_REMOTE" == "1" ]]; then
+        local target_host="${RSD_REMOTE_TARGET#@}"
+        if [[ "$RSD_RST_FROM_HOST" != "$target_host" ]]; then
+            rsd::io::error "Cross-host restore not supported. Target is @${target_host}, --from is @${RSD_RST_FROM_HOST}."
             exit 2
         fi
-
-        RSD_RST_FROM="${after_at#*:}"
-
-        # Resolve relative paths against remote $HOME
-        if [[ "$RSD_RST_FROM" != /* ]]; then
-            local remote_home
-            remote_home=$(rsd::l::target::exec sh -c 'echo $HOME' 2>/dev/null)
-            if [[ -z "$remote_home" ]]; then
-                rsd::io::error "Could not resolve remote \$HOME."
-                exit 2
-            fi
-            RSD_RST_FROM="${remote_home}/${RSD_RST_FROM}"
-        fi
-    else
-        RSD_RST_FROM_IS_REMOTE=0
-        if [[ "$raw_from" != /* ]]; then
-            RSD_RST_FROM="$(pwd)/${raw_from}"
-        else
-            RSD_RST_FROM="$raw_from"
-        fi
     fi
-    RSD_RST_FROM="${RSD_RST_FROM%/}"
 
     # Drop existing flag
     [[ -v RSD_COMMAND_ARGS[drop-existing] ]] && RSD_RST_DROP_EXISTING=1
@@ -334,7 +369,7 @@ function rsd::r::timescaledb_restore::resolve_input() {
         rsd::io::status "Transferring backup files to target..."
 
         local remote_tmp
-        remote_tmp=$(rsd::l::target::mktemp -d "rsd-restore.XXXXXX") || return 14
+        remote_tmp=$(rsd::l::target::mktemp "rsd-restore.XXXXXX" "-d") || return 14
         RSD_RST_REMOTE_TMP="$remote_tmp"
 
         # Transfer dump

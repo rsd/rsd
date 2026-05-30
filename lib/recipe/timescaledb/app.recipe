@@ -82,7 +82,7 @@ function rsd::l::r::app::psql_su() {
     [[ -n "$db" ]] && db_args=(-d "$db")
 
     printf '%s\n' "$sql" | \
-        rsd::l::target::exec_sudo "" sudo -u postgres psql -XAt "${db_args[@]}" -f - 2>/dev/null
+        rsd::l::target::exec_sudo "postgres" psql -XAt "${db_args[@]}" -f - 2>/dev/null
 }
 
 # Validate that a value is a safe SQL identifier (prevents injection).
