@@ -12,10 +12,11 @@
 #
 # INPUT RESOLUTION
 # ----------------
-# --from accepts either a directory or a specific dump file:
+# --from accepts either a directory or a specific dump file, local or remote:
 #
 #   Directory (auto-discover):
-#     --from /tmp/backup
+#     --from /tmp/backup             Local directory
+#     --from @bi:/tmp/backup         Remote directory on host 'bi'
 #     Scans for <db-name>_*_*.dump, picks the latest by timestamp.
 #     Finds matching role_<ts>.sql or globals_<ts>.sql automatically.
 #
@@ -59,6 +60,7 @@
 #   rsd recipe run timescaledb/restore --db-name mydb --from /tmp/backup
 #   rsd recipe run timescaledb/restore --db-name mydb --from /tmp/backup --pg-user postgres
 #   rsd recipe run timescaledb/restore --db-name mydb --from /tmp/backup --drop-existing
+#   rsd @bi recipe run timescaledb/restore --db-name mydb --from @bi:/tmp/backup
 #
 # @see docs/recipes.md
 
@@ -71,6 +73,7 @@ fi
 # Recipe-specific CLI options
 declare -g -A RSD_RECIPE_OPTIONS=(
     ["db-name"]=1
+    ["db-user"]=1
     ["from"]=1
     ["db-password"]=1
     ["pg-host"]=1
@@ -84,8 +87,10 @@ declare -g -A RSD_RECIPE_OPTIONS=(
 # ==============================================================================
 
 declare -g RSD_RST_DB_NAME=""
+declare -g RSD_RST_DB_USER=""           # database owner (--db-user or auto-detected)
 declare -g RSD_RST_DB_PASSWORD=""
-declare -g RSD_RST_FROM=""             # raw --from value
+declare -g RSD_RST_FROM=""             # resolved --from path (host prefix stripped)
+declare -g RSD_RST_FROM_IS_REMOTE=0    # 1 if --from uses @host:path
 declare -g RSD_RST_DUMP_FILE=""        # resolved absolute path to .dump
 declare -g RSD_RST_ROLE_FILE=""        # resolved path to role_*.sql or globals_*.sql
 declare -g RSD_RST_ROLE_TYPE=""        # 'role' (no password hash) or 'globals' (full)
@@ -123,23 +128,70 @@ function rsd::l::r::rst::pg_exec() {
     rsd::l::target::exec "$cmd" "${RSD_RST_PG_CONN[@]}" "$@"
 }
 
+# Run a command on the host where --from files live.
+# Routes through rsd::l::target::exec when --from is remote.
+#
+# @param string... Command and arguments.
+# @return int command exit code.
+function rsd::l::r::rst::from_exec() {
+    if [[ "$RSD_RST_FROM_IS_REMOTE" -eq 1 ]]; then
+        rsd::l::target::exec "$@"
+    else
+        "$@"
+    fi
+}
+
 # ==============================================================================
 # Recipe Registration
 # ==============================================================================
 
 function rsd::r::timescaledb_restore::register() {
     RSD_RST_DB_NAME="${RSD_COMMAND_ARGS[db-name]:-}"
-    RSD_RST_FROM="${RSD_COMMAND_ARGS[from]:-}"
+    RSD_RST_DB_USER="${RSD_COMMAND_ARGS[db-user]:-}"
     RSD_RST_DB_PASSWORD="${RSD_COMMAND_ARGS[db-password]:-}"
+
+    local raw_from="${RSD_COMMAND_ARGS[from]:-}"
 
     if [[ -z "$RSD_RST_DB_NAME" ]]; then
         rsd::io::error "--db-name is required."
         exit 2
     fi
-    if [[ -z "$RSD_RST_FROM" ]]; then
+    if [[ -z "$raw_from" ]]; then
         rsd::io::error "--from is required. Specify the backup directory or dump file."
         exit 2
     fi
+
+    # Parse @host:path syntax from --from
+    if [[ "$raw_from" == @* ]]; then
+        RSD_RST_FROM_IS_REMOTE=1
+        local after_at="${raw_from#@}"
+
+        if [[ "$after_at" != *:* ]]; then
+            rsd::io::error "Remote path requires colon: @host:path (e.g., @bi:/tmp/backup)"
+            exit 2
+        fi
+
+        RSD_RST_FROM="${after_at#*:}"
+
+        # Resolve relative paths against remote $HOME
+        if [[ "$RSD_RST_FROM" != /* ]]; then
+            local remote_home
+            remote_home=$(rsd::l::target::exec sh -c 'echo $HOME' 2>/dev/null)
+            if [[ -z "$remote_home" ]]; then
+                rsd::io::error "Could not resolve remote \$HOME."
+                exit 2
+            fi
+            RSD_RST_FROM="${remote_home}/${RSD_RST_FROM}"
+        fi
+    else
+        RSD_RST_FROM_IS_REMOTE=0
+        if [[ "$raw_from" != /* ]]; then
+            RSD_RST_FROM="$(pwd)/${raw_from}"
+        else
+            RSD_RST_FROM="$raw_from"
+        fi
+    fi
+    RSD_RST_FROM="${RSD_RST_FROM%/}"
 
     # Drop existing flag
     [[ -v RSD_COMMAND_ARGS[drop-existing] ]] && RSD_RST_DROP_EXISTING=1
@@ -163,6 +215,7 @@ function rsd::r::timescaledb_restore::register() {
 # ==============================================================================
 # Resolves --from into a dump file + role/globals file.
 # If --from is a directory, auto-discovers by naming convention.
+# All file operations route through from_exec for remote support.
 
 function rsd::r::timescaledb_restore::resolve_input() {
     rsd::io::status "Resolving backup files..."
@@ -182,17 +235,18 @@ function rsd::r::timescaledb_restore::resolve_input() {
     rsd::io::ok "Connected as: ${conn_user}"
 
     # ── Resolve dump file ────────────────────────────────────────────────
-    if [[ -d "$from" ]]; then
+    if rsd::l::r::rst::from_exec test -d "$from"; then
         # Directory mode: find latest dump matching db-name
         local latest
-        latest=$(ls -1t "${from}/${RSD_RST_DB_NAME}_"*".dump" 2>/dev/null | head -1)
+        latest=$(rsd::l::r::rst::from_exec \
+            sh -c "ls -1t '${from}/${RSD_RST_DB_NAME}_'*'.dump' 2>/dev/null | head -1")
         if [[ -z "$latest" ]]; then
             rsd::io::error "No dump file found for '${RSD_RST_DB_NAME}' in: ${from}"
             rsd::io::info "Expected: ${from}/${RSD_RST_DB_NAME}_<timestamp>_<compress>.dump"
             return 1
         fi
         RSD_RST_DUMP_FILE="$latest"
-    elif [[ -f "$from" ]]; then
+    elif rsd::l::r::rst::from_exec test -f "$from"; then
         RSD_RST_DUMP_FILE="$from"
     else
         rsd::io::error "Not a file or directory: ${from}"
@@ -201,8 +255,8 @@ function rsd::r::timescaledb_restore::resolve_input() {
     rsd::io::ok "Dump: ${RSD_RST_DUMP_FILE}"
 
     # ── Verify dump ──────────────────────────────────────────────────────
-    if type pg_restore >/dev/null 2>&1; then
-        if ! pg_restore --list "$RSD_RST_DUMP_FILE" >/dev/null 2>/dev/null; then
+    if rsd::l::r::rst::from_exec sh -c "type pg_restore >/dev/null 2>&1"; then
+        if ! rsd::l::r::rst::from_exec pg_restore --list "$RSD_RST_DUMP_FILE" >/dev/null 2>/dev/null; then
             rsd::io::error "Dump file is corrupt or unreadable: ${RSD_RST_DUMP_FILE}"
             return 1
         fi
@@ -224,11 +278,11 @@ function rsd::r::timescaledb_restore::resolve_input() {
     local dump_dir
     dump_dir=$(dirname "$RSD_RST_DUMP_FILE")
 
-    if [[ -f "${dump_dir}/globals_${ts_part}.sql" ]]; then
+    if rsd::l::r::rst::from_exec test -f "${dump_dir}/globals_${ts_part}.sql"; then
         RSD_RST_ROLE_FILE="${dump_dir}/globals_${ts_part}.sql"
         RSD_RST_ROLE_TYPE="globals"
         rsd::io::ok "Globals: ${RSD_RST_ROLE_FILE}"
-    elif [[ -f "${dump_dir}/role_${ts_part}.sql" ]]; then
+    elif rsd::l::r::rst::from_exec test -f "${dump_dir}/role_${ts_part}.sql"; then
         RSD_RST_ROLE_FILE="${dump_dir}/role_${ts_part}.sql"
         RSD_RST_ROLE_TYPE="role"
         rsd::io::ok "Role: ${RSD_RST_ROLE_FILE}"
@@ -239,10 +293,11 @@ function rsd::r::timescaledb_restore::resolve_input() {
 
     # ── Extract role name from the SQL ───────────────────────────────────
     if [[ -n "$RSD_RST_ROLE_FILE" ]]; then
-        RSD_RST_ROLE_NAME=$(grep -oP 'CREATE ROLE\s+"\K[^"]+' "$RSD_RST_ROLE_FILE" | head -1)
+        RSD_RST_ROLE_NAME=$(rsd::l::r::rst::from_exec \
+            grep -oP 'CREATE ROLE\s+"\K[^"]+' "$RSD_RST_ROLE_FILE" | head -1)
         if [[ -z "$RSD_RST_ROLE_NAME" ]]; then
-            # Try unquoted form
-            RSD_RST_ROLE_NAME=$(grep -oP 'CREATE ROLE\s+\K\S+' "$RSD_RST_ROLE_FILE" | head -1 | tr -d ';')
+            RSD_RST_ROLE_NAME=$(rsd::l::r::rst::from_exec \
+                grep -oP 'CREATE ROLE\s+\K\S+' "$RSD_RST_ROLE_FILE" | head -1 | tr -d ';')
         fi
         [[ -n "$RSD_RST_ROLE_NAME" ]] && rsd::io::ok "Role name: ${RSD_RST_ROLE_NAME}"
     fi
@@ -331,7 +386,8 @@ function rsd::r::timescaledb_restore::create_database::pre_check() {
 }
 
 function rsd::r::timescaledb_restore::create_database() {
-    local owner="${RSD_RST_ROLE_NAME:-$RSD_RST_DB_NAME}"
+    # Owner priority: --db-user > role name from SQL > db-name
+    local owner="${RSD_RST_DB_USER:-${RSD_RST_ROLE_NAME:-$RSD_RST_DB_NAME}}"
 
     # Drop if requested
     if [[ "$RSD_RST_DROP_EXISTING" -eq 1 ]]; then
