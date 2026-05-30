@@ -177,35 +177,16 @@ function rsd::c::recipe::run() {
         rsd::io::info "Target Host: localhost"
     fi
 
-    # 1. Compile the recipe tasks recursively into the flat stack
+    # 1. Compile the recipe tasks recursively into the flat stack.
+    #    rsd::r::include sources the file, re-parses leftover args using
+    #    RSD_RECIPE_OPTIONS, then calls register() — so recipe-specific
+    #    options are available when register() reads RSD_COMMAND_ARGS.
     if ! rsd::r::include "$recipe"; then
         rsd::io::error "Failed to load recipe '$recipe'."
         return 5
     fi
 
-    # 2. Phase 3: Re-parse leftover arguments if recipe declared custom options.
-    #    Recipe-specific flags (e.g. --install-ufw) are unknown to the Phase 2
-    #    parser and land in RSD_ARGS_UNPROCESSED. Now that the recipe is loaded
-    #    and RSD_RECIPE_OPTIONS is in scope, we re-parse those leftovers and
-    #    merge recognized options into RSD_COMMAND_ARGS.
-    if declare -p RSD_RECIPE_OPTIONS &>/dev/null && [[ ${#RSD_ARGS_UNPROCESSED[@]} -gt 0 ]]; then
-        local -A _recipe_parsed=()
-        local -a _recipe_remaining=()
-
-        rsd::parse_args "RSD_RECIPE_OPTIONS" _recipe_parsed _recipe_remaining \
-            "${RSD_ARGS_UNPROCESSED[@]}"
-
-        # Merge recognized recipe options into the standard command args map
-        local _key
-        for _key in "${!_recipe_parsed[@]}"; do
-            RSD_COMMAND_ARGS["$_key"]="${_recipe_parsed[$_key]}"
-        done
-
-        # Update unprocessed to only truly unknown arguments
-        RSD_ARGS_UNPROCESSED=("${_recipe_remaining[@]}")
-    fi
-
-    # 3. Execute compiled tasks
+    # 2. Execute compiled tasks
     rsd::l::r::execute_engine "$dry_run" "$verbose"
     return $?
 }

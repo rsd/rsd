@@ -98,6 +98,24 @@ function rsd::r::include() {
     # Source the sub-recipe file dynamically
     source "$(rsd::get_libdir_file "lib/recipe/${name}.recipe")"
 
+    # Re-parse leftover arguments if the recipe declared custom options.
+    # This must happen AFTER sourcing (which declares RSD_RECIPE_OPTIONS)
+    # and BEFORE calling register() (which reads RSD_COMMAND_ARGS).
+    if declare -p RSD_RECIPE_OPTIONS &>/dev/null && [[ ${#RSD_RECIPE_OPTIONS[@]} -gt 0 ]] \
+       && [[ ${#RSD_ARGS_UNPROCESSED[@]} -gt 0 ]]; then
+        local -A _recipe_parsed=()
+        local -a _recipe_remaining=()
+
+        rsd::parse_args "RSD_RECIPE_OPTIONS" _recipe_parsed _recipe_remaining \
+            "${RSD_ARGS_UNPROCESSED[@]}"
+
+        local _key
+        for _key in "${!_recipe_parsed[@]}"; do
+            RSD_COMMAND_ARGS["$_key"]="${_recipe_parsed[$_key]}"
+        done
+        RSD_ARGS_UNPROCESSED=("${_recipe_remaining[@]}")
+    fi
+
     # Invoke the registration hook
     local reg_func="rsd::r::${clean_name}::register"
     if bash::is_function "$reg_func"; then
