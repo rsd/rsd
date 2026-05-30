@@ -16,7 +16,7 @@ if [[ "$RSD_TARGET_LIB" == "1" ]]; then
     return 0
 fi
 RSD_TARGET_LIB=1
-RSD_TARGET_LIB_VERSION="0.4.0"
+RSD_TARGET_LIB_VERSION="0.5.0"
 
 # Lazy-load remote.lib — exec and exec_sudo delegate to rsd::l::remote::execute
 [[ "$RSD_REMOTE_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/remote.lib)"
@@ -294,4 +294,134 @@ function rsd::l::target::fetch_and_exec() {
     rsd::l::target::exec rm -f "$tmpfile"
 
     return $rc
+}
+
+# ==============================================================================
+# SCP-Style Path Parsing
+# ==============================================================================
+
+# Parse a path string into host + resolved directory + remote flag.
+# Supports scp-style remote paths with mandatory colon separator.
+#
+# Examples:
+#   backups/              → host="", path="$(pwd)/backups", remote=0
+#   /tmp/backups/         → host="", path="/tmp/backups",   remote=0
+#   @bi:backups/          → host="bi", path="$HOME/backups", remote=1
+#   @bi:/tmp/backups/     → host="bi", path="/tmp/backups",  remote=1
+#
+# @param string  $1 Raw path input.
+# @param string& $2 nameref: host alias ("" for local).
+# @param string& $3 nameref: resolved absolute path.
+# @param int&    $4 nameref: 1 if remote, 0 if local.
+# @return int 0 on success, 1 on parse error.
+function rsd::l::target::parse_scp() {
+    local input="$1"
+    declare -n __scp_host="$2"
+    declare -n __scp_path="$3"
+    declare -n __scp_remote="$4"
+
+    if [[ "$input" == @* ]]; then
+        __scp_remote=1
+        local after_at="${input#@}"
+
+        if [[ "$after_at" != *:* ]]; then
+            rsd::io::error "Remote path requires colon: @host:path (e.g., @bi:/tmp/backups/)"
+            return 1
+        fi
+
+        __scp_host="${after_at%%:*}"
+        __scp_path="${after_at#*:}"
+
+        # Resolve relative paths against remote $HOME
+        if [[ "$__scp_path" != /* ]]; then
+            local remote_home
+            remote_home=$(rsd::l::target::exec sh -c 'echo $HOME' 2>/dev/null)
+            if [[ -z "$remote_home" ]]; then
+                rsd::io::error "Could not resolve remote \$HOME."
+                return 1
+            fi
+            __scp_path="${remote_home}/${__scp_path}"
+        fi
+    else
+        __scp_remote=0
+        __scp_host=""
+        if [[ "$input" != /* ]]; then
+            __scp_path="$(pwd)/${input}"
+        else
+            __scp_path="$input"
+        fi
+    fi
+
+    # Normalize trailing slash
+    __scp_path="${__scp_path%/}"
+}
+
+# ==============================================================================
+# Explicit Local/Remote Routing
+# ==============================================================================
+
+# Execute a command locally or remotely based on an explicit flag.
+# Unlike rsd::l::target::exec (which always routes based on $RSD_REMOTE_TARGET),
+# this function lets the caller decide *where* to run — useful when the data
+# location differs from the recipe target (e.g., --from is local, target is remote).
+#
+# @param int    $1 1 = remote (via target::exec), 0 = local (direct).
+# @param string $@ Command and arguments.
+# @return int Exit code.
+function rsd::l::target::exec_at() {
+    local is_remote="$1"
+    shift
+
+    if [[ "$is_remote" -eq 1 ]]; then
+        rsd::l::target::exec "$@"
+    else
+        "$@"
+    fi
+}
+
+# ==============================================================================
+# File Transfer with Temp Directory
+# ==============================================================================
+
+# Push a local file to a secure temp directory on the target.
+# Creates the temp dir, transfers the file, and optionally relaxes
+# permissions so another OS user (e.g., postgres) can read it.
+#
+# Prints the remote file path to stdout.
+#
+# @param string $1 Local file path.
+# @param string $2 mktemp template (e.g., "rsd-restore.XXXXXX").
+# @param string $3 (optional) "--readable-by"
+# @param string $4 (optional) OS username to grant read access to.
+# @return int 0 on success, 1 on transfer failure, 14 on mktemp failure.
+# @stdout Remote file path (e.g., /tmp/rsd-restore.AbCdEf/file.dump).
+function rsd::l::target::push_to_temp() {
+    local local_file="$1"
+    local template="$2"
+    local flag="${3:-}"
+    local readable_user="${4:-}"
+
+    # Create secure temp dir on target
+    local remote_tmp
+    remote_tmp=$(rsd::l::target::mktemp "$template" "-d") || return 14
+
+    # Transfer file
+    local remote_file="${remote_tmp}/$(basename "$local_file")"
+    if ! rsd::l::target::file_push "$local_file" "$remote_file"; then
+        rsd::io::error "Failed to transfer: $(basename "$local_file")"
+        rsd::l::target::exec rm -rf "$remote_tmp" 2>/dev/null
+        return 1
+    fi
+
+    # Relax permissions for cross-user read access if requested.
+    # The temp dir is created with 0700 (owner only). When pg_restore
+    # runs as another user (e.g., postgres via sudo), it needs to
+    # traverse the directory (0755) and read the files (0644).
+    if [[ "$flag" == "--readable-by" && -n "$readable_user" ]]; then
+        rsd::l::target::exec chmod 0755 "$remote_tmp"
+        rsd::l::target::exec find "$remote_tmp" -type f -exec chmod 0644 {} +
+    fi
+
+    # Return the temp dir path (caller manages cleanup)
+    printf '%s\n' "$remote_tmp"
 }

@@ -332,4 +332,81 @@ function rsd::l::io::frame_lines() {
 
 # ---------------------------------------------------------------------------
 
+# ==============================================================================
+# Interactive Prompts (TTY-Safe)
+# ==============================================================================
+# These functions write prompts directly to /dev/tty, bypassing the recipe
+# engine's process substitution framing. The framing buffers prompts that
+# lack trailing newlines, making them invisible to the user.
+
+# Read a secret value (password, API key) from the terminal.
+# Disables echo (-s) and reads from /dev/tty directly.
+#
+# @param string  $1 Prompt text (displayed before ": ").
+# @param string& $2 nameref: output variable for the secret.
+# @return int 0 on success, 1 if empty.
+function rsd::io::read_secret() {
+    local prompt="$1"
+    declare -n __secret_out="$2"
+
+    printf "[rsd]          ▸ %s: " "$prompt" > /dev/tty
+    read -r -s __secret_out < /dev/tty
+    echo "" > /dev/tty
+
+    if [[ -z "$__secret_out" ]]; then
+        rsd::io::error "Value cannot be empty."
+        return 1
+    fi
+}
+
+# Read and confirm a secret value from the terminal.
+# Prompts twice (input + confirm) and validates match.
+#
+# @param string  $1 Prompt text (displayed before ": ").
+# @param string& $2 nameref: output variable for the confirmed secret.
+# @return int 0 on success, 1 on mismatch or empty.
+function rsd::io::read_secret_confirm() {
+    local prompt="$1"
+    declare -n __secret_confirm_out="$2"
+
+    local pw1="" pw2=""
+
+    printf "[rsd]          ▸ %s: " "$prompt" > /dev/tty
+    read -r -s pw1 < /dev/tty
+    echo "" > /dev/tty
+
+    printf "[rsd]          ▸ Confirm %s: " "$prompt" > /dev/tty
+    read -r -s pw2 < /dev/tty
+    echo "" > /dev/tty
+
+    if [[ "$pw1" != "$pw2" ]]; then
+        rsd::io::error "Values do not match."
+        return 1
+    fi
+    if [[ -z "$pw1" ]]; then
+        rsd::io::error "Value cannot be empty."
+        return 1
+    fi
+
+    __secret_confirm_out="$pw1"
+}
+
+# ==============================================================================
+# File Size Formatting
+# ==============================================================================
+
+# Print a human-readable file size for a local path.
+# Falls back to "unknown" if the file is missing or tools unavailable.
+#
+# @param string $1 File path.
+# @stdout Human-readable size (e.g., "1.7GiB") or "unknown".
+function rsd::io::filesize() {
+    local path="$1"
+    local bytes
+    bytes=$(stat -c%s "$path" 2>/dev/null) || { echo "unknown"; return; }
+    numfmt --to=iec-i --suffix=B "$bytes" 2>/dev/null || echo "${bytes} bytes"
+}
+
+# ---------------------------------------------------------------------------
+
 RSD_IO_LIB=1

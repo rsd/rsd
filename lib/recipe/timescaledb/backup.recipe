@@ -109,56 +109,6 @@ declare -g RSD_BKP_IS_SUPER="f"
 # Helpers
 # ==============================================================================
 
-# Parse a path string into host + resolved directory + remote flag.
-# Supports scp-style remote paths with mandatory colon separator.
-#
-# @param string  $1 Raw path (e.g., "backups/", "@bi:backups/", "@bi:/tmp/bk")
-# @param string& $2 nameref: host ("" for local, "bi" for remote).
-# @param string& $3 nameref: resolved absolute path.
-# @param int&    $4 nameref: 1 if remote, 0 if local.
-# @return int 0 on success, 1 on parse error.
-function rsd::l::r::bkp::parse_path() {
-    local input="$1"
-    declare -n __bkp_host="$2"
-    declare -n __bkp_path="$3"
-    declare -n __bkp_remote="$4"
-
-    if [[ "$input" == @* ]]; then
-        __bkp_remote=1
-        local after_at="${input#@}"
-
-        if [[ "$after_at" != *:* ]]; then
-            rsd::io::error "Remote path requires colon: @host:path (e.g., @bi:backups/ or @bi:/tmp/backups/)"
-            return 1
-        fi
-
-        __bkp_host="${after_at%%:*}"
-        __bkp_path="${after_at#*:}"
-
-        # Resolve relative paths against remote $HOME
-        if [[ "$__bkp_path" != /* ]]; then
-            local remote_home
-            remote_home=$(rsd::l::target::exec sh -c 'echo $HOME' 2>/dev/null)
-            if [[ -z "$remote_home" ]]; then
-                rsd::io::error "Could not resolve remote \$HOME."
-                return 1
-            fi
-            __bkp_path="${remote_home}/${__bkp_path}"
-        fi
-    else
-        __bkp_remote=0
-        __bkp_host=""
-        if [[ "$input" != /* ]]; then
-            __bkp_path="$(pwd)/${input}"
-        else
-            __bkp_path="$input"
-        fi
-    fi
-
-    # Normalize trailing slash
-    __bkp_path="${__bkp_path%/}"
-}
-
 # ==============================================================================
 # Recipe Registration
 # ==============================================================================
@@ -191,7 +141,7 @@ function rsd::r::timescaledb_backup::register() {
         exit 2
     fi
 
-    if ! rsd::l::r::bkp::parse_path "$output" \
+    if ! rsd::l::target::parse_scp "$output" \
         RSD_BKP_OUTPUT_HOST RSD_BKP_OUTPUT_DIR RSD_BKP_OUTPUT_IS_REMOTE; then
         exit 2
     fi
@@ -238,31 +188,21 @@ function rsd::r::timescaledb_backup::validate_env() {
     fi
 
     # ── Connection check ─────────────────────────────────────────────────
-    # Verify we can actually connect with the resolved method.
-    local conn_user
-    conn_user=$(rsd::l::pg::psql "SELECT current_user")
-    if [[ -z "$conn_user" ]]; then
-        rsd::io::error "Cannot connect to PostgreSQL."
-        rsd::io::info "Try providing explicit connection: --pg-user <role> --pg-host localhost"
-        return 1
-    fi
-    rsd::io::ok "Connected as: ${conn_user} (method: ${RSD_PG_METHOD})"
+    rsd::l::pg::verify_connection || return 1
 
     # ── Database exists? ─────────────────────────────────────────────────
-    local db_exists
-    db_exists=$(rsd::l::pg::psql \
-        "SELECT 1 FROM pg_database WHERE datname = '${RSD_BKP_DB_NAME}'")
-    if [[ "$db_exists" != "1" ]]; then
+    if ! rsd::l::pg::database_exists "$RSD_BKP_DB_NAME"; then
         rsd::io::error "Database '${RSD_BKP_DB_NAME}' does not exist."
         return 1
     fi
     rsd::io::ok "Database '${RSD_BKP_DB_NAME}' found."
 
     # ── Superuser check ──────────────────────────────────────────────────
-    RSD_BKP_IS_SUPER=$(rsd::l::pg::psql "SELECT usesuper FROM pg_user WHERE usename = current_user")
-    if [[ "$RSD_BKP_IS_SUPER" == "t" ]]; then
+    if rsd::l::pg::is_superuser; then
+        RSD_BKP_IS_SUPER="t"
         rsd::io::ok "Superuser — full globals dump available."
     else
+        RSD_BKP_IS_SUPER="f"
         rsd::io::info "Not superuser — role attributes will be dumped (password excluded)."
         rsd::io::info "On restore, provide --db-password to set a new password."
     fi

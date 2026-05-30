@@ -68,31 +68,6 @@ declare -g RSD_APP_DB_USER=""
 declare -g RSD_APP_DB_PASS=""
 
 # ==============================================================================
-# Helpers
-# ==============================================================================
-
-# Validate that a value is a safe SQL identifier (prevents injection).
-# Allows only letters, digits, and underscores, starting with a letter or _.
-#
-# @param string $1 The identifier to validate.
-# @param string $2 Human-readable label for error messages.
-# @return int 0 if valid, 1 if invalid.
-function rsd::l::r::app::validate_identifier() {
-    local value="$1"
-    local label="$2"
-
-    if [[ -z "$value" ]]; then
-        rsd::io::error "$label is required. Use: --${label} <value>"
-        return 1
-    fi
-
-    if [[ ! "$value" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
-        rsd::io::error "$label '$value' contains invalid characters. Use only [a-zA-Z0-9_], starting with a letter or underscore."
-        return 1
-    fi
-}
-
-# ==============================================================================
 # Recipe Registration
 # ==============================================================================
 
@@ -102,8 +77,8 @@ function rsd::r::timescaledb_app::register() {
     RSD_APP_DB_USER="${RSD_COMMAND_ARGS[db-user]:-}"
     RSD_APP_DB_PASS="${RSD_COMMAND_ARGS[db-password]:-}"
 
-    rsd::l::r::app::validate_identifier "$RSD_APP_DB_NAME" "db-name" || exit 2
-    rsd::l::r::app::validate_identifier "$RSD_APP_DB_USER" "db-user" || exit 2
+    rsd::l::pg::validate_identifier "$RSD_APP_DB_NAME" "db-name" || exit 2
+    rsd::l::pg::validate_identifier "$RSD_APP_DB_USER" "db-user" || exit 2
 
     # Verify PostgreSQL is running on the target
     if ! rsd::l::target::exec_sudo "" systemctl is-active --quiet postgresql; then
@@ -137,9 +112,7 @@ function rsd::r::timescaledb_app::register() {
 # ==============================================================================
 
 function rsd::r::timescaledb_app::create_role::pre_check() {
-    local exists
-    exists=$(rsd::l::pg::psql "SELECT 1 FROM pg_roles WHERE rolname = '${RSD_APP_DB_USER}'")
-    [[ "$exists" == "1" ]]
+    rsd::l::pg::role_exists "$RSD_APP_DB_USER"
 }
 
 function rsd::r::timescaledb_app::create_role() {
@@ -165,9 +138,7 @@ function rsd::r::timescaledb_app::create_role::rollback() {
 # ==============================================================================
 
 function rsd::r::timescaledb_app::create_database::pre_check() {
-    local exists
-    exists=$(rsd::l::pg::psql "SELECT 1 FROM pg_database WHERE datname = '${RSD_APP_DB_NAME}'")
-    [[ "$exists" == "1" ]]
+    rsd::l::pg::database_exists "$RSD_APP_DB_NAME"
 }
 
 function rsd::r::timescaledb_app::create_database() {

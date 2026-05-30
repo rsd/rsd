@@ -48,7 +48,7 @@ if [[ "$RSD_PG_LIB" == "1" ]]; then
     return 0
 fi
 RSD_PG_LIB=1
-RSD_PG_LIB_VERSION="0.1.0"
+RSD_PG_LIB_VERSION="0.2.0"
 
 # Load dependencies
 [[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
@@ -327,6 +327,79 @@ function rsd::l::pg::exec_stdin() {
     fi
 }
 
+
+# ==============================================================================
+# Convenience Helpers
+# ==============================================================================
+
+# Verify that the resolved PG connection actually works.
+# Logs success/failure with method details. Replaces the 7-line
+# connection check pattern duplicated across PG recipes.
+#
+# @return int 0 if connected, 1 if not.
+function rsd::l::pg::verify_connection() {
+    local conn_user
+    conn_user=$(rsd::l::pg::psql "SELECT current_user")
+    if [[ -z "$conn_user" ]]; then
+        rsd::io::error "Cannot connect to PostgreSQL."
+        rsd::io::info "Try providing explicit connection: --pg-user <role> --pg-host localhost"
+        return 1
+    fi
+    rsd::io::ok "Connected as: ${conn_user} (method: ${RSD_PG_METHOD})"
+}
+
+# Check if a database exists in the cluster.
+#
+# @param string $1 Database name.
+# @return int 0 if exists, 1 otherwise.
+function rsd::l::pg::database_exists() {
+    local db_name="$1"
+    local result
+    result=$(rsd::l::pg::psql "SELECT 1 FROM pg_database WHERE datname = '${db_name}'")
+    [[ "$result" == "1" ]]
+}
+
+# Check if a role exists in the cluster.
+#
+# @param string $1 Role name.
+# @return int 0 if exists, 1 otherwise.
+function rsd::l::pg::role_exists() {
+    local role_name="$1"
+    local result
+    result=$(rsd::l::pg::psql "SELECT 1 FROM pg_roles WHERE rolname = '${role_name}'")
+    [[ "$result" == "1" ]]
+}
+
+# Check if the current PG session user is a superuser.
+#
+# @return int 0 if superuser, 1 otherwise.
+function rsd::l::pg::is_superuser() {
+    local result
+    result=$(rsd::l::pg::psql "SELECT usesuper FROM pg_user WHERE usename = current_user")
+    [[ "$result" == "t" ]]
+}
+
+# Validate that a string is a safe SQL identifier.
+# Prevents SQL injection in dynamic CREATE/ALTER statements.
+# Allows only [a-zA-Z_][a-zA-Z0-9_]*.
+#
+# @param string $1 The identifier value.
+# @param string $2 Human-readable label for error messages (e.g., "db-name").
+# @return int 0 if valid, 1 if invalid.
+function rsd::l::pg::validate_identifier() {
+    local value="$1"
+    local label="$2"
+
+    if [[ -z "$value" ]]; then
+        rsd::io::error "$label is required."
+        return 1
+    fi
+
+    if [[ ! "$value" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+        rsd::io::error "$label '${value}' contains invalid characters. Use only [a-zA-Z0-9_], starting with a letter or underscore."
+        return 1
+    fi
+}
 
 # ==============================================================================
 # Probe Internals

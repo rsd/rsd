@@ -104,74 +104,6 @@ declare -g RSD_RST_REMOTE_TMP=""       # temp dir on target for transferred file
 declare -g RSD_RST_STREAM_MODE=0       # 1 = stream dump via stdin instead of copy
 
 # ==============================================================================
-# Helpers
-# ==============================================================================
-
-# Parse a path string into host + resolved directory + remote flag.
-# Supports scp-style remote paths with mandatory colon separator.
-# Mirrors rsd::l::r::bkp::parse_path for consistency.
-#
-# @param string  $1 Raw path (e.g., "backups/", "@bi:backups/", "@bi:/tmp/bk")
-# @param string& $2 nameref: host ("" for local, "bi" for remote).
-# @param string& $3 nameref: resolved absolute path.
-# @param int&    $4 nameref: 1 if remote, 0 if local.
-# @return int 0 on success, 1 on parse error.
-function rsd::l::r::rst::parse_path() {
-    local input="$1"
-    declare -n __rst_host="$2"
-    declare -n __rst_path="$3"
-    declare -n __rst_remote="$4"
-
-    if [[ "$input" == @* ]]; then
-        __rst_remote=1
-        local after_at="${input#@}"
-
-        if [[ "$after_at" != *:* ]]; then
-            rsd::io::error "Remote path requires colon: @host:path (e.g., @bi:/tmp/backup)"
-            return 1
-        fi
-
-        __rst_host="${after_at%%:*}"
-        __rst_path="${after_at#*:}"
-
-        # Resolve relative paths against remote $HOME
-        if [[ "$__rst_path" != /* ]]; then
-            local remote_home
-            remote_home=$(rsd::l::target::exec sh -c 'echo $HOME' 2>/dev/null)
-            if [[ -z "$remote_home" ]]; then
-                rsd::io::error "Could not resolve remote \$HOME."
-                return 1
-            fi
-            __rst_path="${remote_home}/${__rst_path}"
-        fi
-    else
-        __rst_remote=0
-        __rst_host=""
-        if [[ "$input" != /* ]]; then
-            __rst_path="$(pwd)/${input}"
-        else
-            __rst_path="$input"
-        fi
-    fi
-
-    # Normalize trailing slash
-    __rst_path="${__rst_path%/}"
-}
-
-# Run a command on the host where --from files live.
-# Routes through rsd::l::target::exec when --from is remote.
-#
-# @param string... Command and arguments.
-# @return int command exit code.
-function rsd::l::r::rst::from_exec() {
-    if [[ "$RSD_RST_FROM_IS_REMOTE" -eq 1 ]]; then
-        rsd::l::target::exec "$@"
-    else
-        "$@"
-    fi
-}
-
-# ==============================================================================
 # Recipe Registration
 # ==============================================================================
 
@@ -192,7 +124,7 @@ function rsd::r::timescaledb_restore::register() {
     fi
 
     # Parse @host:path syntax from --from
-    if ! rsd::l::r::rst::parse_path "$raw_from" \
+    if ! rsd::l::target::parse_scp "$raw_from" \
         RSD_RST_FROM_HOST RSD_RST_FROM RSD_RST_FROM_IS_REMOTE; then
         exit 2
     fi
@@ -238,20 +170,13 @@ function rsd::r::timescaledb_restore::resolve_input() {
     local from="$RSD_RST_FROM"
 
     # ── Connection check ─────────────────────────────────────────────────
-    local conn_user
-    conn_user=$(rsd::l::pg::psql "SELECT current_user")
-    if [[ -z "$conn_user" ]]; then
-        rsd::io::error "Cannot connect to PostgreSQL."
-        rsd::io::info "Try providing explicit connection: --pg-user <role> --pg-host localhost"
-        return 1
-    fi
-    rsd::io::ok "Connected as: ${conn_user} (method: ${RSD_PG_METHOD})"
+    rsd::l::pg::verify_connection || return 1
 
     # ── Resolve dump file ────────────────────────────────────────────────
-    if rsd::l::r::rst::from_exec test -d "$from"; then
+    if rsd::l::target::exec_at "$RSD_RST_FROM_IS_REMOTE" test -d "$from"; then
         # Directory mode: find latest dump matching db-name
         local latest
-        latest=$(rsd::l::r::rst::from_exec \
+        latest=$(rsd::l::target::exec_at "$RSD_RST_FROM_IS_REMOTE" \
             sh -c "ls -1t '${from}/${RSD_RST_DB_NAME}_'*'.dump' 2>/dev/null | head -1")
         if [[ -z "$latest" ]]; then
             rsd::io::error "No dump file found for '${RSD_RST_DB_NAME}' in: ${from}"
@@ -259,7 +184,7 @@ function rsd::r::timescaledb_restore::resolve_input() {
             return 1
         fi
         RSD_RST_DUMP_FILE="$latest"
-    elif rsd::l::r::rst::from_exec test -f "$from"; then
+    elif rsd::l::target::exec_at "$RSD_RST_FROM_IS_REMOTE" test -f "$from"; then
         RSD_RST_DUMP_FILE="$from"
     else
         rsd::io::error "Not a file or directory: ${from}"
@@ -268,8 +193,8 @@ function rsd::r::timescaledb_restore::resolve_input() {
     rsd::io::ok "Dump: ${RSD_RST_DUMP_FILE}"
 
     # ── Verify dump ──────────────────────────────────────────────────────
-    if rsd::l::r::rst::from_exec sh -c "type pg_restore >/dev/null 2>&1"; then
-        if ! rsd::l::r::rst::from_exec pg_restore --list "$RSD_RST_DUMP_FILE" >/dev/null 2>/dev/null; then
+    if rsd::l::target::exec_at "$RSD_RST_FROM_IS_REMOTE" sh -c "type pg_restore >/dev/null 2>&1"; then
+        if ! rsd::l::target::exec_at "$RSD_RST_FROM_IS_REMOTE" pg_restore --list "$RSD_RST_DUMP_FILE" >/dev/null 2>/dev/null; then
             rsd::io::error "Dump file is corrupt or unreadable: ${RSD_RST_DUMP_FILE}"
             return 1
         fi
@@ -291,11 +216,11 @@ function rsd::r::timescaledb_restore::resolve_input() {
     local dump_dir
     dump_dir=$(dirname "$RSD_RST_DUMP_FILE")
 
-    if rsd::l::r::rst::from_exec test -f "${dump_dir}/globals_${ts_part}.sql"; then
+    if rsd::l::target::exec_at "$RSD_RST_FROM_IS_REMOTE" test -f "${dump_dir}/globals_${ts_part}.sql"; then
         RSD_RST_ROLE_FILE="${dump_dir}/globals_${ts_part}.sql"
         RSD_RST_ROLE_TYPE="globals"
         rsd::io::ok "Globals: ${RSD_RST_ROLE_FILE}"
-    elif rsd::l::r::rst::from_exec test -f "${dump_dir}/role_${ts_part}.sql"; then
+    elif rsd::l::target::exec_at "$RSD_RST_FROM_IS_REMOTE" test -f "${dump_dir}/role_${ts_part}.sql"; then
         RSD_RST_ROLE_FILE="${dump_dir}/role_${ts_part}.sql"
         RSD_RST_ROLE_TYPE="role"
         rsd::io::ok "Role: ${RSD_RST_ROLE_FILE}"
@@ -306,10 +231,10 @@ function rsd::r::timescaledb_restore::resolve_input() {
 
     # ── Extract role name from the SQL ───────────────────────────────────
     if [[ -n "$RSD_RST_ROLE_FILE" ]]; then
-        RSD_RST_ROLE_NAME=$(rsd::l::r::rst::from_exec \
+        RSD_RST_ROLE_NAME=$(rsd::l::target::exec_at "$RSD_RST_FROM_IS_REMOTE" \
             grep -oP 'CREATE ROLE\s+"\K[^"]+' "$RSD_RST_ROLE_FILE" | head -1)
         if [[ -z "$RSD_RST_ROLE_NAME" ]]; then
-            RSD_RST_ROLE_NAME=$(rsd::l::r::rst::from_exec \
+            RSD_RST_ROLE_NAME=$(rsd::l::target::exec_at "$RSD_RST_FROM_IS_REMOTE" \
                 grep -oP 'CREATE ROLE\s+\K\S+' "$RSD_RST_ROLE_FILE" | head -1 | tr -d ';')
         fi
         [[ -n "$RSD_RST_ROLE_NAME" ]] && rsd::io::ok "Role name: ${RSD_RST_ROLE_NAME}"
@@ -330,23 +255,15 @@ function rsd::r::timescaledb_restore::resolve_input() {
         if [[ -n "$RSD_RST_ROLE_FILE" ]]; then
             rsd::io::status "Transferring role file to target..."
 
-            local remote_tmp
-            remote_tmp=$(rsd::l::target::mktemp "rsd-restore.XXXXXX" "-d") || return 14
-            RSD_RST_REMOTE_TMP="$remote_tmp"
+            local readable_flag=()
+            [[ "$RSD_PG_METHOD" == "sudo" ]] && readable_flag=("--readable-by" "postgres")
 
-            local remote_role="${remote_tmp}/$(basename "$RSD_RST_ROLE_FILE")"
-            rsd::l::target::file_push "$RSD_RST_ROLE_FILE" "$remote_role" || {
-                rsd::io::error "Failed to transfer role file."
-                return 1
-            }
+            RSD_RST_REMOTE_TMP=$(rsd::l::target::push_to_temp \
+                "$RSD_RST_ROLE_FILE" "rsd-restore.XXXXXX" "${readable_flag[@]}") || return $?
+
+            local remote_role="${RSD_RST_REMOTE_TMP}/$(basename "$RSD_RST_ROLE_FILE")"
             rsd::io::ok "Transferred: $(basename "$RSD_RST_ROLE_FILE")"
             RSD_RST_ROLE_FILE="$remote_role"
-
-            # Make role file readable by postgres when using sudo method
-            if [[ "$RSD_PG_METHOD" == "sudo" ]]; then
-                rsd::l::target::exec chmod 0755 "$remote_tmp"
-                rsd::l::target::exec find "$remote_tmp" -type f -exec chmod 0644 {} +
-            fi
         fi
     fi
 
@@ -362,18 +279,11 @@ function rsd::r::timescaledb_restore::resolve_input() {
 function rsd::r::timescaledb_restore::apply_role::pre_check() {
     # Convention: return 0 = satisfied (skip), non-zero = proceed.
     if [[ -z "$RSD_RST_ROLE_FILE" ]]; then
-        # No role file to apply — satisfied by definition.
-        return 0
+        return 0  # No role file to apply — satisfied by definition.
     fi
 
-    # Check if the role already exists in the cluster.
-    local role_exists
-    role_exists=$(rsd::l::pg::psql \
-        "SELECT 1 FROM pg_roles WHERE rolname = '${RSD_RST_DB_USER:-${RSD_RST_ROLE_NAME:-$RSD_RST_DB_NAME}}'")
-    if [[ "$role_exists" == "1" ]]; then
-        return 0  # Role exists — satisfied.
-    fi
-    return 1  # Role missing — proceed.
+    local role_name="${RSD_RST_DB_USER:-${RSD_RST_ROLE_NAME:-$RSD_RST_DB_NAME}}"
+    rsd::l::pg::role_exists "$role_name"
 }
 
 function rsd::r::timescaledb_restore::apply_role() {
@@ -396,26 +306,7 @@ function rsd::r::timescaledb_restore::apply_role() {
             rsd::io::info "To skip this prompt, use: --db-password <password>"
             rsd::io::blank
 
-            # Prompts go directly to /dev/tty to bypass the recipe engine's
-            # process substitution framing, which buffers prompts without
-            # trailing newlines. read -s disables echo for secure input.
-            local pw1="" pw2=""
-            printf "[rsd]          ▸ Password for '%s': " "$RSD_RST_ROLE_NAME" > /dev/tty
-            read -r -s pw1 < /dev/tty
-            echo "" > /dev/tty
-            printf "[rsd]          ▸ Confirm password: " > /dev/tty
-            read -r -s pw2 < /dev/tty
-            echo "" > /dev/tty
-
-            if [[ "$pw1" != "$pw2" ]]; then
-                rsd::io::error "Passwords do not match."
-                return 1
-            fi
-            if [[ -z "$pw1" ]]; then
-                rsd::io::error "Password cannot be empty."
-                return 1
-            fi
-            RSD_RST_DB_PASSWORD="$pw1"
+            rsd::io::read_secret_confirm "Password for '${RSD_RST_ROLE_NAME}'" RSD_RST_DB_PASSWORD || return 1
         fi
 
         # Set the password
@@ -433,17 +324,12 @@ function rsd::r::timescaledb_restore::apply_role() {
 
 function rsd::r::timescaledb_restore::create_database::pre_check() {
     # Convention: return 0 = satisfied (skip), non-zero = proceed.
-    local db_exists
-    db_exists=$(rsd::l::pg::psql \
-        "SELECT 1 FROM pg_database WHERE datname = '${RSD_RST_DB_NAME}'")
-
-    if [[ "$db_exists" == "1" ]]; then
+    if rsd::l::pg::database_exists "$RSD_RST_DB_NAME"; then
         if [[ "$RSD_RST_DROP_EXISTING" -eq 1 ]]; then
             rsd::io::warn "Database '${RSD_RST_DB_NAME}' exists — will be dropped (--drop-existing)."
             return 1  # Proceed to drop + recreate.
         fi
-        # DB exists and no --drop-existing — satisfied.
-        return 0
+        return 0  # DB exists and no --drop-existing — satisfied.
     fi
     return 1  # DB doesn't exist — proceed to create.
 }
@@ -454,10 +340,7 @@ function rsd::r::timescaledb_restore::create_database() {
 
     # Drop if requested
     if [[ "$RSD_RST_DROP_EXISTING" -eq 1 ]]; then
-        local db_exists
-        db_exists=$(rsd::l::pg::psql \
-            "SELECT 1 FROM pg_database WHERE datname = '${RSD_RST_DB_NAME}'")
-        if [[ "$db_exists" == "1" ]]; then
+        if rsd::l::pg::database_exists "$RSD_RST_DB_NAME"; then
             rsd::io::status "Dropping existing database '${RSD_RST_DB_NAME}'..."
 
             # Terminate active connections first
@@ -499,7 +382,7 @@ function rsd::r::timescaledb_restore::restore_database() {
     if [[ "$RSD_RST_STREAM_MODE" -eq 1 ]]; then
         # Stream mode: pipe local dump directly into pg_restore via SSH.
         # Avoids copying the (potentially very large) dump file to the target.
-        rsd::io::info "Streaming dump from local file ($(numfmt --to=iec-i --suffix=B "$(stat -c%s "$RSD_RST_DUMP_FILE" 2>/dev/null)" 2>/dev/null || echo 'unknown size'))..."
+        rsd::io::info "Streaming dump from local file ($(rsd::io::filesize "$RSD_RST_DUMP_FILE"))..."
 
         if ! rsd::l::pg::exec_stdin "$RSD_RST_DUMP_FILE" pg_restore \
             --dbname="$RSD_RST_DB_NAME" \
