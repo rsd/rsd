@@ -245,6 +245,89 @@ function rsd::l::pg::exec() {
     fi
 }
 
+# Stream a local file into a PostgreSQL tool on the remote target via stdin.
+#
+# PURPOSE: Avoids copying large files to the remote when disk space is tight.
+# The file data is piped directly through SSH into the tool's stdin.
+#
+# SUDO STDIN MULTIPLEXING: When PG method is sudo, `sudo -S` reads exactly
+# one line from stdin for the password. The remaining stdin is inherited by
+# the child process (pg_restore). We prepend the password line before the
+# file data: `(printf '%s\n' password; cat dump) | ssh host 'sudo -S ...'`.
+#
+# PTY: Explicitly avoids `ssh -t` — stdin is piped binary data, not a
+# terminal. This also avoids the CR contamination issue from pseudo-terminals.
+#
+# @param string $1 Local file path to stream as stdin.
+# @param string $2 The PG tool command (e.g., pg_restore).
+# @param string $@ Additional arguments for the tool.
+# @return int Exit code of the tool.
+function rsd::l::pg::exec_stdin() {
+    local local_file="$1"
+    local cmd="$2"
+    shift 2
+
+    if [[ ! -f "$local_file" ]]; then
+        rsd::io::error "File not found: $local_file"
+        return 1
+    fi
+
+    if [[ -z "$RSD_REMOTE_TARGET" ]]; then
+        # Local mode: simple stdin pipe
+        if [[ "$RSD_PG_METHOD" == "sudo" ]]; then
+            [[ "$RSD_SUDO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/sudo.lib)"
+            rsd::l::sudo::run "$RSD_PG_SUDO_USER" "$cmd" "$@" < "$local_file"
+        else
+            "$cmd" "${RSD_PG_CONN[@]}" "$@" < "$local_file"
+        fi
+        return $?
+    fi
+
+    # Remote mode: stream through SSH
+    local target_host="${RSD_REMOTE_TARGET#@}"
+
+    if [[ "$RSD_PG_METHOD" == "sudo" ]]; then
+        # Get sudo password from vault/cache
+        [[ "$RSD_SUDO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/sudo.lib)"
+        local password="" password_source=""
+        rsd::l::sudo::get_password "$target_host" "$RSD_PG_SUDO_USER" password password_source
+
+        # Build the remote command — shell-escape arguments
+        local -a remote_cmd_parts=("$cmd" "$@")
+        local escaped_cmd=""
+        local item
+        for item in "${remote_cmd_parts[@]}"; do
+            escaped_cmd="${escaped_cmd} '$(printf '%s' "$item" | sed "s/'/'\\\\''/g")'"
+        done
+
+        if [[ -n "$password" ]]; then
+            rsd::debug "pg::exec_stdin: streaming $(stat -c%s "$local_file" 2>/dev/null || echo '?') bytes via sudo -S pipeline" 10
+
+            # sudo -S reads one password line from stdin, then pg_restore
+            # reads the remaining stdin (the dump data). No -t flag — stdin
+            # is binary data from cat, not a terminal.
+            (printf '%s\n' "$password"; cat "$local_file") | \
+                ssh "$target_host" "sudo -S -p '' -u ${RSD_PG_SUDO_USER} -- ${escaped_cmd}"
+        else
+            rsd::debug "pg::exec_stdin: streaming via passwordless sudo" 10
+            cat "$local_file" | \
+                ssh "$target_host" "sudo -u ${RSD_PG_SUDO_USER} -- ${escaped_cmd}"
+        fi
+    else
+        # Non-sudo: build conn args into remote command
+        local -a remote_cmd_parts=("$cmd" "${RSD_PG_CONN[@]}" "$@")
+        local escaped_cmd=""
+        local item
+        for item in "${remote_cmd_parts[@]}"; do
+            escaped_cmd="${escaped_cmd} '$(printf '%s' "$item" | sed "s/'/'\\\\''/g")'"
+        done
+
+        rsd::debug "pg::exec_stdin: streaming via direct SSH" 10
+        cat "$local_file" | ssh "$target_host" "${escaped_cmd}"
+    fi
+}
+
+
 # ==============================================================================
 # Probe Internals
 # ==============================================================================

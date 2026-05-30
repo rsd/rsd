@@ -101,6 +101,7 @@ declare -g RSD_RST_ROLE_TYPE=""        # 'role' (no password hash) or 'globals' 
 declare -g RSD_RST_ROLE_NAME=""        # role name extracted from the role SQL
 declare -g RSD_RST_DROP_EXISTING=0
 declare -g RSD_RST_REMOTE_TMP=""       # temp dir on target for transferred files
+declare -g RSD_RST_STREAM_MODE=0       # 1 = stream dump via stdin instead of copy
 
 # ==============================================================================
 # Helpers
@@ -315,27 +316,24 @@ function rsd::r::timescaledb_restore::resolve_input() {
     fi
 
     # ── Transfer local files to remote target ────────────────────────────
-    # When target is remote but --from is local, SCP the files to a temp
-    # directory on the target. pg_restore/psql run on the target via SSH,
-    # so the files must be accessible there.
+    # When target is remote but --from is local, we stream the dump via
+    # stdin instead of copying it. This avoids requiring free disk space
+    # on the target equal to the dump size.
+    #
+    # The role/globals SQL file (tiny, ~500 bytes) is still transferred
+    # normally since apply_role needs it as a file on the remote.
     if [[ -n "$RSD_REMOTE_TARGET" && "$RSD_RST_FROM_IS_REMOTE" -eq 0 ]]; then
-        rsd::io::status "Transferring backup files to target..."
+        RSD_RST_STREAM_MODE=1
+        rsd::io::ok "Stream mode: dump will be streamed directly (no copy to target)."
 
-        local remote_tmp
-        remote_tmp=$(rsd::l::target::mktemp "rsd-restore.XXXXXX" "-d") || return 14
-        RSD_RST_REMOTE_TMP="$remote_tmp"
-
-        # Transfer dump
-        local remote_dump="${remote_tmp}/$(basename "$RSD_RST_DUMP_FILE")"
-        rsd::l::target::file_push "$RSD_RST_DUMP_FILE" "$remote_dump" || {
-            rsd::io::error "Failed to transfer dump file."
-            return 1
-        }
-        rsd::io::ok "Transferred: $(basename "$RSD_RST_DUMP_FILE")"
-        RSD_RST_DUMP_FILE="$remote_dump"
-
-        # Transfer role/globals file
+        # Transfer role/globals file (tiny) to a temp dir on the remote
         if [[ -n "$RSD_RST_ROLE_FILE" ]]; then
+            rsd::io::status "Transferring role file to target..."
+
+            local remote_tmp
+            remote_tmp=$(rsd::l::target::mktemp "rsd-restore.XXXXXX" "-d") || return 14
+            RSD_RST_REMOTE_TMP="$remote_tmp"
+
             local remote_role="${remote_tmp}/$(basename "$RSD_RST_ROLE_FILE")"
             rsd::l::target::file_push "$RSD_RST_ROLE_FILE" "$remote_role" || {
                 rsd::io::error "Failed to transfer role file."
@@ -343,16 +341,12 @@ function rsd::r::timescaledb_restore::resolve_input() {
             }
             rsd::io::ok "Transferred: $(basename "$RSD_RST_ROLE_FILE")"
             RSD_RST_ROLE_FILE="$remote_role"
-        fi
 
-        # When PG method is sudo, pg_restore runs as the postgres OS user.
-        # The temp dir is owned by the SSH user (0700), so postgres can't read
-        # the files. Relax permissions so the target OS user can access them.
-        # Safe: the temp dir has an unpredictable mktemp name and contains
-        # only backup data.
-        if [[ "$RSD_PG_METHOD" == "sudo" ]]; then
-            rsd::l::target::exec chmod 0755 "$remote_tmp"
-            rsd::l::target::exec sh -c "chmod 0644 '${remote_tmp}'/*"
+            # Make role file readable by postgres when using sudo method
+            if [[ "$RSD_PG_METHOD" == "sudo" ]]; then
+                rsd::l::target::exec chmod 0755 "$remote_tmp"
+                rsd::l::target::exec sh -c "chmod 0644 '${remote_tmp}'/*"
+            fi
         fi
     fi
 
@@ -487,14 +481,31 @@ function rsd::r::timescaledb_restore::restore_database() {
     rsd::l::pg::psql "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE" "$RSD_RST_DB_NAME" \
         >/dev/null 2>&1
 
-    if ! rsd::l::pg::exec pg_restore \
-        --dbname="$RSD_RST_DB_NAME" \
-        --no-owner \
-        --no-privileges \
-        --exit-on-error \
-        "$RSD_RST_DUMP_FILE" 2>&1; then
-        rsd::io::error "pg_restore failed."
-        return 1
+    if [[ "$RSD_RST_STREAM_MODE" -eq 1 ]]; then
+        # Stream mode: pipe local dump directly into pg_restore via SSH.
+        # Avoids copying the (potentially very large) dump file to the target.
+        rsd::io::info "Streaming dump from local file ($(numfmt --to=iec-i --suffix=B "$(stat -c%s "$RSD_RST_DUMP_FILE" 2>/dev/null)" 2>/dev/null || echo 'unknown size'))..."
+
+        if ! rsd::l::pg::exec_stdin "$RSD_RST_DUMP_FILE" pg_restore \
+            --dbname="$RSD_RST_DB_NAME" \
+            --no-owner \
+            --no-privileges \
+            --exit-on-error \
+            -Fc 2>&1; then
+            rsd::io::error "pg_restore (streaming) failed."
+            return 1
+        fi
+    else
+        # File mode: pg_restore reads dump file on the target.
+        if ! rsd::l::pg::exec pg_restore \
+            --dbname="$RSD_RST_DB_NAME" \
+            --no-owner \
+            --no-privileges \
+            --exit-on-error \
+            "$RSD_RST_DUMP_FILE" 2>&1; then
+            rsd::io::error "pg_restore failed."
+            return 1
+        fi
     fi
 
     rsd::io::ok "Database restored."
