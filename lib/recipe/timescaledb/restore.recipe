@@ -97,6 +97,7 @@ declare -g RSD_RST_ROLE_TYPE=""        # 'role' (no password hash) or 'globals' 
 declare -g RSD_RST_ROLE_NAME=""        # role name extracted from the role SQL
 declare -g RSD_RST_DROP_EXISTING=0
 declare -g RSD_RST_REMOTE_TMP=""       # temp dir on target for transferred files
+declare -g RSD_RST_PG_SUDO=0           # 1 = use sudo -u postgres (peer auth)
 # Connection args array: built from --pg-host/--pg-port/--pg-user.
 declare -g -a RSD_RST_PG_CONN=()
 
@@ -105,6 +106,7 @@ declare -g -a RSD_RST_PG_CONN=()
 # ==============================================================================
 
 # Execute a psql command with the recipe's PG connection parameters.
+# Routes through sudo -u postgres when peer auth requires it.
 #
 # @param string $1 SQL to execute.
 # @param string $2 Optional: database name.
@@ -115,18 +117,28 @@ function rsd::l::r::rst::psql() {
     local -a db_args=()
     [[ -n "$db" ]] && db_args=(-d "$db")
 
-    printf '%s\n' "$sql" | \
-        rsd::l::target::exec psql -XAt "${RSD_RST_PG_CONN[@]}" "${db_args[@]}" -f - 2>/dev/null
+    if [[ "$RSD_RST_PG_SUDO" -eq 1 ]]; then
+        printf '%s\n' "$sql" | \
+            rsd::l::target::exec_sudo "" sudo -u postgres psql -XAt "${db_args[@]}" -f - 2>/dev/null
+    else
+        printf '%s\n' "$sql" | \
+            rsd::l::target::exec psql -XAt "${RSD_RST_PG_CONN[@]}" "${db_args[@]}" -f - 2>/dev/null
+    fi
 }
 
 # Execute a PG tool with connection parameters.
+# Routes through sudo -u postgres when peer auth requires it.
 #
 # @param string... Command and arguments.
 # @return int command exit code.
 function rsd::l::r::rst::pg_exec() {
     local cmd="$1"
     shift
-    rsd::l::target::exec "$cmd" "${RSD_RST_PG_CONN[@]}" "$@"
+    if [[ "$RSD_RST_PG_SUDO" -eq 1 ]]; then
+        rsd::l::target::exec_sudo "" sudo -u postgres "$cmd" "$@"
+    else
+        rsd::l::target::exec "$cmd" "${RSD_RST_PG_CONN[@]}" "$@"
+    fi
 }
 
 # Run a command on the host where --from files live.
@@ -199,11 +211,20 @@ function rsd::r::timescaledb_restore::register() {
 
     # Build PG connection args.
     # Default to 'postgres' — restore needs superuser for CREATE ROLE/DATABASE.
+    # When pg-user is 'postgres' and no pg-host is given (local socket),
+    # use sudo -u postgres to satisfy peer auth.
     local pg_user="${RSD_COMMAND_ARGS[pg-user]:-postgres}"
-    RSD_RST_PG_CONN=()
-    [[ -n "${RSD_COMMAND_ARGS[pg-host]:-}" ]] && RSD_RST_PG_CONN+=(-h "${RSD_COMMAND_ARGS[pg-host]}")
-    [[ -n "${RSD_COMMAND_ARGS[pg-port]:-}" ]] && RSD_RST_PG_CONN+=(-p "${RSD_COMMAND_ARGS[pg-port]}")
-    RSD_RST_PG_CONN+=(-U "$pg_user")
+    local pg_host="${RSD_COMMAND_ARGS[pg-host]:-}"
+
+    if [[ "$pg_user" == "postgres" && -z "$pg_host" ]]; then
+        RSD_RST_PG_SUDO=1
+    else
+        RSD_RST_PG_SUDO=0
+        RSD_RST_PG_CONN=()
+        [[ -n "$pg_host" ]] && RSD_RST_PG_CONN+=(-h "$pg_host")
+        [[ -n "${RSD_COMMAND_ARGS[pg-port]:-}" ]] && RSD_RST_PG_CONN+=(-p "${RSD_COMMAND_ARGS[pg-port]}")
+        RSD_RST_PG_CONN+=(-U "$pg_user")
+    fi
 
     rsd::r::register_task "timescaledb_restore::resolve_input"
     rsd::r::register_task "timescaledb_restore::apply_role"
