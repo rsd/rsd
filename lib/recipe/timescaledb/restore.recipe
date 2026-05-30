@@ -197,11 +197,13 @@ function rsd::r::timescaledb_restore::register() {
     # Drop existing flag
     [[ -v RSD_COMMAND_ARGS[drop-existing] ]] && RSD_RST_DROP_EXISTING=1
 
-    # Build PG connection args
+    # Build PG connection args.
+    # Default to 'postgres' — restore needs superuser for CREATE ROLE/DATABASE.
+    local pg_user="${RSD_COMMAND_ARGS[pg-user]:-postgres}"
     RSD_RST_PG_CONN=()
     [[ -n "${RSD_COMMAND_ARGS[pg-host]:-}" ]] && RSD_RST_PG_CONN+=(-h "${RSD_COMMAND_ARGS[pg-host]}")
     [[ -n "${RSD_COMMAND_ARGS[pg-port]:-}" ]] && RSD_RST_PG_CONN+=(-p "${RSD_COMMAND_ARGS[pg-port]}")
-    [[ -n "${RSD_COMMAND_ARGS[pg-user]:-}" ]] && RSD_RST_PG_CONN+=(-U "${RSD_COMMAND_ARGS[pg-user]}")
+    RSD_RST_PG_CONN+=(-U "$pg_user")
 
     rsd::r::register_task "timescaledb_restore::resolve_input"
     rsd::r::register_task "timescaledb_restore::apply_role"
