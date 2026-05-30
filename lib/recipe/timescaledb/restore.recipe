@@ -96,6 +96,7 @@ declare -g RSD_RST_ROLE_FILE=""        # resolved path to role_*.sql or globals_
 declare -g RSD_RST_ROLE_TYPE=""        # 'role' (no password hash) or 'globals' (full)
 declare -g RSD_RST_ROLE_NAME=""        # role name extracted from the role SQL
 declare -g RSD_RST_DROP_EXISTING=0
+declare -g RSD_RST_REMOTE_TMP=""       # temp dir on target for transferred files
 # Connection args array: built from --pg-host/--pg-port/--pg-user.
 declare -g -a RSD_RST_PG_CONN=()
 
@@ -300,6 +301,38 @@ function rsd::r::timescaledb_restore::resolve_input() {
                 grep -oP 'CREATE ROLE\s+\K\S+' "$RSD_RST_ROLE_FILE" | head -1 | tr -d ';')
         fi
         [[ -n "$RSD_RST_ROLE_NAME" ]] && rsd::io::ok "Role name: ${RSD_RST_ROLE_NAME}"
+    fi
+
+    # ── Transfer local files to remote target ────────────────────────────
+    # When target is remote but --from is local, SCP the files to a temp
+    # directory on the target. pg_restore/psql run on the target via SSH,
+    # so the files must be accessible there.
+    if [[ -n "$RSD_REMOTE_TARGET" && "$RSD_RST_FROM_IS_REMOTE" -eq 0 ]]; then
+        rsd::io::status "Transferring backup files to target..."
+
+        local remote_tmp
+        remote_tmp=$(rsd::l::target::mktemp -d "rsd-restore.XXXXXX") || return 14
+        RSD_RST_REMOTE_TMP="$remote_tmp"
+
+        # Transfer dump
+        local remote_dump="${remote_tmp}/$(basename "$RSD_RST_DUMP_FILE")"
+        rsd::l::target::file_push "$RSD_RST_DUMP_FILE" "$remote_dump" || {
+            rsd::io::error "Failed to transfer dump file."
+            return 1
+        }
+        rsd::io::ok "Transferred: $(basename "$RSD_RST_DUMP_FILE")"
+        RSD_RST_DUMP_FILE="$remote_dump"
+
+        # Transfer role/globals file
+        if [[ -n "$RSD_RST_ROLE_FILE" ]]; then
+            local remote_role="${remote_tmp}/$(basename "$RSD_RST_ROLE_FILE")"
+            rsd::l::target::file_push "$RSD_RST_ROLE_FILE" "$remote_role" || {
+                rsd::io::error "Failed to transfer role file."
+                return 1
+            }
+            rsd::io::ok "Transferred: $(basename "$RSD_RST_ROLE_FILE")"
+            RSD_RST_ROLE_FILE="$remote_role"
+        fi
     fi
 
     rsd::io::ok "Input resolved."
@@ -511,6 +544,12 @@ function rsd::r::timescaledb_restore::summary() {
                 fi
             fi
         fi
+    fi
+
+    # ── Cleanup transferred files ─────────────────────────────────────────
+    if [[ -n "$RSD_RST_REMOTE_TMP" ]]; then
+        rsd::l::target::exec rm -rf "$RSD_RST_REMOTE_TMP" 2>/dev/null
+        rsd::io::ok "Cleaned up temp files on target."
     fi
 
     rsd::io::blank

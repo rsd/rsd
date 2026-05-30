@@ -7,11 +7,11 @@
 # PURPOSE
 # -------
 # Creates a PostgreSQL role, database, and enables TimescaleDB extensions.
-# Companion to timescaledb/core, which handles server-level provisioning.
+# Companion to timescaledb/install, which handles server-level provisioning.
 #
 # PREREQUISITES
 # -------------
-# Run `rsd [@host] recipe run timescaledb/core` first.
+# Run `rsd [@host] recipe run timescaledb/install` first.
 #
 # WHAT THIS RECIPE DOES
 # ---------------------
@@ -121,7 +121,7 @@ function rsd::r::timescaledb_app::register() {
 
     # Verify PostgreSQL is running on the target
     if ! rsd::l::target::exec_sudo "" systemctl is-active --quiet postgresql; then
-        rsd::io::error "PostgreSQL is not running. Run timescaledb/core first."
+        rsd::io::error "PostgreSQL is not running. Run timescaledb/install first."
         exit 2
     fi
 

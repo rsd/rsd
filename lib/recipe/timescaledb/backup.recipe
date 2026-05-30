@@ -11,7 +11,7 @@
 #
 # PREREQUISITES
 # -------------
-# PostgreSQL must be running on the target. Typically after timescaledb/core.
+# PostgreSQL must be running on the target. Typically after timescaledb/install.
 #
 # WHAT THIS RECIPE DOES
 # ---------------------
