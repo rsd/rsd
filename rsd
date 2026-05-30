@@ -972,16 +972,19 @@ if [[ "${RSD_ARGS[command]}" ]]; then
                 # Mode A still needs remote framework parity — probe and offer upgrade.
                 # Advisory only (|| true): Mode A commands SSH raw commands via target.lib,
                 # so a missing remote rsd binary should not block execution.
+                # Auto-accept upgrade prompts — Mode A should not block on interactive input.
                 source "$(rsd::get_libdir_file lib/remote.lib)"
-                local _mode_a_rsd_bin="rsd"
-                rsd::l::remote::bootstrap_check "$RSD_REMOTE_TARGET" _mode_a_rsd_bin 2>/dev/null || true
+                _mode_a_rsd_bin="rsd"
+                RSD_MOCK_PROMPT_REPLY=Y
+                rsd::l::remote::bootstrap_check "$RSD_REMOTE_TARGET" _mode_a_rsd_bin || true
+                unset RSD_MOCK_PROMPT_REPLY
 
                 rsd::command "$RSD_COMMAND"
                 exit $?
             else
                 rsd::debug "Command $RSD_COMMAND is remote-naive (Mode B Remote Delegation fallback)." 15
                 source "$(rsd::get_libdir_file lib/remote.lib)"
-                local rsd_bin="rsd"
+                rsd_bin="rsd"
                 rsd::l::remote::bootstrap_check "$RSD_REMOTE_TARGET" rsd_bin || exit $?
                 rsd::l::remote::execute "$RSD_REMOTE_TARGET" "$rsd_bin" "$RSD_COMMAND" "${RSD_ARGS_UNPROCESSED[@]}"
                 exit $?

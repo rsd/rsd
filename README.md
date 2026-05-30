@@ -4,8 +4,6 @@ RSD is a structural meta-framework and execution engine for shell scripting. It 
 
 Instead of cluttering systems with loose script files, RSD structures automation suites around structured, lazy-loaded command files (`command/`) and shared idempotent libraries (`lib/`).
 
----
-
 ## Quick-Start Example: Provisioning a Zsh Environment
 
 RSD simplifies complex installations (like fully deploying and configuring a secure Zsh environment with themes, plugins, and dependencies) down to a single terminal call.
@@ -24,6 +22,70 @@ rsd @server1 recipe run zsh_dev_setup
 ```
 
 *(Under the hood, RSD dynamically maps the host distribution's package manager, extracts target SSH/Sudo credentials securely from a GPG-encrypted KeePassXC database, and applies modifications idempotently so subsequent executions automatically skip completed steps).*
+
+---
+
+## Objective
+
+RSD exists to eliminate repetitive infrastructure work. Whether provisioning a database on a remote server, deploying a development environment, or restoring a backup — if a task has been done once, RSD should be able to do it again with a single command and zero user guesswork.
+
+Simple tasks are bundled as **commands** (with sub-command actions). Complex, multi-step operations are structured as **recipes** — declarative, idempotent scripts that the framework compiles, executes, and recovers from automatically.
+
+## Philosophy
+
+RSD is built on one core belief: **the user should provide the *what*, never the *how***. If the framework installed PostgreSQL on a server, it should know how to connect to it. If a backup was created with a specific compression method, the restore should detect it automatically. The user's job is to say "restore this database." RSD's job is to figure out everything else.
+
+This means RSD operates under a principle of **maximum self-sufficiency**: probe the environment, detect the configuration, adapt to what's available, and only ask the user when there's a genuine ambiguity that cannot be resolved programmatically. Expert users can always override any auto-detected value — but the default path should require nothing beyond the essential intent.
+
+## Design Principles
+
+### 1. Security First
+
+Every operation assumes adversarial conditions. Temporary files use unpredictable paths (`mktemp`, never hardcoded `/tmp/foo`). Existing files are backed up before modification. Passwords and credentials never appear in command-line arguments, process lists, or debug output — they are piped via stdin or file descriptors. File permissions are restrictive by default (`0700` for temp, `0600` for credentials). Cleanup is guaranteed, including on failure paths.
+
+### 2. Namespace Preservation
+
+RSD must be invisible to the host environment. All functions use the `rsd::` prefix with scoping tags (`::c::` for commands, `::l::` for libraries, `::r::` for recipes). All globals use the `RSD_` prefix. Shell extension primitives use the `bash::` prefix. This strict isolation ensures RSD never collides with user scripts, sourced tools, or system utilities — and makes it safe to `source` external bash tools into the same process.
+
+### 3. Environment Detection — Never Assume
+
+RSD never assumes the state of the environment it operates in. Before calling a binary, verify it exists. Before connecting to a service, probe for the correct method. Before writing a file, check if the path is writable. The environment is always discovered, never presumed.
+
+The sole exception: explicit configuration. If a config file declares "this host uses PostgreSQL on port 5433," trust it and skip the probe. The user has deliberately asserted the environment's state. Configuration overrides detection; detection overrides assumption.
+
+### 4. Remote Transparency
+
+A task must work identically whether the target is local or remote. The user writes `@host` and the framework handles everything else. Two modes support this:
+
+- **Delegated** (RSD installed remotely) — Best case. The framework ensures version parity via bootstrap checks and delegates tasks to the remote binary. This allows recipes, libraries, and scripts to stay synchronized.
+- **Direct** (No remote RSD) — For servers we don't own, thin clients, and containers. Each command executes individually through the transport layer (SSH, LXC, Docker). Slower, but universally compatible.
+
+Remote cascading (host → VPN → SSH → LXC → Docker) follows the same rules at every hop.
+
+### 5. Local and Remote Filesystems
+
+Files and directories can be local or remote, distinguished by the `@host:path` syntax:
+
+| Form | Example | Resolution |
+| :--- | :--- | :--- |
+| Relative local | `backups/` | Against `$(pwd)` |
+| Absolute local | `/tmp/backups/` | As-is |
+| Relative remote | `@bi:backups/` | Against remote `$HOME` |
+| Absolute remote | `@bi:/tmp/backups/` | As-is |
+
+RSD maximizes remote operations and minimizes file transfers. If a file is remote and the operation can run remotely, execute remotely — don't copy gigabytes just to read a header. Transfer only when the operation genuinely requires the file on the other side, and always to a secure temp location with guaranteed cleanup.
+
+### 6. User's Soft Ignorance
+
+The user wants a task done. It is RSD's job to figure out how. The framework must never burden the user with questions it can answer itself.
+
+- **Minimize required arguments** — Only the intent is mandatory (`--db-name`). Everything else (connection method, compression algorithm, auth strategy) should be auto-detected with sensible defaults.
+- **Expert escape hatch** — Every auto-detected value can be overridden by explicit CLI flags or configuration files. The effortless path is the default; the expert path is always available.
+- **Helpful failure** — When something fails, explain what went wrong *and* what to try next. Never exit with just a code.
+
+### 7. Recipe Independence *(planned)*
+
+Recipes should be able to live outside the RSD repository. A recipe file with an RSD shebang should be executable independently — downloadable, shareable, and runnable without a full RSD checkout. The recipe would still access all RSD libraries and target abstraction, but wouldn't need to be physically bundled in `lib/recipe/`.
 
 ---
 
