@@ -345,7 +345,7 @@ function rsd::r::timescaledb_restore::resolve_input() {
             # Make role file readable by postgres when using sudo method
             if [[ "$RSD_PG_METHOD" == "sudo" ]]; then
                 rsd::l::target::exec chmod 0755 "$remote_tmp"
-                rsd::l::target::exec sh -c "chmod 0644 '${remote_tmp}'/*"
+                rsd::l::target::exec find "$remote_tmp" -type f -exec chmod 0644 {} +
             fi
         fi
     fi
@@ -360,11 +360,20 @@ function rsd::r::timescaledb_restore::resolve_input() {
 # prompts for password if not provided via --db-password.
 
 function rsd::r::timescaledb_restore::apply_role::pre_check() {
+    # Convention: return 0 = satisfied (skip), non-zero = proceed.
     if [[ -z "$RSD_RST_ROLE_FILE" ]]; then
-        rsd::io::info "No role/globals file — skipping."
-        return 1
+        # No role file to apply — satisfied by definition.
+        return 0
     fi
-    return 0
+
+    # Check if the role already exists in the cluster.
+    local role_exists
+    role_exists=$(rsd::l::pg::psql \
+        "SELECT 1 FROM pg_roles WHERE rolname = '${RSD_RST_DB_USER:-${RSD_RST_ROLE_NAME:-$RSD_RST_DB_NAME}}'")
+    if [[ "$role_exists" == "1" ]]; then
+        return 0  # Role exists — satisfied.
+    fi
+    return 1  # Role missing — proceed.
 }
 
 function rsd::r::timescaledb_restore::apply_role() {
@@ -382,15 +391,21 @@ function rsd::r::timescaledb_restore::apply_role() {
         # Password needed — prompt if not provided
         if [[ -z "$RSD_RST_DB_PASSWORD" ]]; then
             rsd::io::blank
-            rsd::io::info "The backup was made without superuser access."
+            rsd::io::info "The backup was made without superuser access (no password hash)."
             rsd::io::info "A password is required for role '${RSD_RST_ROLE_NAME}'."
+            rsd::io::info "To skip this prompt, use: --db-password <password>"
             rsd::io::blank
 
+            # Prompts go directly to /dev/tty to bypass the recipe engine's
+            # process substitution framing, which buffers prompts without
+            # trailing newlines. read -s disables echo for secure input.
             local pw1="" pw2=""
-            read -r -s -p "[rsd]          ▸ Password for '${RSD_RST_ROLE_NAME}': " pw1
-            echo ""
-            read -r -s -p "[rsd]          ▸ Confirm password: " pw2
-            echo ""
+            printf "[rsd]          ▸ Password for '%s': " "$RSD_RST_ROLE_NAME" > /dev/tty
+            read -r -s pw1 < /dev/tty
+            echo "" > /dev/tty
+            printf "[rsd]          ▸ Confirm password: " > /dev/tty
+            read -r -s pw2 < /dev/tty
+            echo "" > /dev/tty
 
             if [[ "$pw1" != "$pw2" ]]; then
                 rsd::io::error "Passwords do not match."
@@ -417,6 +432,7 @@ function rsd::r::timescaledb_restore::apply_role() {
 # ==============================================================================
 
 function rsd::r::timescaledb_restore::create_database::pre_check() {
+    # Convention: return 0 = satisfied (skip), non-zero = proceed.
     local db_exists
     db_exists=$(rsd::l::pg::psql \
         "SELECT 1 FROM pg_database WHERE datname = '${RSD_RST_DB_NAME}'")
@@ -424,13 +440,12 @@ function rsd::r::timescaledb_restore::create_database::pre_check() {
     if [[ "$db_exists" == "1" ]]; then
         if [[ "$RSD_RST_DROP_EXISTING" -eq 1 ]]; then
             rsd::io::warn "Database '${RSD_RST_DB_NAME}' exists — will be dropped (--drop-existing)."
-            return 0
+            return 1  # Proceed to drop + recreate.
         fi
-        rsd::io::error "Database '${RSD_RST_DB_NAME}' already exists."
-        rsd::io::info "Use --drop-existing to replace it."
-        return 1
+        # DB exists and no --drop-existing — satisfied.
+        return 0
     fi
-    return 0
+    return 1  # DB doesn't exist — proceed to create.
 }
 
 function rsd::r::timescaledb_restore::create_database() {
