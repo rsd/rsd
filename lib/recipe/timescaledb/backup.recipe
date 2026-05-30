@@ -96,9 +96,10 @@ declare -g RSD_BKP_OUTPUT_IS_REMOTE=0
 declare -g RSD_BKP_OUTPUT_HOST=""
 declare -g RSD_BKP_OUTPUT_DIR=""
 declare -g RSD_BKP_DUMP_FILENAME=""
-declare -g RSD_BKP_GLOBALS_FILENAME=""
+declare -g RSD_BKP_GLOBALS_FILENAME=""    # superuser: globals_<ts>.sql
+declare -g RSD_BKP_ROLE_FILENAME=""       # non-superuser: role_<ts>.sql
 # 't' if connected user is a PG superuser, 'f' otherwise.
-# Set by validate_env; governs whether dump_globals runs.
+# Set by validate_env; governs dump_globals behavior.
 declare -g RSD_BKP_IS_SUPER="f"
 # Connection args array: built from --pg-host/--pg-port/--pg-user.
 # Injected into every psql/pg_dump/pg_dumpall call.
@@ -231,6 +232,7 @@ function rsd::r::timescaledb_backup::register() {
     # Shared timestamp for all output files
     RSD_BKP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     RSD_BKP_GLOBALS_FILENAME="globals_${RSD_BKP_TIMESTAMP}.sql"
+    RSD_BKP_ROLE_FILENAME="role_${RSD_BKP_TIMESTAMP}.sql"
     RSD_BKP_DUMP_FILENAME="${RSD_BKP_DB_NAME}_${RSD_BKP_TIMESTAMP}_${RSD_BKP_COMPRESS}.dump"
 
     rsd::r::register_task "timescaledb_backup::validate_env"
@@ -289,10 +291,11 @@ function rsd::r::timescaledb_backup::validate_env() {
 
     # ── Superuser check ──────────────────────────────────────────────────
     RSD_BKP_IS_SUPER=$(rsd::l::r::bkp::psql "SELECT usesuper FROM pg_user WHERE usename = current_user")
-    if [[ "$RSD_BKP_IS_SUPER" != "t" ]]; then
-        rsd::io::warn "User '${conn_user}' is not a superuser."
-        rsd::io::info "Globals dump (roles/passwords) will be skipped — requires superuser."
-        rsd::io::info "For a full backup including globals, use --pg-user with a superuser role."
+    if [[ "$RSD_BKP_IS_SUPER" == "t" ]]; then
+        rsd::io::ok "Superuser — full globals dump available."
+    else
+        rsd::io::info "Not superuser — role attributes will be dumped (password excluded)."
+        rsd::io::info "On restore, provide --db-password to set a new password."
     fi
 
     # ── Compression support ──────────────────────────────────────────────
@@ -327,20 +330,22 @@ function rsd::r::timescaledb_backup::validate_env() {
 # ==============================================================================
 # Task: dump_globals
 # ==============================================================================
-# Dumps cluster-level objects: roles with encrypted passwords, tablespaces.
-# pg_dumpall always connects via the same libpq parameters.
-# Skipped entirely for non-superusers via pre_check.
-
-function rsd::r::timescaledb_backup::dump_globals::pre_check() {
-    if [[ "$RSD_BKP_IS_SUPER" != "t" ]]; then
-        rsd::io::info "Skipping globals dump (not superuser)."
-        return 1
-    fi
-    return 0
-}
+# Dumps cluster-level role information.
+# Superuser: full pg_dumpall --globals-only (all roles + password hashes).
+# Non-superuser: generates a CREATE ROLE statement from pg_roles
+#   (role attributes preserved, password excluded).
 
 function rsd::r::timescaledb_backup::dump_globals() {
-    rsd::io::status "Dumping cluster globals (roles, passwords)..."
+    if [[ "$RSD_BKP_IS_SUPER" == "t" ]]; then
+        rsd::r::timescaledb_backup::_dump_globals_full
+    else
+        rsd::r::timescaledb_backup::_dump_role_attributes
+    fi
+}
+
+# Superuser path: full pg_dumpall --globals-only
+function rsd::r::timescaledb_backup::_dump_globals_full() {
+    rsd::io::status "Dumping cluster globals (all roles + passwords)..."
 
     local dest="${RSD_BKP_OUTPUT_DIR}/${RSD_BKP_GLOBALS_FILENAME}"
 
@@ -364,6 +369,60 @@ function rsd::r::timescaledb_backup::dump_globals() {
     fi
 
     rsd::io::ok "Globals → ${dest}"
+}
+
+# Non-superuser path: reconstruct role from pg_roles.
+# Queries raw columns (readable by any user) and builds the SQL in bash
+# to avoid escaping nightmares in PG string concatenation.
+function rsd::r::timescaledb_backup::_dump_role_attributes() {
+    rsd::io::status "Dumping role attributes (non-superuser mode)..."
+
+    # Pipe-delimited: name|login|super|createdb|createrole|inherit|repl|bypassrls|connlimit|validuntil
+    local raw
+    raw=$(rsd::l::r::bkp::psql \
+        "SELECT rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolinherit, rolreplication, rolbypassrls, rolconnlimit, rolvaliduntil FROM pg_roles WHERE rolname = current_user")
+
+    if [[ -z "$raw" ]]; then
+        rsd::io::error "Could not read role attributes from pg_roles."
+        return 1
+    fi
+
+    # Parse columns
+    local IFS='|'
+    read -r r_name r_login r_super r_createdb r_createrole r_inherit r_repl r_bypassrls r_connlimit r_validuntil <<< "$raw"
+
+    # Build ALTER ROLE attributes string
+    local attrs=""
+    [[ "$r_login"      == "t" ]] && attrs+=" LOGIN"       || attrs+=" NOLOGIN"
+    [[ "$r_super"      == "t" ]] && attrs+=" SUPERUSER"   || attrs+=" NOSUPERUSER"
+    [[ "$r_createdb"   == "t" ]] && attrs+=" CREATEDB"    || attrs+=" NOCREATEDB"
+    [[ "$r_createrole" == "t" ]] && attrs+=" CREATEROLE"  || attrs+=" NOCREATEROLE"
+    [[ "$r_inherit"    == "t" ]] && attrs+=" INHERIT"     || attrs+=" NOINHERIT"
+    [[ "$r_repl"       == "t" ]] && attrs+=" REPLICATION" || attrs+=" NOREPLICATION"
+    [[ "$r_bypassrls"  == "t" ]] && attrs+=" BYPASSRLS"   || attrs+=" NOBYPASSRLS"
+    [[ "$r_connlimit" -ge 0 ]] 2>/dev/null && attrs+=" CONNECTION LIMIT ${r_connlimit}"
+    [[ -n "$r_validuntil" ]] && attrs+=" VALID UNTIL '${r_validuntil}'"
+
+    local dest="${RSD_BKP_OUTPUT_DIR}/${RSD_BKP_ROLE_FILENAME}"
+
+    cat > "$dest" <<EOSQL
+-- Role attributes dumped by rsd timescaledb/backup
+-- Timestamp: ${RSD_BKP_TIMESTAMP}
+-- NOTE: Password hash excluded (non-superuser dump).
+--       Set password on restore with: ALTER ROLE "${r_name}" WITH PASSWORD '...';
+
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${r_name}') THEN
+    CREATE ROLE "${r_name}";
+  END IF;
+END \$\$;
+
+ALTER ROLE "${r_name}" WITH${attrs};
+EOSQL
+    chmod 0640 "$dest"
+
+    rsd::io::ok "Role → ${dest}"
 }
 
 # ==============================================================================
@@ -446,23 +505,29 @@ function rsd::r::timescaledb_backup::verify_dump() {
 function rsd::r::timescaledb_backup::summary() {
     local dump_path="${RSD_BKP_OUTPUT_DIR}/${RSD_BKP_DUMP_FILENAME}"
     local globals_path="${RSD_BKP_OUTPUT_DIR}/${RSD_BKP_GLOBALS_FILENAME}"
+    local role_path="${RSD_BKP_OUTPUT_DIR}/${RSD_BKP_ROLE_FILENAME}"
 
-    # Check whether globals were actually dumped
-    local has_globals=0
-    if [[ "$RSD_BKP_OUTPUT_IS_REMOTE" == "1" ]]; then
-        rsd::l::target::exec test -f "$globals_path" && has_globals=1
+    # Determine which role/globals file was produced
+    local role_file="" role_label=""
+    if [[ "$RSD_BKP_IS_SUPER" == "t" ]]; then
+        role_file="$globals_path"
+        role_label="$RSD_BKP_GLOBALS_FILENAME"
     else
-        [[ -f "$globals_path" ]] && has_globals=1
+        role_file="$role_path"
+        role_label="$RSD_BKP_ROLE_FILENAME"
     fi
 
     # File sizes
-    local dump_size dump_hr
+    local dump_size dump_hr role_size role_hr
     if [[ "$RSD_BKP_OUTPUT_IS_REMOTE" == "1" ]]; then
         dump_size=$(rsd::l::target::exec stat -c%s "$dump_path" 2>/dev/null)
+        role_size=$(rsd::l::target::exec stat -c%s "$role_file" 2>/dev/null)
     else
         dump_size=$(stat -c%s "$dump_path" 2>/dev/null)
+        role_size=$(stat -c%s "$role_file" 2>/dev/null)
     fi
     dump_hr=$(numfmt --to=iec-i --suffix=B "${dump_size:-0}" 2>/dev/null || echo "${dump_size:-0} bytes")
+    role_hr=$(numfmt --to=iec-i --suffix=B "${role_size:-0}" 2>/dev/null || echo "${role_size:-0} bytes")
 
     rsd::io::blank
     rsd::io::banner "Backup Complete"
@@ -473,39 +538,24 @@ function rsd::r::timescaledb_backup::summary() {
     rsd::io::blank
     rsd::io::info "Files:"
     rsd::io::info "  ${RSD_BKP_DUMP_FILENAME}  (${dump_hr})"
-
-    if [[ "$has_globals" -eq 1 ]]; then
-        local globals_size globals_hr
-        if [[ "$RSD_BKP_OUTPUT_IS_REMOTE" == "1" ]]; then
-            globals_size=$(rsd::l::target::exec stat -c%s "$globals_path" 2>/dev/null)
-        else
-            globals_size=$(stat -c%s "$globals_path" 2>/dev/null)
-        fi
-        globals_hr=$(numfmt --to=iec-i --suffix=B "${globals_size:-0}" 2>/dev/null || echo "${globals_size:-0} bytes")
-        rsd::io::info "  ${RSD_BKP_GLOBALS_FILENAME}  (${globals_hr})"
-    else
-        rsd::io::info "  (globals skipped — not superuser)"
-    fi
+    rsd::io::info "  ${role_label}  (${role_hr})"
     rsd::io::blank
 
     # Show restore command with correct path syntax
     local target_flag=""
     [[ -n "$RSD_REMOTE_TARGET" ]] && target_flag="@${RSD_REMOTE_TARGET#@} "
 
-    local from_prefix=""
-    if [[ "$RSD_BKP_OUTPUT_IS_REMOTE" == "1" ]]; then
-        from_prefix="@${RSD_BKP_OUTPUT_HOST}:"
-    fi
+    local prefix=""
+    [[ "$RSD_BKP_OUTPUT_IS_REMOTE" == "1" ]] && prefix="@${RSD_BKP_OUTPUT_HOST}:"
 
     rsd::io::banner "Restore Command"
     rsd::io::blank
     rsd::io::info "  rsd ${target_flag}recipe run timescaledb/restore \\"
     rsd::io::info "    --db-name ${RSD_BKP_DB_NAME} --db-user <owner> \\"
-    rsd::io::info "    --from ${from_prefix}${dump_path}"
-    if [[ "$has_globals" -eq 1 ]]; then
-        local globals_prefix=""
-        [[ "$RSD_BKP_OUTPUT_IS_REMOTE" == "1" ]] && globals_prefix="@${RSD_BKP_OUTPUT_HOST}:"
-        rsd::io::info "    --globals ${globals_prefix}${globals_path}"
+    rsd::io::info "    --from ${prefix}${dump_path} \\"
+    rsd::io::info "    --globals ${prefix}${role_file}"
+    if [[ "$RSD_BKP_IS_SUPER" != "t" ]]; then
+        rsd::io::info "    --db-password <new-password>"
     fi
     rsd::io::blank
 }
