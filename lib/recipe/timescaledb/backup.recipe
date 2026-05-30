@@ -551,11 +551,7 @@ function rsd::r::timescaledb_backup::summary() {
     rsd::io::banner "Restore Command"
     rsd::io::blank
     rsd::io::info "  rsd ${target_flag}recipe run timescaledb/restore \\"
-    rsd::io::info "    --db-name ${RSD_BKP_DB_NAME} --db-user <owner> \\"
-    rsd::io::info "    --from ${prefix}${dump_path} \\"
-    rsd::io::info "    --globals ${prefix}${role_file}"
-    if [[ "$RSD_BKP_IS_SUPER" != "t" ]]; then
-        rsd::io::info "    --db-password <new-password>"
-    fi
+    rsd::io::info "    --db-name ${RSD_BKP_DB_NAME} \\"
+    rsd::io::info "    --from ${prefix}${RSD_BKP_OUTPUT_DIR}"
     rsd::io::blank
 }
