@@ -49,6 +49,9 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
     exit 12
 fi
 
+# Load dependencies
+[[ "$RSD_PG_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/pg.lib)"
+
 # Recipe-specific CLI options
 declare -g -A RSD_RECIPE_OPTIONS=(
     ["db-name"]=1
@@ -67,23 +70,6 @@ declare -g RSD_APP_DB_PASS=""
 # ==============================================================================
 # Helpers
 # ==============================================================================
-
-# Run a SQL statement as the postgres superuser via stdin piping.
-# Stdin piping avoids shell-escaping issues when SQL contains single quotes
-# (e.g., PASSWORD 'foo') — the SQL never passes through the argument pipeline.
-#
-# @param string $1 The SQL statement to execute.
-# @param string $2 Optional: database name to connect to.
-# @return int psql exit code. Stdout contains query results.
-function rsd::l::r::app::psql_su() {
-    local sql="$1"
-    local db="${2:-}"
-    local -a db_args=()
-    [[ -n "$db" ]] && db_args=(-d "$db")
-
-    printf '%s\n' "$sql" | \
-        rsd::l::target::exec_sudo "postgres" psql -XAt "${db_args[@]}" -f - 2>/dev/null
-}
 
 # Validate that a value is a safe SQL identifier (prevents injection).
 # Allows only letters, digits, and underscores, starting with a letter or _.
@@ -125,6 +111,11 @@ function rsd::r::timescaledb_app::register() {
         exit 2
     fi
 
+    # Resolve PG connection — auto-detects the working method
+    if ! rsd::l::pg::resolve; then
+        exit 2
+    fi
+
     # Auto-generate password if not provided
     if [[ -z "$RSD_APP_DB_PASS" ]]; then
         RSD_APP_DB_PASS=$(openssl rand -base64 24 2>/dev/null | tr -d '/+=' | head -c 24)
@@ -147,7 +138,7 @@ function rsd::r::timescaledb_app::register() {
 
 function rsd::r::timescaledb_app::create_role::pre_check() {
     local exists
-    exists=$(rsd::l::r::app::psql_su "SELECT 1 FROM pg_roles WHERE rolname = '${RSD_APP_DB_USER}'")
+    exists=$(rsd::l::pg::psql "SELECT 1 FROM pg_roles WHERE rolname = '${RSD_APP_DB_USER}'")
     [[ "$exists" == "1" ]]
 }
 
@@ -157,7 +148,7 @@ function rsd::r::timescaledb_app::create_role() {
     # Escape single quotes in password for SQL string literal
     local safe_pass="${RSD_APP_DB_PASS//\'/\'\'}"
 
-    if ! rsd::l::r::app::psql_su "CREATE ROLE ${RSD_APP_DB_USER} LOGIN PASSWORD '${safe_pass}'"; then
+    if ! rsd::l::pg::psql "CREATE ROLE ${RSD_APP_DB_USER} LOGIN PASSWORD '${safe_pass}'"; then
         rsd::io::error "Failed to create role '${RSD_APP_DB_USER}'."
         return 1
     fi
@@ -166,7 +157,7 @@ function rsd::r::timescaledb_app::create_role() {
 }
 
 function rsd::r::timescaledb_app::create_role::rollback() {
-    rsd::l::r::app::psql_su "DROP ROLE IF EXISTS ${RSD_APP_DB_USER}"
+    rsd::l::pg::psql "DROP ROLE IF EXISTS ${RSD_APP_DB_USER}"
 }
 
 # ==============================================================================
@@ -175,14 +166,14 @@ function rsd::r::timescaledb_app::create_role::rollback() {
 
 function rsd::r::timescaledb_app::create_database::pre_check() {
     local exists
-    exists=$(rsd::l::r::app::psql_su "SELECT 1 FROM pg_database WHERE datname = '${RSD_APP_DB_NAME}'")
+    exists=$(rsd::l::pg::psql "SELECT 1 FROM pg_database WHERE datname = '${RSD_APP_DB_NAME}'")
     [[ "$exists" == "1" ]]
 }
 
 function rsd::r::timescaledb_app::create_database() {
     rsd::io::status "Creating database '${RSD_APP_DB_NAME}' owned by '${RSD_APP_DB_USER}'..."
 
-    if ! rsd::l::r::app::psql_su "CREATE DATABASE ${RSD_APP_DB_NAME} OWNER ${RSD_APP_DB_USER}"; then
+    if ! rsd::l::pg::psql "CREATE DATABASE ${RSD_APP_DB_NAME} OWNER ${RSD_APP_DB_USER}"; then
         rsd::io::error "Failed to create database '${RSD_APP_DB_NAME}'."
         return 1
     fi
@@ -191,7 +182,7 @@ function rsd::r::timescaledb_app::create_database() {
 }
 
 function rsd::r::timescaledb_app::create_database::rollback() {
-    rsd::l::r::app::psql_su "DROP DATABASE IF EXISTS ${RSD_APP_DB_NAME}"
+    rsd::l::pg::psql "DROP DATABASE IF EXISTS ${RSD_APP_DB_NAME}"
 }
 
 # ==============================================================================
@@ -202,7 +193,7 @@ function rsd::r::timescaledb_app::create_database::rollback() {
 
 function rsd::r::timescaledb_app::enable_extensions::pre_check() {
     local count
-    count=$(rsd::l::r::app::psql_su \
+    count=$(rsd::l::pg::psql \
         "SELECT count(*) FROM pg_extension WHERE extname IN ('timescaledb','pg_stat_statements')" \
         "$RSD_APP_DB_NAME")
     [[ "$count" == "2" ]]
@@ -211,14 +202,14 @@ function rsd::r::timescaledb_app::enable_extensions::pre_check() {
 function rsd::r::timescaledb_app::enable_extensions() {
     rsd::io::status "Enabling extensions in '${RSD_APP_DB_NAME}'..."
 
-    if ! rsd::l::r::app::psql_su \
+    if ! rsd::l::pg::psql \
         "CREATE EXTENSION IF NOT EXISTS timescaledb" "$RSD_APP_DB_NAME"; then
         rsd::io::error "Failed to enable timescaledb extension."
         return 1
     fi
     rsd::io::ok "timescaledb enabled."
 
-    if ! rsd::l::r::app::psql_su \
+    if ! rsd::l::pg::psql \
         "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" "$RSD_APP_DB_NAME"; then
         rsd::io::error "Failed to enable pg_stat_statements extension."
         return 1
@@ -238,19 +229,19 @@ function rsd::r::timescaledb_app::validate() {
 
     # Role info
     local role_info
-    role_info=$(rsd::l::r::app::psql_su \
+    role_info=$(rsd::l::pg::psql \
         "SELECT rolname || ' (login=' || rolcanlogin || ')' FROM pg_roles WHERE rolname = '${RSD_APP_DB_USER}'")
     rsd::io::info "Role:       $role_info"
 
     # Database owner
     local db_owner
-    db_owner=$(rsd::l::r::app::psql_su \
+    db_owner=$(rsd::l::pg::psql \
         "SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_database WHERE datname = '${RSD_APP_DB_NAME}'")
     rsd::io::info "Database:   ${RSD_APP_DB_NAME} (owner: ${db_owner})"
 
     # Extensions
     local extensions
-    extensions=$(rsd::l::r::app::psql_su \
+    extensions=$(rsd::l::pg::psql \
         "SELECT extname || ' ' || extversion FROM pg_extension WHERE extname IN ('timescaledb','pg_stat_statements') ORDER BY extname" \
         "$RSD_APP_DB_NAME")
     rsd::io::info "Extensions:"

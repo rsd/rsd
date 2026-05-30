@@ -77,7 +77,8 @@ fi
 
 # Load dependencies
 [[ "$RSD_HOST_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/host.lib)"
-[[ "$RSD_APT_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/apt.lib)"
+[[ "$RSD_APT_LIB" != "1" ]]  && source "$(rsd::get_libdir_file lib/apt.lib)"
+[[ "$RSD_PG_LIB" != "1" ]]   && source "$(rsd::get_libdir_file lib/pg.lib)"
 
 # ==============================================================================
 # Constants
@@ -527,9 +528,15 @@ function rsd::r::timescaledb_install::validate_install() {
     rsd::io::banner "Validating TimescaleDB Installation"
     rsd::io::blank
 
+    # Resolve PG connection — auto-detects the working method.
+    # Just installed via this recipe, so sudo -u postgres should win.
+    if ! rsd::l::pg::resolve; then
+        return 1
+    fi
+
     # 1. PostgreSQL version
     local pg_version=""
-    pg_version=$(rsd::l::target::exec_sudo "" sudo -u postgres psql -XAtc "SELECT version();" 2>/dev/null)
+    pg_version=$(rsd::l::pg::psql "SELECT version();")
     if [[ -z "$pg_version" ]]; then
         rsd::io::error "Could not connect to PostgreSQL."
         return 1
@@ -538,7 +545,7 @@ function rsd::r::timescaledb_install::validate_install() {
 
     # 2. shared_preload_libraries
     local preload=""
-    preload=$(rsd::l::target::exec_sudo "" sudo -u postgres psql -XAtc "SHOW shared_preload_libraries;" 2>/dev/null)
+    preload=$(rsd::l::pg::psql "SHOW shared_preload_libraries;")
     rsd::io::info "Preloaded:  $preload"
 
     if [[ "$preload" != *"timescaledb"* ]]; then
@@ -548,8 +555,7 @@ function rsd::r::timescaledb_install::validate_install() {
 
     # 3. Extension availability
     local extensions=""
-    extensions=$(rsd::l::target::exec_sudo "" sudo -u postgres psql -XAtc \
-        "SELECT name || ' ' || default_version FROM pg_available_extensions WHERE name IN ('timescaledb','timescaledb_toolkit','pg_stat_statements') ORDER BY name;" 2>/dev/null)
+    extensions=$(rsd::l::pg::psql "SELECT name || ' ' || default_version FROM pg_available_extensions WHERE name IN ('timescaledb','timescaledb_toolkit','pg_stat_statements') ORDER BY name;")
     rsd::io::info "Available extensions:"
     while IFS= read -r line; do
         [[ -n "$line" ]] && rsd::io::info "  - $line"
@@ -559,8 +565,7 @@ function rsd::r::timescaledb_install::validate_install() {
     rsd::io::banner "TimescaleDB install completed successfully."
     rsd::io::blank
     rsd::io::info "Next steps:"
-    rsd::io::info "  1. Create a database:  sudo -u postgres createdb mydb"
-    rsd::io::info "  2. Enable extension:   sudo -u postgres psql -d mydb -c 'CREATE EXTENSION IF NOT EXISTS timescaledb;'"
-    rsd::io::info "  3. Enable stats:       sudo -u postgres psql -d mydb -c 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements;'"
+    rsd::io::info "  1. Create a database:  rsd [@host] recipe run timescaledb/app --db-name mydb --db-user myuser"
+    rsd::io::info "  2. Or manually:        sudo -u postgres createdb mydb"
     rsd::io::blank
 }

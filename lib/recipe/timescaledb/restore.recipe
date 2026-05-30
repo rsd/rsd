@@ -70,6 +70,9 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
     exit 12
 fi
 
+# Load dependencies
+[[ "$RSD_PG_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/pg.lib)"
+
 # Recipe-specific CLI options
 declare -g -A RSD_RECIPE_OPTIONS=(
     ["db-name"]=1
@@ -98,49 +101,10 @@ declare -g RSD_RST_ROLE_TYPE=""        # 'role' (no password hash) or 'globals' 
 declare -g RSD_RST_ROLE_NAME=""        # role name extracted from the role SQL
 declare -g RSD_RST_DROP_EXISTING=0
 declare -g RSD_RST_REMOTE_TMP=""       # temp dir on target for transferred files
-declare -g RSD_RST_PG_SUDO=0           # 1 = use sudo -u postgres (peer auth)
-# Connection args array: built from --pg-host/--pg-port/--pg-user.
-declare -g -a RSD_RST_PG_CONN=()
 
 # ==============================================================================
 # Helpers
 # ==============================================================================
-
-# Execute a psql command with the recipe's PG connection parameters.
-# Routes through exec_sudo('postgres') when peer auth requires it.
-#
-# @param string $1 SQL to execute.
-# @param string $2 Optional: database name.
-# @return int psql exit code.
-function rsd::l::r::rst::psql() {
-    local sql="$1"
-    local db="${2:-}"
-    local -a db_args=()
-    [[ -n "$db" ]] && db_args=(-d "$db")
-
-    if [[ "$RSD_RST_PG_SUDO" -eq 1 ]]; then
-        printf '%s\n' "$sql" | \
-            rsd::l::target::exec_sudo "postgres" psql -XAt "${db_args[@]}" -f - 2>/dev/null
-    else
-        printf '%s\n' "$sql" | \
-            rsd::l::target::exec psql -XAt "${RSD_RST_PG_CONN[@]}" "${db_args[@]}" -f - 2>/dev/null
-    fi
-}
-
-# Execute a PG tool with connection parameters.
-# Routes through exec_sudo('postgres') when peer auth requires it.
-#
-# @param string... Command and arguments.
-# @return int command exit code.
-function rsd::l::r::rst::pg_exec() {
-    local cmd="$1"
-    shift
-    if [[ "$RSD_RST_PG_SUDO" -eq 1 ]]; then
-        rsd::l::target::exec_sudo "postgres" "$cmd" "$@"
-    else
-        rsd::l::target::exec "$cmd" "${RSD_RST_PG_CONN[@]}" "$@"
-    fi
-}
 
 # Parse a path string into host + resolved directory + remote flag.
 # Supports scp-style remote paths with mandatory colon separator.
@@ -244,21 +208,12 @@ function rsd::r::timescaledb_restore::register() {
     # Drop existing flag
     [[ -v RSD_COMMAND_ARGS[drop-existing] ]] && RSD_RST_DROP_EXISTING=1
 
-    # Build PG connection args.
-    # Default to 'postgres' — restore needs superuser for CREATE ROLE/DATABASE.
-    # When pg-user is 'postgres' and no pg-host is given (local socket),
-    # use sudo -u postgres to satisfy peer auth.
-    local pg_user="${RSD_COMMAND_ARGS[pg-user]:-postgres}"
-    local pg_host="${RSD_COMMAND_ARGS[pg-host]:-}"
-
-    if [[ "$pg_user" == "postgres" && -z "$pg_host" ]]; then
-        RSD_RST_PG_SUDO=1
-    else
-        RSD_RST_PG_SUDO=0
-        RSD_RST_PG_CONN=()
-        [[ -n "$pg_host" ]] && RSD_RST_PG_CONN+=(-h "$pg_host")
-        [[ -n "${RSD_COMMAND_ARGS[pg-port]:-}" ]] && RSD_RST_PG_CONN+=(-p "${RSD_COMMAND_ARGS[pg-port]}")
-        RSD_RST_PG_CONN+=(-U "$pg_user")
+    # Resolve PG connection: auto-detect or use explicit --pg-* flags
+    if ! rsd::l::pg::resolve_from_args \
+        "${RSD_COMMAND_ARGS[pg-host]:-}" \
+        "${RSD_COMMAND_ARGS[pg-port]:-}" \
+        "${RSD_COMMAND_ARGS[pg-user]:-}"; then
+        exit 2
     fi
 
     rsd::r::register_task "timescaledb_restore::resolve_input"
@@ -283,15 +238,13 @@ function rsd::r::timescaledb_restore::resolve_input() {
 
     # ── Connection check ─────────────────────────────────────────────────
     local conn_user
-    conn_user=$(rsd::l::r::rst::psql "SELECT current_user")
+    conn_user=$(rsd::l::pg::psql "SELECT current_user")
     if [[ -z "$conn_user" ]]; then
         rsd::io::error "Cannot connect to PostgreSQL."
-        if [[ ${#RSD_RST_PG_CONN[@]} -eq 0 ]]; then
-            rsd::io::info "Try: --pg-user postgres"
-        fi
+        rsd::io::info "Try providing explicit connection: --pg-user <role> --pg-host localhost"
         return 1
     fi
-    rsd::io::ok "Connected as: ${conn_user}"
+    rsd::io::ok "Connected as: ${conn_user} (method: ${RSD_PG_METHOD})"
 
     # ── Resolve dump file ────────────────────────────────────────────────
     if rsd::l::r::rst::from_exec test -d "$from"; then
@@ -414,7 +367,7 @@ function rsd::r::timescaledb_restore::apply_role() {
     rsd::io::status "Applying role definitions..."
 
     # Execute the role SQL
-    if ! rsd::l::r::rst::pg_exec psql -XAt -f "$RSD_RST_ROLE_FILE" >/dev/null 2>&1; then
+    if ! rsd::l::pg::exec psql -XAt -f "$RSD_RST_ROLE_FILE" >/dev/null 2>&1; then
         rsd::io::error "Failed to apply role SQL: ${RSD_RST_ROLE_FILE}"
         return 1
     fi
@@ -447,7 +400,7 @@ function rsd::r::timescaledb_restore::apply_role() {
         fi
 
         # Set the password
-        if ! rsd::l::r::rst::psql "ALTER ROLE \"${RSD_RST_ROLE_NAME}\" WITH PASSWORD '${RSD_RST_DB_PASSWORD}'"; then
+        if ! rsd::l::pg::psql "ALTER ROLE \"${RSD_RST_ROLE_NAME}\" WITH PASSWORD '${RSD_RST_DB_PASSWORD}'"; then
             rsd::io::error "Failed to set password for role '${RSD_RST_ROLE_NAME}'."
             return 1
         fi
@@ -461,7 +414,7 @@ function rsd::r::timescaledb_restore::apply_role() {
 
 function rsd::r::timescaledb_restore::create_database::pre_check() {
     local db_exists
-    db_exists=$(rsd::l::r::rst::psql \
+    db_exists=$(rsd::l::pg::psql \
         "SELECT 1 FROM pg_database WHERE datname = '${RSD_RST_DB_NAME}'")
 
     if [[ "$db_exists" == "1" ]]; then
@@ -483,17 +436,17 @@ function rsd::r::timescaledb_restore::create_database() {
     # Drop if requested
     if [[ "$RSD_RST_DROP_EXISTING" -eq 1 ]]; then
         local db_exists
-        db_exists=$(rsd::l::r::rst::psql \
+        db_exists=$(rsd::l::pg::psql \
             "SELECT 1 FROM pg_database WHERE datname = '${RSD_RST_DB_NAME}'")
         if [[ "$db_exists" == "1" ]]; then
             rsd::io::status "Dropping existing database '${RSD_RST_DB_NAME}'..."
 
             # Terminate active connections first
-            rsd::l::r::rst::psql \
+            rsd::l::pg::psql \
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${RSD_RST_DB_NAME}' AND pid <> pg_backend_pid()" \
                 >/dev/null 2>&1
 
-            if ! rsd::l::r::rst::pg_exec dropdb "${RSD_RST_DB_NAME}"; then
+            if ! rsd::l::pg::exec dropdb "${RSD_RST_DB_NAME}"; then
                 rsd::io::error "Failed to drop database '${RSD_RST_DB_NAME}'."
                 return 1
             fi
@@ -503,7 +456,7 @@ function rsd::r::timescaledb_restore::create_database() {
 
     rsd::io::status "Creating database '${RSD_RST_DB_NAME}' (owner: ${owner})..."
 
-    if ! rsd::l::r::rst::pg_exec createdb -O "$owner" "$RSD_RST_DB_NAME"; then
+    if ! rsd::l::pg::exec createdb -O "$owner" "$RSD_RST_DB_NAME"; then
         rsd::io::error "Failed to create database '${RSD_RST_DB_NAME}'."
         return 1
     fi
@@ -521,10 +474,10 @@ function rsd::r::timescaledb_restore::restore_database() {
     rsd::io::info "This may take a while for large databases."
 
     # Enable TimescaleDB extension before restore (required for hypertable restore)
-    rsd::l::r::rst::psql "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE" "$RSD_RST_DB_NAME" \
+    rsd::l::pg::psql "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE" "$RSD_RST_DB_NAME" \
         >/dev/null 2>&1
 
-    if ! rsd::l::r::rst::pg_exec pg_restore \
+    if ! rsd::l::pg::exec pg_restore \
         --dbname="$RSD_RST_DB_NAME" \
         --no-owner \
         --no-privileges \
@@ -546,14 +499,14 @@ function rsd::r::timescaledb_restore::verify_restore() {
 
     # Table count
     local table_count
-    table_count=$(rsd::l::r::rst::psql \
+    table_count=$(rsd::l::pg::psql \
         "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'" \
         "$RSD_RST_DB_NAME")
     rsd::io::ok "Tables in 'public': ${table_count:-0}"
 
     # TimescaleDB hypertables
     local hypertable_count
-    hypertable_count=$(rsd::l::r::rst::psql \
+    hypertable_count=$(rsd::l::pg::psql \
         "SELECT count(*) FROM timescaledb_information.hypertables" \
         "$RSD_RST_DB_NAME" 2>/dev/null)
     if [[ -n "$hypertable_count" ]]; then
@@ -562,7 +515,7 @@ function rsd::r::timescaledb_restore::verify_restore() {
 
     # TimescaleDB extension version
     local ts_version
-    ts_version=$(rsd::l::r::rst::psql \
+    ts_version=$(rsd::l::pg::psql \
         "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'" \
         "$RSD_RST_DB_NAME" 2>/dev/null)
     if [[ -n "$ts_version" ]]; then

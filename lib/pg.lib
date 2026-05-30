@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# PostgreSQL Connection Resolution Library
+# ==============================================================================
+# namespace rsd::l::pg::
+#
+# Provides auto-detection of PostgreSQL connection methods and unified
+# execution wrappers for psql, pg_dump, pg_restore, and pg_dumpall.
+#
+# DESIGN RATIONALE
+# ----------------
+# PostgreSQL can be reached via multiple auth paths (peer, sudo, TCP/SCRAM,
+# trust). The correct method depends on the target host's pg_hba.conf,
+# available users, and whether sudo is configured. Rather than requiring
+# the user to know which method works (violating Principle 6: User's Soft
+# Ignorance), this library probes the target and discovers the working
+# connection method automatically.
+#
+# PROBE CASCADE
+# -------------
+# When no --pg-* CLI flags are provided, resolve() probes in order:
+#   1. sudo -u postgres  (peer auth — RSD-installed default)
+#   2. TCP localhost as postgres  (SCRAM/trust)
+#   3. Current OS user peer  (no sudo, local socket)
+#   4. TCP localhost as current user
+#
+# The first successful probe wins and is cached for the session.
+# CLI overrides (--pg-host, --pg-port, --pg-user) skip probing entirely.
+#
+# SESSION CACHE
+# -------------
+# After resolve() succeeds, RSD_PG_RESOLVED=1 prevents redundant probes.
+# Multiple recipe tasks calling psql() within the same recipe run share
+# the resolved method without additional SSH round-trips.
+#
+# @see README.md — Principle 3: Environment Detection
+# @see README.md — Principle 6: User's Soft Ignorance
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+if [[ "$RSD_PG_LIB" == "1" ]]; then
+    return 0
+fi
+RSD_PG_LIB=1
+RSD_PG_LIB_VERSION="0.1.0"
+
+# Load dependencies
+[[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
+[[ "$RSD_IO_LIB" != "1" ]]     && source "$(rsd::get_libdir_file lib/io.lib)"
+
+# ==============================================================================
+# Globals
+# ==============================================================================
+
+# Resolved connection method: "sudo" | "tcp" | "peer" | "cli"
+#   sudo — exec_sudo("postgres") + psql via peer auth
+#   tcp  — psql -h localhost [-U user] via TCP
+#   peer — psql via local socket as current OS user
+#   cli  — explicit CLI flags (no probing)
+declare -g RSD_PG_METHOD=""
+
+# When METHOD=sudo, the OS user to sudo into (typically "postgres").
+declare -g RSD_PG_SUDO_USER=""
+
+# Connection args array for psql/pg_dump/pg_restore. Built by resolve().
+# Empty when METHOD=sudo (connection happens via sudo peer, no -h/-U needed).
+declare -g -a RSD_PG_CONN=()
+
+# Session cache flag. 1 after resolve() succeeds; skips re-probing.
+declare -g RSD_PG_RESOLVED=0
+
+# ==============================================================================
+# Connection Resolution
+# ==============================================================================
+
+# Probe the target for a working PostgreSQL connection method.
+# Caches the result — safe to call multiple times.
+#
+# @return int 0 on success, 1 if all probes fail.
+function rsd::l::pg::resolve() {
+    # Session cache: skip if already resolved
+    if [[ "$RSD_PG_RESOLVED" -eq 1 ]]; then
+        return 0
+    fi
+
+    rsd::debug "pg::resolve: probing PostgreSQL connection methods..." 10
+
+    # Probe 1: sudo -u postgres (peer auth — RSD-installed default)
+    if rsd::l::pg::_probe_sudo "postgres"; then
+        RSD_PG_METHOD="sudo"
+        RSD_PG_SUDO_USER="postgres"
+        RSD_PG_CONN=()
+        RSD_PG_RESOLVED=1
+        rsd::debug "pg::resolve: ✓ Method=sudo (sudo -u postgres, peer auth)" 10
+        return 0
+    fi
+
+    # Probe 2: TCP localhost as postgres (password/trust auth)
+    if rsd::l::pg::_probe_tcp "localhost" "postgres"; then
+        RSD_PG_METHOD="tcp"
+        RSD_PG_SUDO_USER=""
+        RSD_PG_CONN=(-h localhost -U postgres)
+        RSD_PG_RESOLVED=1
+        rsd::debug "pg::resolve: ✓ Method=tcp (localhost, user=postgres)" 10
+        return 0
+    fi
+
+    # Probe 3: Current OS user via local socket (peer auth)
+    if rsd::l::pg::_probe_peer; then
+        RSD_PG_METHOD="peer"
+        RSD_PG_SUDO_USER=""
+        RSD_PG_CONN=()
+        RSD_PG_RESOLVED=1
+        rsd::debug "pg::resolve: ✓ Method=peer (current OS user)" 10
+        return 0
+    fi
+
+    # Probe 4: TCP localhost as current OS user
+    if rsd::l::pg::_probe_tcp "localhost" ""; then
+        RSD_PG_METHOD="tcp"
+        RSD_PG_SUDO_USER=""
+        RSD_PG_CONN=(-h localhost)
+        RSD_PG_RESOLVED=1
+        rsd::debug "pg::resolve: ✓ Method=tcp (localhost, current user)" 10
+        return 0
+    fi
+
+    # All probes failed
+    rsd::io::error "Cannot connect to PostgreSQL. All connection methods failed."
+    rsd::io::info "Probed: sudo -u postgres, TCP localhost:5432, peer auth, TCP as current user."
+    rsd::io::info "Options:"
+    rsd::io::info "  1. Provide explicit connection: --pg-host <host> --pg-user <user>"
+    rsd::io::info "  2. Check that PostgreSQL is running: systemctl status postgresql"
+    rsd::io::info "  3. Verify pg_hba.conf allows the connection method."
+    return 1
+}
+
+# Resolve connection from explicit CLI arguments.
+# If any --pg-* argument is provided, use explicit mode (METHOD=cli).
+# If none are provided, fall through to auto-detection via resolve().
+#
+# @param string $1 pg-host value (may be empty).
+# @param string $2 pg-port value (may be empty).
+# @param string $3 pg-user value (may be empty).
+# @return int 0 on success, 1 on failure.
+function rsd::l::pg::resolve_from_args() {
+    local pg_host="${1:-}"
+    local pg_port="${2:-}"
+    local pg_user="${3:-}"
+
+    # If no explicit args provided, auto-detect
+    if [[ -z "$pg_host" && -z "$pg_port" && -z "$pg_user" ]]; then
+        rsd::l::pg::resolve
+        return $?
+    fi
+
+    # Explicit mode: build connection args from CLI, skip probing
+    RSD_PG_METHOD="cli"
+    RSD_PG_SUDO_USER=""
+    RSD_PG_CONN=()
+    [[ -n "$pg_host" ]] && RSD_PG_CONN+=(-h "$pg_host")
+    [[ -n "$pg_port" ]] && RSD_PG_CONN+=(-p "$pg_port")
+    [[ -n "$pg_user" ]] && RSD_PG_CONN+=(-U "$pg_user")
+    RSD_PG_RESOLVED=1
+
+    rsd::debug "pg::resolve_from_args: Method=cli (${RSD_PG_CONN[*]})" 10
+    return 0
+}
+
+# ==============================================================================
+# Execution Wrappers
+# ==============================================================================
+
+# Execute a SQL statement via psql on the target, routing through the
+# resolved connection method.
+#
+# @param string $1 SQL to execute.
+# @param string $2 Optional: database name.
+# @return int psql exit code. Stdout contains query results.
+function rsd::l::pg::psql() {
+    local sql="$1"
+    local db="${2:-}"
+    local -a db_args=()
+    [[ -n "$db" ]] && db_args=(-d "$db")
+
+    if [[ "$RSD_PG_METHOD" == "sudo" ]]; then
+        printf '%s\n' "$sql" | \
+            rsd::l::target::exec_sudo "$RSD_PG_SUDO_USER" psql -XAt "${db_args[@]}" -f - 2>/dev/null
+    else
+        printf '%s\n' "$sql" | \
+            rsd::l::target::exec psql -XAt "${RSD_PG_CONN[@]}" "${db_args[@]}" -f - 2>/dev/null
+    fi
+}
+
+# Execute a PostgreSQL tool (pg_dump, pg_restore, pg_dumpall, etc.)
+# with the resolved connection parameters.
+#
+# @param string $1 The tool command (e.g., pg_dump, pg_restore).
+# @param string $@ Additional arguments.
+# @return int Exit code of the tool.
+function rsd::l::pg::exec() {
+    local cmd="$1"
+    shift
+
+    if [[ "$RSD_PG_METHOD" == "sudo" ]]; then
+        rsd::l::target::exec_sudo "$RSD_PG_SUDO_USER" "$cmd" "$@"
+    else
+        rsd::l::target::exec "$cmd" "${RSD_PG_CONN[@]}" "$@"
+    fi
+}
+
+# ==============================================================================
+# Probe Internals
+# ==============================================================================
+
+# Probe via sudo -u <user> peer auth.
+# @param string $1 OS user to sudo into.
+# @return int 0 if connection succeeds.
+function rsd::l::pg::_probe_sudo() {
+    local user="$1"
+    rsd::debug "pg::_probe_sudo: trying sudo -u $user psql..." 15
+    printf '%s\n' "SELECT 1" | \
+        rsd::l::target::exec_sudo "$user" psql -XAt -f - 2>/dev/null | grep -q '^1$'
+}
+
+# Probe via TCP connection.
+# @param string $1 Host to connect to.
+# @param string $2 User (empty = current OS user).
+# @return int 0 if connection succeeds.
+function rsd::l::pg::_probe_tcp() {
+    local host="$1"
+    local user="$2"
+    local -a args=(-h "$host")
+    [[ -n "$user" ]] && args+=(-U "$user")
+
+    rsd::debug "pg::_probe_tcp: trying psql ${args[*]}..." 15
+    printf '%s\n' "SELECT 1" | \
+        rsd::l::target::exec psql -XAt "${args[@]}" -f - 2>/dev/null | grep -q '^1$'
+}
+
+# Probe via local socket as current OS user (peer auth, no sudo).
+# @return int 0 if connection succeeds.
+function rsd::l::pg::_probe_peer() {
+    rsd::debug "pg::_probe_peer: trying psql as current user (local socket)..." 15
+    printf '%s\n' "SELECT 1" | \
+        rsd::l::target::exec psql -XAt -f - 2>/dev/null | grep -q '^1$'
+}
