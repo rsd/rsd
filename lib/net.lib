@@ -10,7 +10,7 @@
   fi
 
 RSD_NET_LIB=1
-RSD_NET_LIB_VERSION="0.0.2"
+RSD_NET_LIB_VERSION="0.0.3"
 
 # Get the hostname of the machine
 # Fallsback to hostname if necessary
