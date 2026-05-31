@@ -9,19 +9,19 @@
 # rsd::l::target::exec_sudo, so they work transparently on both local
 # and remote targets.
 #
+# Scope:
+#   System (default): /etc/systemd/system/, requires sudo for mutations.
+#   User (--user):    ~/.config/systemd/user/, no sudo needed.
+#   Controlled by the RSD_SYSTEMD_SCOPE global ("system" | "user").
+#
 # Dependencies:
 #   - target.lib  (loaded automatically by the RSD framework)
 #   - sudo.lib    (loaded on-demand by exec_sudo for local targets)
 #   - remote.lib  (loaded by the framework when $RSD_REMOTE_TARGET is set)
 #   - io.lib      (loaded for structured messaging)
 #
-# All functions that mutate state require the 'systemctl' binary on the
-# target host. Query functions also need 'systemctl'. Journal functions
-# need 'journalctl'. Callers should verify availability with
-# rsd::l::target::has_bin before invoking.
-#
-# NOTE: Template units (name@.service) are NOT supported in v0.1.0.
-#       Support is planned for v0.2.0.
+# NOTE: Template units (name@.service) are NOT supported in v0.2.0.
+#       Support is planned for a future milestone.
 #
 # namespace rsd::l::systemd::
 #
@@ -38,13 +38,58 @@ if [[ "$RSD_SYSTEMD_LIB" == "1" ]]; then
     return 0
 fi
 RSD_SYSTEMD_LIB=1
-RSD_SYSTEMD_LIB_VERSION="0.1.1"
+RSD_SYSTEMD_LIB_VERSION="0.2.0"
 
 # Load target-aware dispatch primitives
 [[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
 
 # Load structured IO messaging
 [[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
+
+# ==============================================================================
+# Scope Management
+# ==============================================================================
+
+# Active scope: "system" (default) or "user".
+# Set by callers (typically the command module) before invoking library functions.
+# System scope: unit files in /etc/systemd/system/, lifecycle via sudo.
+# User scope:   unit files in ~/.config/systemd/user/, no sudo.
+declare -g RSD_SYSTEMD_SCOPE="system"
+
+# Admin-managed system unit file directory.
+declare -g RSD_SYSTEMD_UNIT_DIR="/etc/systemd/system"
+
+# ==============================================================================
+# Internal Helpers
+# ==============================================================================
+# Route systemctl calls with correct sudo/--user flags based on scope.
+# NOT part of the public API — callers use the Tier 1/2/3/4 functions.
+
+# Execute a systemctl query (read-only, no sudo needed for either scope).
+# Adds --user flag when scope is user.
+#
+# @param string $@ Arguments to systemctl.
+# @return int Exit code of systemctl.
+function rsd::l::systemd::_ctl() {
+    if [[ "$RSD_SYSTEMD_SCOPE" == "user" ]]; then
+        rsd::l::target::exec systemctl --user "$@"
+    else
+        rsd::l::target::exec systemctl "$@"
+    fi
+}
+
+# Execute a systemctl mutation (sudo for system scope, plain for user scope).
+# Adds --user flag when scope is user.
+#
+# @param string $@ Arguments to systemctl.
+# @return int Exit code of systemctl.
+function rsd::l::systemd::_ctl_sudo() {
+    if [[ "$RSD_SYSTEMD_SCOPE" == "user" ]]; then
+        rsd::l::target::exec systemctl --user "$@"
+    else
+        rsd::l::target::exec_sudo "" systemctl "$@"
+    fi
+}
 
 # ==============================================================================
 # Tier 0 — Validation
@@ -54,7 +99,7 @@ RSD_SYSTEMD_LIB_VERSION="0.1.1"
 
 # Validate a systemd unit name against the freedesktop.org naming rules.
 # Checks: suffix, character whitelist, empty prefix, leading dot, length,
-# and rejects template units (deferred to v0.2.0).
+# and rejects template units (deferred to a future milestone).
 #
 # @param string $1 The unit name to validate (e.g., "nginx.service").
 # @return int 0 if valid, 2 if invalid (Bad Usage exit code per §6).
@@ -108,10 +153,10 @@ function rsd::l::systemd::validate_unit_name() {
         return 2
     fi
 
-    # Template guard — deferred to v0.2.0
+    # Template guard — deferred
     if [[ "$prefix" == *@* ]]; then
-        rsd::io::error "Template units (name@.suffix) are not supported in v0.1.0."
-        rsd::io::info  "Support planned for v0.2.0."
+        rsd::io::error "Template units (name@.suffix) are not yet supported."
+        rsd::io::info  "Support planned for a future release."
         return 2
     fi
 
@@ -148,8 +193,7 @@ function rsd::l::systemd::validate_unit_refs() {
 # ==============================================================================
 
 # Check if the target host is running systemd as its init system.
-# Probes PID 1's comm to verify. Use as a guard before calling
-# any other systemd function on unknown hosts.
+# Probes /run/systemd/system directory existence.
 #
 # @return int 0 if systemd, 1 if not.
 function rsd::l::systemd::is_systemd() {
@@ -162,7 +206,7 @@ function rsd::l::systemd::is_systemd() {
 # @return int 0 if active, non-zero otherwise.
 function rsd::l::systemd::is_active() {
     local unit="$1"
-    rsd::l::target::exec systemctl is-active --quiet "$unit"
+    rsd::l::systemd::_ctl is-active --quiet "$unit"
 }
 
 # Check if a systemd unit is enabled (starts at boot).
@@ -171,7 +215,7 @@ function rsd::l::systemd::is_active() {
 # @return int 0 if enabled, non-zero otherwise.
 function rsd::l::systemd::is_enabled() {
     local unit="$1"
-    rsd::l::target::exec systemctl is-enabled --quiet "$unit"
+    rsd::l::systemd::_ctl is-enabled --quiet "$unit"
 }
 
 # Capture the full status output of a systemd unit into a nameref variable.
@@ -183,7 +227,7 @@ function rsd::l::systemd::get_status() {
     local _out_var="$1"
     local unit="$2"
     declare -n _r_status="$_out_var"
-    _r_status=$(rsd::l::target::exec systemctl status --no-pager "$unit" 2>&1)
+    _r_status=$(rsd::l::systemd::_ctl status --no-pager "$unit" 2>&1)
 }
 
 # Read a single machine-readable property from a systemd unit.
@@ -198,7 +242,7 @@ function rsd::l::systemd::get_property() {
     local unit="$2"
     local prop="$3"
     declare -n _r_prop="$_out_var"
-    _r_prop=$(rsd::l::target::exec systemctl show -p "$prop" --value "$unit" 2>/dev/null)
+    _r_prop=$(rsd::l::systemd::_ctl show -p "$prop" --value "$unit" 2>/dev/null)
 }
 
 # Check if a unit file exists on the target (regardless of active state).
@@ -208,11 +252,11 @@ function rsd::l::systemd::get_property() {
 # @return int 0 if exists, non-zero if not.
 function rsd::l::systemd::unit_exists() {
     local unit="$1"
-    rsd::l::target::exec systemctl cat "$unit" &>/dev/null
+    rsd::l::systemd::_ctl cat "$unit" &>/dev/null
 }
 
 # ==============================================================================
-# Tier 2 — Lifecycle (sudo)
+# Tier 2 — Lifecycle (sudo for system, plain for user)
 # ==============================================================================
 
 # Start a systemd unit.
@@ -221,7 +265,7 @@ function rsd::l::systemd::unit_exists() {
 # @return int Exit code of systemctl.
 function rsd::l::systemd::start() {
     local unit="$1"
-    rsd::l::target::exec_sudo "" systemctl start "$unit"
+    rsd::l::systemd::_ctl_sudo start "$unit"
 }
 
 # Stop a systemd unit.
@@ -230,7 +274,7 @@ function rsd::l::systemd::start() {
 # @return int Exit code of systemctl.
 function rsd::l::systemd::stop() {
     local unit="$1"
-    rsd::l::target::exec_sudo "" systemctl stop "$unit"
+    rsd::l::systemd::_ctl_sudo stop "$unit"
 }
 
 # Restart a systemd unit.
@@ -239,7 +283,7 @@ function rsd::l::systemd::stop() {
 # @return int Exit code of systemctl.
 function rsd::l::systemd::restart() {
     local unit="$1"
-    rsd::l::target::exec_sudo "" systemctl restart "$unit"
+    rsd::l::systemd::_ctl_sudo restart "$unit"
 }
 
 # Reload a systemd unit's configuration (sends SIGHUP).
@@ -249,7 +293,7 @@ function rsd::l::systemd::restart() {
 # @return int Exit code of systemctl.
 function rsd::l::systemd::reload() {
     local unit="$1"
-    rsd::l::target::exec_sudo "" systemctl reload "$unit"
+    rsd::l::systemd::_ctl_sudo reload "$unit"
 }
 
 # Enable a systemd unit to start at boot.
@@ -263,9 +307,9 @@ function rsd::l::systemd::enable() {
     local start_now="${2:-1}"
 
     if [[ "$start_now" -eq 1 ]]; then
-        rsd::l::target::exec_sudo "" systemctl enable --now "$unit"
+        rsd::l::systemd::_ctl_sudo enable --now "$unit"
     else
-        rsd::l::target::exec_sudo "" systemctl enable "$unit"
+        rsd::l::systemd::_ctl_sudo enable "$unit"
     fi
 }
 
@@ -275,31 +319,48 @@ function rsd::l::systemd::enable() {
 # @return int Exit code of systemctl.
 function rsd::l::systemd::disable() {
     local unit="$1"
-    rsd::l::target::exec_sudo "" systemctl disable "$unit"
+    rsd::l::systemd::_ctl_sudo disable "$unit"
 }
 
 # Reload the systemd daemon to pick up new or changed unit files.
-# Must be called after writing or modifying files in /etc/systemd/system/.
+# Must be called after writing or modifying files in the unit directory.
 #
 # @return int Exit code of systemctl.
 function rsd::l::systemd::daemon_reload() {
-    rsd::l::target::exec_sudo "" systemctl daemon-reload
+    rsd::l::systemd::_ctl_sudo daemon-reload
 }
 
 # ==============================================================================
 # Tier 3 — Unit File Creation
 # ==============================================================================
 
-# Admin-managed unit file directory.
-declare -g RSD_SYSTEMD_UNIT_DIR="/etc/systemd/system"
-
-# Return the canonical path for an admin-managed unit file.
+# Return the canonical path for a unit file, respecting scope.
+# System: /etc/systemd/system/<unit>
+# User:   ~/.config/systemd/user/<unit>
+#
+# For user scope on remote targets, the tilde is left literal for
+# display purposes. Use _resolve_user_unit_dir() for actual file ops.
 #
 # @param string $1 Unit name (e.g., "myapp.service").
-# @return stdout Absolute path (e.g., "/etc/systemd/system/myapp.service").
+# @return stdout Absolute path.
 function rsd::l::systemd::unit_path() {
     local unit="$1"
-    echo "${RSD_SYSTEMD_UNIT_DIR}/${unit}"
+    if [[ "$RSD_SYSTEMD_SCOPE" == "user" ]]; then
+        echo "~/.config/systemd/user/${unit}"
+    else
+        echo "${RSD_SYSTEMD_UNIT_DIR}/${unit}"
+    fi
+}
+
+# Resolve the user unit directory on the target host.
+# Runs a remote-safe $HOME expansion via sh -c.
+#
+# @return stdout Absolute path to ~/.config/systemd/user on the target.
+function rsd::l::systemd::_resolve_user_unit_dir() {
+    local dir
+    dir=$(rsd::l::target::exec sh -c 'echo "$HOME/.config/systemd/user"')
+    bash::trim dir
+    echo "$dir"
 }
 
 # Generate a .service unit file content from parameters.
@@ -320,7 +381,7 @@ function rsd::l::systemd::generate_service() {
     local unit_name="$2"
 
     local svc_type="${_params[type]:-simple}"
-    local description="${_params[description]:-RSD-managed service: ${unit_name}}"
+    local description="${_params[description]:-RSD service: ${unit_name}}"
     local exec_start="${_params[exec]}"
     local user="${_params[user]:-}"
     local group="${_params[group]:-}"
@@ -357,8 +418,13 @@ function rsd::l::systemd::generate_service() {
         esac
     fi
 
+    # Scope-aware WantedBy default
     if [[ -z "$wanted_by" ]]; then
-        wanted_by="multi-user.target"
+        if [[ "$RSD_SYSTEMD_SCOPE" == "user" ]]; then
+            wanted_by="default.target"
+        else
+            wanted_by="multi-user.target"
+        fi
     fi
 
     # Comma → space conversion for multi-value directives
@@ -413,12 +479,10 @@ function rsd::l::systemd::generate_service() {
     content+="StandardOutput=journal"$'\n'
     content+="StandardError=journal"$'\n'
 
-    # [Install] section — only if there is a WantedBy target
-    if [[ -n "$wanted_by" ]]; then
-        content+=""$'\n'
-        content+="[Install]"$'\n'
-        content+="WantedBy=${wanted_by}"$'\n'
-    fi
+    # [Install] section
+    content+=""$'\n'
+    content+="[Install]"$'\n'
+    content+="WantedBy=${wanted_by}"$'\n'
 
     printf '%s' "$content"
 }
@@ -433,14 +497,23 @@ function rsd::l::systemd::generate_timer() {
     declare -n _tparams="$1"
     local timer_name="$2"
 
-    local description="${_tparams[description]:-RSD-managed timer: ${timer_name}}"
+    local description="${_tparams[description]:-RSD timer: ${timer_name}}"
     local on_calendar="${_tparams[on_calendar]:-}"
     local on_boot_sec="${_tparams[on_boot_sec]:-}"
     local on_unit_active_sec="${_tparams[on_unit_active_sec]:-}"
     local persistent="${_tparams[persistent]:-}"
     local after="${_tparams[after]:-}"
     local wants="${_tparams[wants]:-}"
-    local wanted_by="${_tparams[wanted_by]:-timers.target}"
+    local wanted_by="${_tparams[wanted_by]:-}"
+
+    # Scope-aware WantedBy default
+    if [[ -z "$wanted_by" ]]; then
+        if [[ "$RSD_SYSTEMD_SCOPE" == "user" ]]; then
+            wanted_by="default.target"
+        else
+            wanted_by="timers.target"
+        fi
+    fi
 
     # Resolve the companion service unit name
     local timer_basename="${timer_name%.timer}"
@@ -479,8 +552,8 @@ function rsd::l::systemd::generate_timer() {
     printf '%s' "$content"
 }
 
-# Write a unit file to /etc/systemd/system/, daemon-reload, and
-# optionally enable + start.
+# Write a unit file, daemon-reload, and optionally enable + start.
+# Routes through sudo for system scope, plain exec for user scope.
 #
 # Uses the same temp-file-then-move pattern as apt.lib::write_source
 # to safely transport multi-line content through SSH+sudo.
@@ -501,18 +574,25 @@ function rsd::l::systemd::install_unit() {
         return 2
     fi
 
-    local dest
-    dest=$(rsd::l::systemd::unit_path "$unit_name")
-
     # Stage through secure temp file
     local tmpfile
     tmpfile=$(rsd::l::target::mktemp "rsd-unit.XXXXXX") || return 14
 
     printf '%s\n' "$content" | rsd::l::target::exec tee "$tmpfile" >/dev/null
 
-    # Move to destination with sudo
-    rsd::l::target::exec_sudo "" mv "$tmpfile" "$dest"
-    rsd::l::target::exec_sudo "" chmod 0644 "$dest"
+    if [[ "$RSD_SYSTEMD_SCOPE" == "user" ]]; then
+        # User scope: resolve target HOME, create dir, move without sudo
+        local user_dir
+        user_dir=$(rsd::l::systemd::_resolve_user_unit_dir)
+        rsd::l::target::exec mkdir -p "$user_dir"
+        rsd::l::target::exec mv "$tmpfile" "${user_dir}/${unit_name}"
+        rsd::l::target::exec chmod 0644 "${user_dir}/${unit_name}"
+    else
+        # System scope: move to /etc/systemd/system/ with sudo
+        local dest="${RSD_SYSTEMD_UNIT_DIR}/${unit_name}"
+        rsd::l::target::exec_sudo "" mv "$tmpfile" "$dest"
+        rsd::l::target::exec_sudo "" chmod 0644 "$dest"
+    fi
 
     # Reload daemon to pick up the new file
     rsd::l::systemd::daemon_reload
@@ -540,10 +620,15 @@ function rsd::l::systemd::remove_unit() {
     rsd::l::systemd::stop "$unit_name" 2>/dev/null
     rsd::l::systemd::disable "$unit_name" 2>/dev/null
 
-    local dest
-    dest=$(rsd::l::systemd::unit_path "$unit_name")
+    if [[ "$RSD_SYSTEMD_SCOPE" == "user" ]]; then
+        local user_dir
+        user_dir=$(rsd::l::systemd::_resolve_user_unit_dir)
+        rsd::l::target::exec rm -f "${user_dir}/${unit_name}"
+    else
+        local dest="${RSD_SYSTEMD_UNIT_DIR}/${unit_name}"
+        rsd::l::target::exec_sudo "" rm -f "$dest"
+    fi
 
-    rsd::l::target::exec_sudo "" rm -f "$dest"
     rsd::l::systemd::daemon_reload
 
     return 0
@@ -555,6 +640,7 @@ function rsd::l::systemd::remove_unit() {
 
 # Fetch recent journal logs for a unit.
 # Always uses --no-pager for non-interactive output.
+# User scope uses --user-unit instead of -u.
 #
 # @param string $1 Unit name.
 # @param int    $2 Number of lines (default: 50).
@@ -566,11 +652,16 @@ function rsd::l::systemd::logs() {
     local since="${3:-}"
 
     local -a args=(
-        "-u" "$unit"
         "--no-pager"
         "-n" "$lines"
         "-o" "short-iso"
     )
+
+    if [[ "$RSD_SYSTEMD_SCOPE" == "user" ]]; then
+        args+=("--user-unit" "$unit")
+    else
+        args+=("-u" "$unit")
+    fi
 
     if [[ -n "$since" ]]; then
         args+=("--since" "$since")

@@ -16,6 +16,26 @@ Two components:
 Both route through `target.lib`, so all operations work transparently
 on local and remote targets.
 
+## Scope: System vs User
+
+All actions support a `--user` flag to operate on user-scoped units:
+
+| | System (default) | User (`--user`) |
+|--|------------------|-----------------|
+| **Unit directory** | `/etc/systemd/system/` | `~/.config/systemd/user/` |
+| **Mutations** | via `sudo` | no sudo |
+| **Default WantedBy** | `multi-user.target` | `default.target` |
+| **Journal flag** | `-u` | `--user-unit` |
+| **systemctl flag** | *(none)* | `--user` |
+
+```bash
+# System-level (default) — requires sudo
+rsd @prod systemd create myapp.service --exec "/usr/bin/myapp"
+
+# User-level — no sudo needed
+rsd systemd --user create myapp.service --exec "/usr/bin/myapp"
+```
+
 ## Quick Reference
 
 ```bash
@@ -24,14 +44,18 @@ rsd systemd status nginx.service
 rsd systemd logs nginx.service -n 100
 rsd @prod systemd status nginx.service
 
+# User-scope query
+rsd systemd --user status myapp.service
+
 # Lifecycle
 rsd systemd enable nginx.service
+rsd systemd --user enable myapp.service
 rsd systemd disable nginx.service
 
 # Create a long-running service
 rsd systemd create myapp.service \
     --exec "/usr/bin/node /var/www/app/server.js" \
-    --user www-data \
+    --run-as www-data \
     --workdir /var/www/app \
     --description "My Node.js Application"
 
@@ -72,7 +96,8 @@ rsd systemd logs nginx.service --since "1 hour ago"
 
 ### `create <unit> --exec <cmd> [options]`
 
-Generates and installs a unit file to `/etc/systemd/system/`.
+Generates and installs a unit file. System scope writes to
+`/etc/systemd/system/`, user scope writes to `~/.config/systemd/user/`.
 Auto-detects `.service` vs `.timer` from the unit name suffix.
 
 After writing: runs `daemon-reload`, then enables and starts the unit
@@ -85,7 +110,7 @@ After writing: runs `daemon-reload`, then enables and starts the unit
 | `--exec <cmd>` | ExecStart command | *(required)* |
 | `--type <type>` | simple, forking, oneshot, notify | simple |
 | `--description <text>` | Unit description | auto-generated |
-| `--user <user>` | Run as user | root |
+| `--run-as <user>` | Run as user (User= directive) | root |
 | `--group <group>` | Run as group | inherited |
 | `--workdir <path>` | Working directory | none |
 | `--restart <policy>` | no, on-failure, always, on-abnormal | per-type |
@@ -102,7 +127,7 @@ After writing: runs `daemon-reload`, then enables and starts the unit
 | `--wants <units>` | Wants= | none |
 | `--requires <units>` | Requires= | none |
 | `--before <units>` | Before= | none |
-| `--wanted-by <targets>` | WantedBy= | multi-user.target (except oneshot) |
+| `--wanted-by <targets>` | WantedBy= | multi-user.target (system) / default.target (user) |
 
 Multiple units are comma-separated:
 
@@ -124,6 +149,7 @@ Multiple units are comma-separated:
 
 | Flag | Effect |
 |------|--------|
+| `--user` | User scope (`~/.config/systemd/user/`) |
 | `--no-enable` | Don't enable or start after creation |
 | `--no-start` | Enable at boot but don't start now |
 
@@ -137,17 +163,17 @@ Disables the unit from starting at boot.
 
 ### `remove <unit>`
 
-Stops the unit, disables it, deletes the file from
-`/etc/systemd/system/`, and runs `daemon-reload`.
+Stops the unit, disables it, deletes the file from the unit directory,
+and runs `daemon-reload`.
 
 ## Smart Defaults by Service Type
 
 | Type | Default After= | Default Restart= | Default WantedBy= |
 |------|---------------|------------------|-------------------|
-| simple | network.target | on-failure | multi-user.target |
-| forking | network.target | on-failure | multi-user.target |
-| notify | network.target | on-failure | multi-user.target |
-| oneshot | *(none)* | no | *(none)* |
+| simple | network.target | on-failure | multi-user.target / default.target |
+| forking | network.target | on-failure | multi-user.target / default.target |
+| notify | network.target | on-failure | multi-user.target / default.target |
+| oneshot | *(none)* | no | multi-user.target / default.target |
 
 Specifying `--after` **replaces** the default — it does not append.
 
@@ -160,7 +186,7 @@ All unit names are validated against the
 - Prefix allows: `[a-zA-Z0-9:._\-\\]`
 - Cannot start with a dot
 - Maximum 255 characters
-- Template units (`name@.service`) rejected in v0.1.0
+- Template units (`name@.service`) not yet supported
 
 Dependency references (`--after`, `--wants`, etc.) are also validated.
 
@@ -196,11 +222,14 @@ For programmatic use in recipes and other libraries:
 # Load the library
 [[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
 
+# Set scope (default: system)
+RSD_SYSTEMD_SCOPE="user"   # or "system"
+
 # Query
 rsd::l::systemd::is_active "nginx.service"
 rsd::l::systemd::is_enabled "nginx.service"
 
-# Lifecycle
+# Lifecycle (sudo for system scope, plain for user scope)
 rsd::l::systemd::restart "nginx.service"
 rsd::l::systemd::enable "nginx.service"
 
@@ -224,7 +253,7 @@ rsd::l::systemd::logs "nginx.service" 100 "1 hour ago"
 
 ## Roadmap
 
-### v0.2.0 — Template Units
+### Template Units
 
 Template units (`myapp@.service`) support parameterized instances:
 

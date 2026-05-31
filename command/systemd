@@ -8,6 +8,10 @@
 # Supports querying, creating, enabling, disabling, and removing
 # service and timer unit files on local and remote targets.
 #
+# Scope:
+#   System (default): /etc/systemd/system/, requires sudo for mutations.
+#   User (--user):    ~/.config/systemd/user/, no sudo needed.
+#
 # Usage:
 #   rsd systemd status <unit>
 #   rsd systemd logs <unit> [-n 50] [--since "1 hour ago"]
@@ -16,9 +20,13 @@
 #   rsd systemd disable <unit>
 #   rsd systemd remove <unit>
 #
+# User-scope:
+#   rsd systemd --user status <unit>
+#   rsd systemd --user create <unit> --exec <cmd> [options]
+#
 # Remote:
 #   rsd @target systemd status <unit>
-#   rsd @target systemd create <unit> --exec <cmd> [options]
+#   rsd @target systemd --user create <unit> --exec <cmd> [options]
 #
 # @see docs/systemd.md
 # @see AGENTS.md
@@ -32,7 +40,7 @@ fi
 [[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
 
 RSD_C_SYSTEMD_SHORT_DESC="Systemd Service Management"
-RSD_C_SYSTEMD_VERSION="0.1.1"
+RSD_C_SYSTEMD_VERSION="0.2.0"
 
 # Command is remote-aware (Mode A — local orchestration)
 RSD_C_SYSTEMD_REMOTE_AWARE=1
@@ -46,7 +54,7 @@ declare -g -A RSD_C_SYSTEMD_CREATE_ARGS_PARAM=(
     ["exec"]=1
     ["type"]=1
     ["description"]=1
-    ["user"]=1
+    ["run-as"]=1
     ["group"]=1
     ["workdir"]=1
     ["restart"]=1
@@ -60,6 +68,8 @@ declare -g -A RSD_C_SYSTEMD_CREATE_ARGS_PARAM=(
     ["requires"]=1
     ["before"]=1
     ["wanted-by"]=1
+    # Scope
+    ["user"]=0
     # Flags
     ["no-enable"]=0
     ["no-start"]=0
@@ -74,6 +84,7 @@ declare -g -A RSD_C_SYSTEMD_CREATE_ARGS_PARAM=(
 declare -g -A RSD_C_SYSTEMD_LOGS_ARGS_PARAM=(
     ["n"]=1
     ["since"]=1
+    ["user"]=0
 )
 
 # Top-level arg config — must mirror all sub-action options so the
@@ -84,7 +95,7 @@ declare -g -A RSD_C_SYSTEMD_ARGS_PARAM=(
     ["exec"]=1
     ["type"]=1
     ["description"]=1
-    ["user"]=1
+    ["run-as"]=1
     ["group"]=1
     ["workdir"]=1
     ["restart"]=1
@@ -98,6 +109,8 @@ declare -g -A RSD_C_SYSTEMD_ARGS_PARAM=(
     ["requires"]=1
     ["before"]=1
     ["wanted-by"]=1
+    # Scope
+    ["user"]=0
     # Flags
     ["no-enable"]=0
     ["no-start"]=0
@@ -111,6 +124,30 @@ declare -g -A RSD_C_SYSTEMD_ARGS_PARAM=(
     ["n"]=1
     ["since"]=1
 )
+
+# ==============================================================================
+# Scope Helper
+# ==============================================================================
+
+# Apply the --user scope flag from parsed args to the library global.
+# Call at the top of every action function.
+#
+# @param string $1 Value of the "user" key from parsed args (empty = system).
+# @return void
+function rsd::l::c::systemd::apply_scope() {
+    if [[ -n "${1:-}" ]]; then
+        RSD_SYSTEMD_SCOPE="user"
+    else
+        RSD_SYSTEMD_SCOPE="system"
+    fi
+}
+
+# Return a human-readable scope label for output messages.
+#
+# @return stdout "system" or "user"
+function rsd::l::c::systemd::scope_label() {
+    echo "$RSD_SYSTEMD_SCOPE"
+}
 
 # ==============================================================================
 # Help
@@ -129,11 +166,15 @@ function rsd::c::systemd::help() {
     echo -e "\t\t\tdisable <unit>             Disable a unit"
     echo -e "\t\t\tremove <unit>              Stop, disable, and delete a unit"
     echo -e ""
+    echo -e "\t\tScope:"
+    echo -e "\t\t\t--user                     User scope (~/.config/systemd/user/)"
+    echo -e "\t\t\t                           Default: system (/etc/systemd/system/)"
+    echo -e ""
     echo -e "\t\tCreate Options (service):"
     echo -e "\t\t\t--exec <cmd>               ExecStart command (required)"
     echo -e "\t\t\t--type <type>              simple|forking|oneshot|notify (default: simple)"
     echo -e "\t\t\t--description <text>       Unit description"
-    echo -e "\t\t\t--user <user>              Run as user"
+    echo -e "\t\t\t--run-as <user>            Run as user (User= directive)"
     echo -e "\t\t\t--group <group>            Run as group"
     echo -e "\t\t\t--workdir <path>           Working directory"
     echo -e "\t\t\t--restart <policy>         no|on-failure|always|on-abnormal"
@@ -160,8 +201,7 @@ function rsd::c::systemd::help() {
     echo -e "\t\t\t--no-enable                Don't enable after creation"
     echo -e "\t\t\t--no-start                 Enable at boot but don't start now"
     echo -e ""
-    echo -e "\t\tNote: Template units (name@.service) are not supported in v0.1.0."
-    echo -e "\t\t      Support is planned for v0.2.0."
+    echo -e "\t\tNote: Template units (name@.service) are not yet supported."
 }
 
 # ==============================================================================
@@ -173,10 +213,13 @@ function rsd::c::systemd::help() {
 # @param string $1 Unit name.
 # @return int 0 on success, 2 on validation failure.
 function rsd::c::systemd::status() {
+    # Check for --user in remaining unprocessed args
+    rsd::l::c::systemd::apply_scope "${RSD_COMMAND_ARGS[user]:-}"
+
     local unit="$1"
 
     if [[ -z "$unit" ]]; then
-        rsd::io::error "Usage: rsd systemd status <unit>"
+        rsd::io::error "Usage: rsd systemd [--user] status <unit>"
         return 2
     fi
 
@@ -185,7 +228,7 @@ function rsd::c::systemd::status() {
     fi
 
     rsd::io::blank
-    rsd::io::banner "Service Status: ${unit}"
+    rsd::io::banner "Service Status ($(rsd::l::c::systemd::scope_label)): ${unit}"
     rsd::io::blank
 
     # Active state
@@ -246,11 +289,14 @@ function rsd::c::systemd::status() {
 # @param string $* Arguments: <unit> [-n N] [--since "time"]
 # @return int 0 on success.
 function rsd::c::systemd::logs() {
+    # Check for --user in remaining unprocessed args
+    rsd::l::c::systemd::apply_scope "${RSD_COMMAND_ARGS[user]:-}"
+
     local unit="$1"
     shift
 
     if [[ -z "$unit" ]]; then
-        rsd::io::error "Usage: rsd systemd logs <unit> [-n N] [--since \"time\"]"
+        rsd::io::error "Usage: rsd systemd [--user] logs <unit> [-n N] [--since \"time\"]"
         return 2
     fi
 
@@ -268,7 +314,7 @@ function rsd::c::systemd::logs() {
     local lines="${log_args[n]:-50}"
     local since="${log_args[since]:-}"
 
-    rsd::io::status "Journal logs for ${unit} (last ${lines} lines):"
+    rsd::io::status "Journal logs ($(rsd::l::c::systemd::scope_label)) for ${unit} (last ${lines} lines):"
     rsd::io::blank
 
     rsd::l::systemd::logs "$unit" "$lines" "$since"
@@ -298,10 +344,13 @@ function rsd::c::systemd::create() {
     RSD_PARSE_CONFIG[stop-on-command]="$old_stop"
     RSD_PARSE_CONFIG[unknown-option]="$old_unknown"
 
+    # Apply scope
+    rsd::l::c::systemd::apply_scope "${cargs[user]:-}"
+
     local unit_name="${cargs[command]}"
 
     if [[ -z "$unit_name" ]]; then
-        rsd::io::error "Usage: rsd systemd create <unit-name> --exec <cmd> [options]"
+        rsd::io::error "Usage: rsd systemd [--user] create <unit-name> --exec <cmd> [options]"
         return 2
     fi
 
@@ -395,7 +444,7 @@ function rsd::l::c::systemd::create_service() {
         [type]="$svc_type"
     )
     [[ -n "${_cargs[description]:-}" ]]  && gen_params[description]="${_cargs[description]}"
-    [[ -n "${_cargs[user]:-}" ]]         && gen_params[user]="${_cargs[user]}"
+    [[ -n "${_cargs[run-as]:-}" ]]       && gen_params[user]="${_cargs[run-as]}"
     [[ -n "${_cargs[group]:-}" ]]        && gen_params[group]="${_cargs[group]}"
     [[ -n "${_cargs[workdir]:-}" ]]      && gen_params[workdir]="${_cargs[workdir]}"
     [[ -n "${_cargs[restart]:-}" ]]      && gen_params[restart]="${_cargs[restart]}"
@@ -413,7 +462,9 @@ function rsd::l::c::systemd::create_service() {
     local content
     content=$(rsd::l::systemd::generate_service gen_params "$unit_name")
 
-    rsd::io::status "Creating service unit: ${unit_name}"
+    local scope_label
+    scope_label=$(rsd::l::c::systemd::scope_label)
+    rsd::io::status "Creating ${scope_label} service unit: ${unit_name}"
 
     # Determine enable/start flags
     local do_enable=1
@@ -439,13 +490,13 @@ function rsd::l::c::systemd::create_service() {
     local dest
     dest=$(rsd::l::systemd::unit_path "$unit_name")
 
-    rsd::io::ok "Service unit '${unit_name}' created successfully."
+    rsd::io::ok "Service unit '${unit_name}' created (${scope_label})."
     rsd::io::info "  Path: ${dest}"
     if [[ "$do_enable" -eq 1 ]]; then
         rsd::io::info "  Enabled: yes"
         rsd::io::info "  Started: $([ "$do_start" -eq 1 ] && echo 'yes' || echo 'no')"
     else
-        rsd::io::info "  Enabled: no (use --no-enable to keep disabled)"
+        rsd::io::info "  Enabled: no (use 'rsd systemd enable' to activate)"
     fi
 
     return 0
@@ -482,7 +533,9 @@ function rsd::l::c::systemd::create_timer() {
     local content
     content=$(rsd::l::systemd::generate_timer tgen_params "$timer_name")
 
-    rsd::io::status "Creating timer unit: ${timer_name}"
+    local scope_label
+    scope_label=$(rsd::l::c::systemd::scope_label)
+    rsd::io::status "Creating ${scope_label} timer unit: ${timer_name}"
 
     # Determine enable/start flags
     local do_enable=1
@@ -508,7 +561,7 @@ function rsd::l::c::systemd::create_timer() {
     local dest
     dest=$(rsd::l::systemd::unit_path "$timer_name")
 
-    rsd::io::ok "Timer unit '${timer_name}' created successfully."
+    rsd::io::ok "Timer unit '${timer_name}' created (${scope_label})."
     rsd::io::info "  Path: ${dest}"
 
     # Inform about companion service
@@ -531,10 +584,12 @@ function rsd::l::c::systemd::create_timer() {
 # @param string $1 Unit name.
 # @return int 0 on success.
 function rsd::c::systemd::enable() {
+    rsd::l::c::systemd::apply_scope "${RSD_COMMAND_ARGS[user]:-}"
+
     local unit="$1"
 
     if [[ -z "$unit" ]]; then
-        rsd::io::error "Usage: rsd systemd enable <unit>"
+        rsd::io::error "Usage: rsd systemd [--user] enable <unit>"
         return 2
     fi
 
@@ -542,14 +597,16 @@ function rsd::c::systemd::enable() {
         return 2
     fi
 
-    rsd::io::status "Enabling and starting: ${unit}"
+    local scope_label
+    scope_label=$(rsd::l::c::systemd::scope_label)
+    rsd::io::status "Enabling and starting (${scope_label}): ${unit}"
 
     if ! rsd::l::systemd::enable "$unit" 1; then
         rsd::io::error "Failed to enable '${unit}'."
         return 10
     fi
 
-    rsd::io::ok "Unit '${unit}' enabled and started."
+    rsd::io::ok "Unit '${unit}' enabled and started (${scope_label})."
     return 0
 }
 
@@ -562,10 +619,12 @@ function rsd::c::systemd::enable() {
 # @param string $1 Unit name.
 # @return int 0 on success.
 function rsd::c::systemd::disable() {
+    rsd::l::c::systemd::apply_scope "${RSD_COMMAND_ARGS[user]:-}"
+
     local unit="$1"
 
     if [[ -z "$unit" ]]; then
-        rsd::io::error "Usage: rsd systemd disable <unit>"
+        rsd::io::error "Usage: rsd systemd [--user] disable <unit>"
         return 2
     fi
 
@@ -573,14 +632,16 @@ function rsd::c::systemd::disable() {
         return 2
     fi
 
-    rsd::io::status "Disabling: ${unit}"
+    local scope_label
+    scope_label=$(rsd::l::c::systemd::scope_label)
+    rsd::io::status "Disabling (${scope_label}): ${unit}"
 
     if ! rsd::l::systemd::disable "$unit"; then
         rsd::io::error "Failed to disable '${unit}'."
         return 10
     fi
 
-    rsd::io::ok "Unit '${unit}' disabled."
+    rsd::io::ok "Unit '${unit}' disabled (${scope_label})."
     return 0
 }
 
@@ -593,10 +654,12 @@ function rsd::c::systemd::disable() {
 # @param string $1 Unit name.
 # @return int 0 on success.
 function rsd::c::systemd::remove() {
+    rsd::l::c::systemd::apply_scope "${RSD_COMMAND_ARGS[user]:-}"
+
     local unit="$1"
 
     if [[ -z "$unit" ]]; then
-        rsd::io::error "Usage: rsd systemd remove <unit>"
+        rsd::io::error "Usage: rsd systemd [--user] remove <unit>"
         return 2
     fi
 
@@ -604,13 +667,15 @@ function rsd::c::systemd::remove() {
         return 2
     fi
 
-    rsd::io::status "Removing unit: ${unit}"
+    local scope_label
+    scope_label=$(rsd::l::c::systemd::scope_label)
+    rsd::io::status "Removing ${scope_label} unit: ${unit}"
 
     if ! rsd::l::systemd::remove_unit "$unit"; then
         rsd::io::error "Failed to remove '${unit}'."
         return 10
     fi
 
-    rsd::io::ok "Unit '${unit}' stopped, disabled, and removed."
+    rsd::io::ok "Unit '${unit}' stopped, disabled, and removed (${scope_label})."
     return 0
 }
