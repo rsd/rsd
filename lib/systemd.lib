@@ -506,13 +506,9 @@ function rsd::l::systemd::generate_timer() {
     local wants="${_tparams[wants]:-}"
     local wanted_by="${_tparams[wanted_by]:-}"
 
-    # Scope-aware WantedBy default
+    # Timers always default to timers.target (exists in both system and user scopes)
     if [[ -z "$wanted_by" ]]; then
-        if [[ "$RSD_SYSTEMD_SCOPE" == "user" ]]; then
-            wanted_by="default.target"
-        else
-            wanted_by="timers.target"
-        fi
+        wanted_by="timers.target"
     fi
 
     # Resolve the companion service unit name
