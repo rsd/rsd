@@ -40,7 +40,7 @@ fi
 [[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
 
 RSD_C_SYSTEMD_SHORT_DESC="Systemd Service Management"
-RSD_C_SYSTEMD_VERSION="0.2.0"
+RSD_C_SYSTEMD_VERSION="0.3.0"
 
 # Command is remote-aware (Mode A — local orchestration)
 RSD_C_SYSTEMD_REMOTE_AWARE=1
@@ -79,6 +79,8 @@ declare -g -A RSD_C_SYSTEMD_CREATE_ARGS_PARAM=(
     ["on-unit-active-sec"]=1
     ["timer-unit"]=1
     ["persistent"]=0
+    # Remove flags
+    ["timer-only"]=0
 )
 
 declare -g -A RSD_C_SYSTEMD_LOGS_ARGS_PARAM=(
@@ -120,6 +122,8 @@ declare -g -A RSD_C_SYSTEMD_ARGS_PARAM=(
     ["on-unit-active-sec"]=1
     ["timer-unit"]=1
     ["persistent"]=0
+    # Remove flags
+    ["timer-only"]=0
     # Logs-specific
     ["n"]=1
     ["since"]=1
@@ -197,9 +201,20 @@ function rsd::c::systemd::help() {
     echo -e "\t\t\t--timer-unit <service>     Service the timer activates"
     echo -e "\t\t\t--persistent               Catch up missed runs after downtime"
     echo -e ""
+    echo -e "\t\tPaired Timer+Service (one-command workflow):"
+    echo -e "\t\t\tWhen creating a .timer with --exec, both the companion"
+    echo -e "\t\t\t.service and .timer are created automatically."
+    echo -e "\t\t\tThe service is installed without enabling (timer triggers it)."
+    echo -e "\t\t\tExample:"
+    echo -e "\t\t\t  rsd systemd create renew-cert.timer --exec /usr/local/bin/renew \\"
+    echo -e "\t\t\t      --type oneshot --on-calendar daily --persistent"
+    echo -e ""
     echo -e "\t\tCreate Flags:"
     echo -e "\t\t\t--no-enable                Don't enable after creation"
     echo -e "\t\t\t--no-start                 Enable at boot but don't start now"
+    echo -e ""
+    echo -e "\t\tRemove Flags:"
+    echo -e "\t\t\t--timer-only               When removing a .timer, keep the companion .service"
     echo -e ""
     echo -e "\t\tNote: Template units (name@.service) are not yet supported."
 }
@@ -503,6 +518,8 @@ function rsd::l::c::systemd::create_service() {
 }
 
 # Internal: Create a .timer unit file from parsed CLI options.
+# When --exec is provided, auto-creates the companion .service first
+# (installed with --no-enable, since the timer triggers it).
 #
 # @param string  $1 Timer unit name.
 # @param string& $2 nameref to associative array of parsed CLI args.
@@ -517,6 +534,84 @@ function rsd::l::c::systemd::create_timer() {
         return 2
     fi
 
+    local scope_label
+    scope_label=$(rsd::l::c::systemd::scope_label)
+
+    # Resolve companion service name
+    local companion="${timer_name%.timer}.service"
+    if [[ -n "${_tcargs[timer-unit]:-}" ]]; then
+        companion="${_tcargs[timer-unit]}"
+    fi
+
+    # ---- Phase 1: Auto-create companion .service if --exec is provided ----
+    if [[ -n "${_tcargs[exec]:-}" ]]; then
+        # Validate --type if provided
+        local svc_type="${_tcargs[type]:-oneshot}"
+        case "$svc_type" in
+            simple|forking|oneshot|notify) ;;
+            *)
+                rsd::io::error "Invalid --type value: '$svc_type'"
+                rsd::io::info  "Valid types: simple, forking, oneshot, notify"
+                return 2
+                ;;
+        esac
+
+        # Validate --restart if provided
+        if [[ -n "${_tcargs[restart]:-}" ]]; then
+            case "${_tcargs[restart]}" in
+                no|on-failure|always|on-abnormal|on-success|on-abort|on-watchdog) ;;
+                *)
+                    rsd::io::error "Invalid --restart value: '${_tcargs[restart]}'"
+                    return 2
+                    ;;
+            esac
+        fi
+
+        # Build service generation params from the shared CLI options
+        declare -A svc_params=(
+            [exec]="${_tcargs[exec]}"
+            [type]="$svc_type"
+        )
+        [[ -n "${_tcargs[description]:-}" ]]  && svc_params[description]="${_tcargs[description]}"
+        [[ -n "${_tcargs[run-as]:-}" ]]       && svc_params[user]="${_tcargs[run-as]}"
+        [[ -n "${_tcargs[group]:-}" ]]        && svc_params[group]="${_tcargs[group]}"
+        [[ -n "${_tcargs[workdir]:-}" ]]      && svc_params[workdir]="${_tcargs[workdir]}"
+        [[ -n "${_tcargs[restart]:-}" ]]      && svc_params[restart]="${_tcargs[restart]}"
+        [[ -n "${_tcargs[restart-sec]:-}" ]]  && svc_params[restart_sec]="${_tcargs[restart-sec]}"
+        [[ -n "${_tcargs[env]:-}" ]]          && svc_params[env]="${_tcargs[env]}"
+        [[ -n "${_tcargs[exec-stop]:-}" ]]    && svc_params[exec_stop]="${_tcargs[exec-stop]}"
+        [[ -n "${_tcargs[pid-file]:-}" ]]     && svc_params[pid_file]="${_tcargs[pid-file]}"
+        [[ -n "${_tcargs[after]:-}" ]]        && svc_params[after]="${_tcargs[after]}"
+        [[ -n "${_tcargs[wants]:-}" ]]        && svc_params[wants]="${_tcargs[wants]}"
+        [[ -n "${_tcargs[requires]:-}" ]]     && svc_params[requires]="${_tcargs[requires]}"
+        [[ -n "${_tcargs[before]:-}" ]]       && svc_params[before]="${_tcargs[before]}"
+
+        local svc_content
+        svc_content=$(rsd::l::systemd::generate_service svc_params "$companion")
+
+        rsd::io::status "Creating ${scope_label} companion service: ${companion}"
+        rsd::io::info "Generated service unit file:"
+        rsd::io::blank
+        local line
+        while IFS= read -r line; do
+            rsd::io::info "  $line"
+        done <<< "$svc_content"
+        rsd::io::blank
+
+        # Install companion service — never enable (timer triggers it)
+        if ! rsd::l::systemd::install_unit "$companion" "$svc_content" 0 0; then
+            rsd::io::error "Failed to install companion service '${companion}'."
+            return 10
+        fi
+
+        local svc_dest
+        svc_dest=$(rsd::l::systemd::unit_path "$companion")
+        rsd::io::ok "Companion service '${companion}' created."
+        rsd::io::info "  Path: ${svc_dest}"
+        rsd::io::blank
+    fi
+
+    # ---- Phase 2: Create the .timer unit ----
     # Map CLI option keys to generator parameter keys
     declare -A tgen_params=()
     [[ -n "${_tcargs[description]:-}" ]]          && tgen_params[description]="${_tcargs[description]}"
@@ -525,26 +620,22 @@ function rsd::l::c::systemd::create_timer() {
     [[ -n "${_tcargs[on-unit-active-sec]:-}" ]]    && tgen_params[on_unit_active_sec]="${_tcargs[on-unit-active-sec]}"
     [[ -n "${_tcargs[timer-unit]:-}" ]]            && tgen_params[timer_unit]="${_tcargs[timer-unit]}"
     [[ -n "${_tcargs[persistent]:-}" ]]            && tgen_params[persistent]="1"
-    [[ -n "${_tcargs[after]:-}" ]]                 && tgen_params[after]="${_tcargs[after]}"
-    [[ -n "${_tcargs[wants]:-}" ]]                 && tgen_params[wants]="${_tcargs[wants]}"
     [[ -n "${_tcargs[wanted-by]:-}" ]]             && tgen_params[wanted_by]="${_tcargs[wanted-by]}"
 
     # Generate timer content
     local content
     content=$(rsd::l::systemd::generate_timer tgen_params "$timer_name")
 
-    local scope_label
-    scope_label=$(rsd::l::c::systemd::scope_label)
     rsd::io::status "Creating ${scope_label} timer unit: ${timer_name}"
 
-    # Determine enable/start flags
+    # Determine enable/start flags for the timer
     local do_enable=1
     local do_start=1
     [[ -n "${_tcargs[no-enable]:-}" ]] && do_enable=0 && do_start=0
     [[ -n "${_tcargs[no-start]:-}" ]]  && do_start=0
 
     # Preview
-    rsd::io::info "Generated unit file:"
+    rsd::io::info "Generated timer unit file:"
     rsd::io::blank
     local line
     while IFS= read -r line; do
@@ -552,7 +643,7 @@ function rsd::l::c::systemd::create_timer() {
     done <<< "$content"
     rsd::io::blank
 
-    # Install
+    # Install timer
     if ! rsd::l::systemd::install_unit "$timer_name" "$content" "$do_enable" "$do_start"; then
         rsd::io::error "Failed to install timer unit file."
         return 10
@@ -563,14 +654,7 @@ function rsd::l::c::systemd::create_timer() {
 
     rsd::io::ok "Timer unit '${timer_name}' created (${scope_label})."
     rsd::io::info "  Path: ${dest}"
-
-    # Inform about companion service
-    local companion="${timer_name%.timer}.service"
-    if [[ -z "${_tcargs[timer-unit]:-}" ]]; then
-        rsd::io::info "  Activates: ${companion} (default)"
-    else
-        rsd::io::info "  Activates: ${_tcargs[timer-unit]}"
-    fi
+    rsd::io::info "  Activates: ${companion}"
 
     return 0
 }
@@ -650,6 +734,8 @@ function rsd::c::systemd::disable() {
 # ==============================================================================
 
 # Stop, disable, and delete a systemd unit file.
+# When removing a .timer, also removes the companion .service
+# unless --timer-only is specified.
 #
 # @param string $1 Unit name.
 # @return int 0 on success.
@@ -659,7 +745,7 @@ function rsd::c::systemd::remove() {
     local unit="$1"
 
     if [[ -z "$unit" ]]; then
-        rsd::io::error "Usage: rsd systemd [--user] remove <unit>"
+        rsd::io::error "Usage: rsd systemd [--user] remove <unit> [--timer-only]"
         return 2
     fi
 
@@ -677,5 +763,19 @@ function rsd::c::systemd::remove() {
     fi
 
     rsd::io::ok "Unit '${unit}' stopped, disabled, and removed (${scope_label})."
+
+    # Auto-remove companion .service when removing a .timer
+    if [[ "$unit" == *.timer && -z "${RSD_COMMAND_ARGS[timer-only]:-}" ]]; then
+        local companion="${unit%.timer}.service"
+        if rsd::l::systemd::unit_exists "$companion"; then
+            rsd::io::status "Removing companion service: ${companion}"
+            if ! rsd::l::systemd::remove_unit "$companion"; then
+                rsd::io::error "Failed to remove companion '${companion}'."
+                return 10
+            fi
+            rsd::io::ok "Companion service '${companion}' removed (${scope_label})."
+        fi
+    fi
+
     return 0
 }

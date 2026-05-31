@@ -25,6 +25,7 @@ All actions support a `--user` flag to operate on user-scoped units:
 | **Unit directory** | `/etc/systemd/system/` | `~/.config/systemd/user/` |
 | **Mutations** | via `sudo` | no sudo |
 | **Default WantedBy** | `multi-user.target` | `default.target` |
+| **Timer WantedBy** | `timers.target` | `timers.target` |
 | **Journal flag** | `-u` | `--user-unit` |
 | **systemctl flag** | *(none)* | `--user` |
 
@@ -59,22 +60,21 @@ rsd systemd create myapp.service \
     --workdir /var/www/app \
     --description "My Node.js Application"
 
-# Create a oneshot service (for timer-activated tasks)
-rsd systemd create renew-cert.service \
-    --type oneshot \
+# Create a scheduled job (paired timer+service in one command)
+rsd @prod systemd create renew-tailscale-cert.timer \
     --exec "/usr/local/sbin/renew-tailscale-nginx-cert" \
-    --after "tailscaled.service,network-online.target" \
-    --wants "network-online.target" \
-    --no-enable
-
-# Create a timer
-rsd systemd create renew-cert.timer \
+    --type oneshot \
     --on-calendar daily \
     --persistent \
-    --description "Daily certificate renewal"
+    --after "tailscaled.service,network-online.target" \
+    --wants "network-online.target" \
+    --description "Renew Tailscale HTTPS certificate for Nginx"
 
-# Remove (stop + disable + delete)
-rsd systemd remove myapp.service
+# Remove timer + companion service
+rsd @prod systemd remove renew-tailscale-cert.timer
+
+# Remove timer only, keep the companion service
+rsd @prod systemd remove renew-tailscale-cert.timer --timer-only
 ```
 
 ## Actions
@@ -103,12 +103,42 @@ Auto-detects `.service` vs `.timer` from the unit name suffix.
 After writing: runs `daemon-reload`, then enables and starts the unit
 (unless `--no-enable` or `--no-start` is specified).
 
+#### Paired Timer+Service Workflow
+
+When creating a `.timer` with `--exec`, **both** the companion
+`.service` and the `.timer` are created automatically in one command:
+
+```bash
+rsd systemd create renew-cert.timer \
+    --exec "/usr/local/bin/renew" \
+    --type oneshot \
+    --on-calendar daily \
+    --persistent
+```
+
+This creates:
+1. `renew-cert.service` — installed but **not enabled** (timer triggers it)
+2. `renew-cert.timer` — installed and **enabled** (the scheduler)
+
+Options are split between the two units:
+
+| Goes to `.service` | Goes to `.timer` | Goes to both |
+|---------------------|-------------------|--------------|
+| `--exec`, `--type`, `--run-as`, `--group`, `--workdir`, `--restart`, `--restart-sec`, `--env`, `--exec-stop`, `--pid-file` | `--on-calendar`, `--on-boot-sec`, `--on-unit-active-sec`, `--persistent` | `--description`, `--after`, `--wants`, `--requires`, `--before` |
+
+To create a timer without auto-creating the service (if it already exists),
+omit `--exec`:
+
+```bash
+rsd systemd create renew-cert.timer --on-calendar daily --persistent
+```
+
 #### Service Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--exec <cmd>` | ExecStart command | *(required)* |
-| `--type <type>` | simple, forking, oneshot, notify | simple |
+| `--exec <cmd>` | ExecStart command | *(required for .service, optional for .timer)* |
+| `--type <type>` | simple, forking, oneshot, notify | simple (.service) / oneshot (.timer) |
 | `--description <text>` | Unit description | auto-generated |
 | `--run-as <user>` | Run as user (User= directive) | root |
 | `--group <group>` | Run as group | inherited |
@@ -161,10 +191,21 @@ Enables the unit at boot and starts it now (`systemctl enable --now`).
 
 Disables the unit from starting at boot.
 
-### `remove <unit>`
+### `remove <unit> [--timer-only]`
 
 Stops the unit, disables it, deletes the file from the unit directory,
 and runs `daemon-reload`.
+
+When removing a `.timer`, the companion `.service` is also removed
+automatically. Use `--timer-only` to keep the companion service.
+
+```bash
+# Remove both timer and its companion service
+rsd systemd remove renew-cert.timer
+
+# Remove only the timer, keep the service
+rsd systemd remove renew-cert.timer --timer-only
+```
 
 ## Smart Defaults by Service Type
 
@@ -189,30 +230,6 @@ All unit names are validated against the
 - Template units (`name@.service`) not yet supported
 
 Dependency references (`--after`, `--wants`, etc.) are also validated.
-
-## Timer Workflow Example
-
-A timer activates a companion service on a schedule. Typical pattern:
-
-```bash
-# 1. Create the service (oneshot, triggered by timer)
-rsd @prod systemd create renew-tailscale-cert.service \
-    --type oneshot \
-    --exec "/usr/local/sbin/renew-tailscale-nginx-cert" \
-    --after "tailscaled.service,network-online.target" \
-    --wants "network-online.target" \
-    --description "Renew Tailscale HTTPS certificate for Nginx" \
-    --no-enable
-
-# 2. Create the timer
-rsd @prod systemd create renew-tailscale-cert.timer \
-    --on-calendar daily \
-    --persistent \
-    --description "Daily Tailscale certificate renewal"
-```
-
-The timer auto-detects its companion service from the shared basename.
-Override with `--timer-unit <service>` if needed.
 
 ## Library API
 
