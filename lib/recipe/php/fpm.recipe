@@ -94,7 +94,6 @@ function rsd::l::r::php_fpm::init_constants() {
         "php${ver}-fpm"
         "php${ver}-cli"
         "php${ver}-common"
-        "php${ver}-opcache"
         "php${ver}-mysql"
         "php${ver}-curl"
         "php${ver}-mbstring"
