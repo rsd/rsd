@@ -50,7 +50,8 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 # Load dependencies
-[[ "$RSD_PG_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/pg.lib)"
+[[ "$RSD_PG_LIB" != "1" ]]      && source "$(rsd::get_libdir_file lib/pg.lib)"
+[[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
 
 # Recipe-specific CLI options
 declare -g -A RSD_RECIPE_OPTIONS=(
@@ -81,7 +82,7 @@ function rsd::r::timescaledb_app::register() {
     rsd::l::pg::validate_identifier "$RSD_APP_DB_USER" "db-user" || exit 2
 
     # Verify PostgreSQL is running on the target
-    if ! rsd::l::target::exec_sudo "" systemctl is-active --quiet postgresql; then
+    if ! rsd::l::systemd::is_active "postgresql.service"; then
         rsd::io::error "PostgreSQL is not running. Run timescaledb/install first."
         exit 2
     fi

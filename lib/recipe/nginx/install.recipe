@@ -54,8 +54,9 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 # Load dependencies
-[[ "$RSD_HOST_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/host.lib)"
-[[ "$RSD_APT_LIB" != "1" ]]  && source "$(rsd::get_libdir_file lib/apt.lib)"
+[[ "$RSD_HOST_LIB" != "1" ]]    && source "$(rsd::get_libdir_file lib/host.lib)"
+[[ "$RSD_APT_LIB" != "1" ]]     && source "$(rsd::get_libdir_file lib/apt.lib)"
+[[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
 
 # ==============================================================================
 # Constants
@@ -236,13 +237,13 @@ function rsd::r::nginx_install::restart_service() {
         return 1
     fi
 
-    rsd::l::target::exec_sudo "" systemctl restart nginx
-    rsd::l::target::exec_sudo "" systemctl enable nginx
+    rsd::l::systemd::restart "nginx.service"
+    rsd::l::systemd::enable "nginx.service" 0
 
     # Brief sanity check
-    if ! rsd::l::target::exec_sudo "" systemctl is-active --quiet nginx; then
+    if ! rsd::l::systemd::is_active "nginx.service"; then
         rsd::io::error "Nginx failed to start after restart."
-        rsd::io::info "Check: journalctl -xeu nginx"
+        rsd::io::info "Check: rsd systemd logs nginx.service"
         return 1
     fi
 
@@ -273,11 +274,9 @@ function rsd::r::nginx_install::validate_install() {
     fi
 
     # 3. Service status
-    local nginx_status=""
-    nginx_status=$(rsd::l::target::exec_sudo "" systemctl is-active nginx 2>/dev/null)
-    rsd::io::info "Service:     $nginx_status"
-
-    if [[ "$nginx_status" != "active" ]]; then
+    if rsd::l::systemd::is_active "nginx.service"; then
+        rsd::io::info "Service:     active"
+    else
         rsd::io::error "Nginx is not active."
         return 1
     fi
@@ -299,6 +298,6 @@ function rsd::r::nginx_install::validate_install() {
     rsd::io::info "Next steps:"
     rsd::io::info "  1. Create server blocks in /etc/nginx/sites-available/"
     rsd::io::info "  2. Symlink to /etc/nginx/sites-enabled/"
-    rsd::io::info "  3. Test config: nginx -t && systemctl reload nginx"
+    rsd::io::info "  3. Test config: nginx -t && rsd systemd reload nginx.service"
     rsd::io::blank
 }

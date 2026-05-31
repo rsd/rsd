@@ -56,8 +56,9 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 # Load dependencies
-[[ "$RSD_HOST_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/host.lib)"
-[[ "$RSD_APT_LIB" != "1" ]]  && source "$(rsd::get_libdir_file lib/apt.lib)"
+[[ "$RSD_HOST_LIB" != "1" ]]    && source "$(rsd::get_libdir_file lib/host.lib)"
+[[ "$RSD_APT_LIB" != "1" ]]     && source "$(rsd::get_libdir_file lib/apt.lib)"
+[[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
 
 # Recipe-specific CLI options
 declare -g -A RSD_RECIPE_OPTIONS=(
@@ -86,7 +87,7 @@ function rsd::l::r::php_fpm::init_constants() {
 
     RSD_PHP_FPM_CONF="/etc/php/${ver}/fpm/pool.d/www.conf"
     RSD_PHP_FPM_INI="/etc/php/${ver}/fpm/php.ini"
-    RSD_PHP_OPCACHE_INI="/etc/php/${ver}/fpm/conf.d/10-opcache.ini"
+    RSD_PHP_OPCACHE_INI="/etc/php/${ver}/fpm/conf.d/20-opcache-rsd.ini"
     RSD_PHP_FPM_SOCKET="/var/run/php/php${ver}-fpm.sock"
     RSD_PHP_FPM_SERVICE="php${ver}-fpm"
 
@@ -210,27 +211,19 @@ function rsd::r::php_fpm::install_packages() {
 # conservative defaults shipped by Ubuntu's php-opcache package.
 
 function rsd::r::php_fpm::configure_opcache::pre_check() {
-    rsd::l::target::file_contains "opcache.memory_consumption=256" "$RSD_PHP_OPCACHE_INI"
+    rsd::l::target::file_exists "$RSD_PHP_OPCACHE_INI"
 }
 
 function rsd::r::php_fpm::configure_opcache() {
     rsd::io::status "Configuring OPcache for production..."
 
-    if ! rsd::l::target::file_exists "$RSD_PHP_OPCACHE_INI"; then
-        rsd::io::error "OPcache config not found at: $RSD_PHP_OPCACHE_INI"
-        return 1
-    fi
-
-    # Backup original
-    if ! rsd::l::target::exec_sudo "" cp "$RSD_PHP_OPCACHE_INI" "${RSD_PHP_OPCACHE_INI}.rsd.bak"; then
-        rsd::io::error "Failed to create backup of OPcache config."
-        return 1
-    fi
+    # On Ubuntu 26.04, OPcache is compiled into PHP core — no separate
+    # .so or .ini file. We create an RSD-managed config file to tune it.
 
     local opcache_content
     opcache_content="; RSD-managed OPcache production settings
-; Original backed up to ${RSD_PHP_OPCACHE_INI}.rsd.bak
-zend_extension=opcache
+; OPcache is compiled into PHP ${RSD_PHP_VERSION} core on Ubuntu 26.04.
+; This file tunes the runtime parameters.
 opcache.enable=1
 opcache.memory_consumption=256
 opcache.interned_strings_buffer=64
@@ -252,9 +245,7 @@ opcache.enable_cli=0"
 }
 
 function rsd::r::php_fpm::configure_opcache::rollback() {
-    if rsd::l::target::file_exists "${RSD_PHP_OPCACHE_INI}.rsd.bak"; then
-        rsd::l::target::exec_sudo "" mv "${RSD_PHP_OPCACHE_INI}.rsd.bak" "$RSD_PHP_OPCACHE_INI"
-    fi
+    rsd::l::target::exec_sudo "" rm -f "$RSD_PHP_OPCACHE_INI"
 }
 
 # ==============================================================================
@@ -369,13 +360,13 @@ function rsd::r::php_fpm::harden_php_ini::rollback() {
 function rsd::r::php_fpm::restart_service() {
     rsd::io::status "Restarting PHP-FPM service..."
 
-    rsd::l::target::exec_sudo "" systemctl restart "$RSD_PHP_FPM_SERVICE"
-    rsd::l::target::exec_sudo "" systemctl enable "$RSD_PHP_FPM_SERVICE"
+    rsd::l::systemd::restart "$RSD_PHP_FPM_SERVICE"
+    rsd::l::systemd::enable "$RSD_PHP_FPM_SERVICE" 0
 
     # Brief sanity check
-    if ! rsd::l::target::exec_sudo "" systemctl is-active --quiet "$RSD_PHP_FPM_SERVICE"; then
+    if ! rsd::l::systemd::is_active "$RSD_PHP_FPM_SERVICE"; then
         rsd::io::error "PHP-FPM failed to start after restart."
-        rsd::io::info "Check: journalctl -xeu $RSD_PHP_FPM_SERVICE"
+        rsd::io::info "Check: rsd systemd logs $RSD_PHP_FPM_SERVICE"
         return 1
     fi
 
@@ -394,7 +385,7 @@ function rsd::r::php_fpm::validate_install() {
 
     # 1. PHP version
     local php_version=""
-    php_version=$(rsd::l::target::exec php -r 'echo PHP_VERSION;' 2>/dev/null)
+    php_version=$(rsd::l::target::exec php -v 2>/dev/null | head -1)
     if [[ -z "$php_version" ]]; then
         rsd::io::error "Could not determine PHP version."
         return 1
@@ -402,11 +393,9 @@ function rsd::r::php_fpm::validate_install() {
     rsd::io::info "PHP Version: $php_version"
 
     # 2. FPM service status
-    local fpm_status=""
-    fpm_status=$(rsd::l::target::exec_sudo "" systemctl is-active "$RSD_PHP_FPM_SERVICE" 2>/dev/null)
-    rsd::io::info "FPM Service: $fpm_status"
-
-    if [[ "$fpm_status" != "active" ]]; then
+    if rsd::l::systemd::is_active "$RSD_PHP_FPM_SERVICE"; then
+        rsd::io::info "FPM Service: active"
+    else
         rsd::io::error "PHP-FPM is not active."
         return 1
     fi

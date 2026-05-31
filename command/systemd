@@ -1,0 +1,580 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# Systemd Service Management Command
+# ==============================================================================
+#
+# Interactive CLI entry point for managing systemd units.
+# Supports querying, creating, enabling, disabling, and removing
+# service and timer unit files on local and remote targets.
+#
+# Usage:
+#   rsd systemd status <unit>
+#   rsd systemd logs <unit> [-n 50] [--since "1 hour ago"]
+#   rsd systemd create <unit> --exec <cmd> [options]
+#   rsd systemd enable <unit>
+#   rsd systemd disable <unit>
+#   rsd systemd remove <unit>
+#
+# Remote:
+#   rsd @target systemd status <unit>
+#   rsd @target systemd create <unit> --exec <cmd> [options]
+#
+# @see docs/systemd.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+[[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
+
+RSD_C_SYSTEMD_SHORT_DESC="Systemd Service Management"
+RSD_C_SYSTEMD_VERSION="0.1.0"
+
+# Command is remote-aware (Mode A — local orchestration)
+RSD_C_SYSTEMD_REMOTE_AWARE=1
+
+# ==============================================================================
+# Argument Configuration for create action
+# ==============================================================================
+
+declare -g -A RSD_C_SYSTEMD_CREATE_ARGS_PARAM=(
+    # Service configuration
+    ["exec"]=1
+    ["type"]=1
+    ["description"]=1
+    ["user"]=1
+    ["group"]=1
+    ["workdir"]=1
+    ["restart"]=1
+    ["restart-sec"]=1
+    ["env"]=1
+    ["exec-stop"]=1
+    ["pid-file"]=1
+    # Unit dependencies (comma-separated)
+    ["after"]=1
+    ["wants"]=1
+    ["requires"]=1
+    ["before"]=1
+    ["wanted-by"]=1
+    # Flags
+    ["no-enable"]=0
+    ["no-start"]=0
+    # Timer-specific
+    ["on-calendar"]=1
+    ["on-boot-sec"]=1
+    ["on-unit-active-sec"]=1
+    ["timer-unit"]=1
+    ["persistent"]=0
+)
+
+declare -g -A RSD_C_SYSTEMD_LOGS_ARGS_PARAM=(
+    ["n"]=1
+    ["since"]=1
+)
+
+# ==============================================================================
+# Help
+# ==============================================================================
+
+# Display sub-commands and description for the systemd module.
+#
+# @return void
+function rsd::c::systemd::help() {
+    echo -e "\n\tSystemd Command Help:\n"
+    echo -e "\t\tActions:"
+    echo -e "\t\t\tstatus <unit>              Show unit status"
+    echo -e "\t\t\tlogs <unit> [-n N]         Fetch journal logs"
+    echo -e "\t\t\tcreate <unit> [options]    Create a service or timer unit file"
+    echo -e "\t\t\tenable <unit>              Enable and start a unit"
+    echo -e "\t\t\tdisable <unit>             Disable a unit"
+    echo -e "\t\t\tremove <unit>              Stop, disable, and delete a unit"
+    echo -e ""
+    echo -e "\t\tCreate Options (service):"
+    echo -e "\t\t\t--exec <cmd>               ExecStart command (required)"
+    echo -e "\t\t\t--type <type>              simple|forking|oneshot|notify (default: simple)"
+    echo -e "\t\t\t--description <text>       Unit description"
+    echo -e "\t\t\t--user <user>              Run as user"
+    echo -e "\t\t\t--group <group>            Run as group"
+    echo -e "\t\t\t--workdir <path>           Working directory"
+    echo -e "\t\t\t--restart <policy>         no|on-failure|always|on-abnormal"
+    echo -e "\t\t\t--restart-sec <N>          Restart delay in seconds (default: 5)"
+    echo -e "\t\t\t--env <K=V,K=V>            Environment variables (comma-separated)"
+    echo -e "\t\t\t--exec-stop <cmd>          ExecStop command"
+    echo -e "\t\t\t--pid-file <path>          PID file path (for forking type)"
+    echo -e ""
+    echo -e "\t\tCreate Options (dependencies, comma-separated):"
+    echo -e "\t\t\t--after <units>            After= directive"
+    echo -e "\t\t\t--wants <units>            Wants= directive"
+    echo -e "\t\t\t--requires <units>         Requires= directive"
+    echo -e "\t\t\t--before <units>           Before= directive"
+    echo -e "\t\t\t--wanted-by <targets>      WantedBy= directive"
+    echo -e ""
+    echo -e "\t\tCreate Options (timer — when unit name ends in .timer):"
+    echo -e "\t\t\t--on-calendar <expr>       OnCalendar= (e.g., daily, hourly)"
+    echo -e "\t\t\t--on-boot-sec <time>       OnBootSec= (e.g., 5min)"
+    echo -e "\t\t\t--on-unit-active-sec <t>   OnUnitActiveSec= (e.g., 1h)"
+    echo -e "\t\t\t--timer-unit <service>     Service the timer activates"
+    echo -e "\t\t\t--persistent               Catch up missed runs after downtime"
+    echo -e ""
+    echo -e "\t\tCreate Flags:"
+    echo -e "\t\t\t--no-enable                Don't enable after creation"
+    echo -e "\t\t\t--no-start                 Enable at boot but don't start now"
+    echo -e ""
+    echo -e "\t\tNote: Template units (name@.service) are not supported in v0.1.0."
+    echo -e "\t\t      Support is planned for v0.2.0."
+}
+
+# ==============================================================================
+# Action: status
+# ==============================================================================
+
+# Display the status of a systemd unit with structured IO formatting.
+#
+# @param string $1 Unit name.
+# @return int 0 on success, 2 on validation failure.
+function rsd::c::systemd::status() {
+    local unit="$1"
+
+    if [[ -z "$unit" ]]; then
+        rsd::io::error "Usage: rsd systemd status <unit>"
+        return 2
+    fi
+
+    if ! rsd::l::systemd::validate_unit_name "$unit"; then
+        return 2
+    fi
+
+    rsd::io::blank
+    rsd::io::banner "Service Status: ${unit}"
+    rsd::io::blank
+
+    # Active state
+    local active_state=""
+    rsd::l::systemd::get_property active_state "$unit" "ActiveState"
+    if [[ "$active_state" == "active" ]]; then
+        rsd::io::ok "State: ${active_state}"
+    elif [[ "$active_state" == "failed" ]]; then
+        rsd::io::error "State: ${active_state}"
+    else
+        rsd::io::info "State: ${active_state:-unknown}"
+    fi
+
+    # Enabled state
+    local enabled=""
+    if rsd::l::systemd::is_enabled "$unit"; then
+        enabled="enabled"
+        rsd::io::ok "Boot: ${enabled}"
+    else
+        enabled="disabled"
+        rsd::io::info "Boot: ${enabled}"
+    fi
+
+    # Sub-state (more specific: running, dead, exited, etc.)
+    local sub_state=""
+    rsd::l::systemd::get_property sub_state "$unit" "SubState"
+    [[ -n "$sub_state" ]] && rsd::io::info "SubState: ${sub_state}"
+
+    # Main PID
+    local main_pid=""
+    rsd::l::systemd::get_property main_pid "$unit" "MainPID"
+    [[ -n "$main_pid" && "$main_pid" != "0" ]] && rsd::io::info "MainPID: ${main_pid}"
+
+    # Memory usage
+    local memory=""
+    rsd::l::systemd::get_property memory "$unit" "MemoryCurrent"
+    if [[ -n "$memory" && "$memory" != "[not set]" && "$memory" != "infinity" ]]; then
+        local memory_human
+        memory_human=$(numfmt --to=iec-i --suffix=B "$memory" 2>/dev/null || echo "${memory} bytes")
+        rsd::io::info "Memory: ${memory_human}"
+    fi
+
+    # Unit file path
+    local unit_file=""
+    rsd::l::systemd::get_property unit_file "$unit" "FragmentPath"
+    [[ -n "$unit_file" ]] && rsd::io::info "UnitFile: ${unit_file}"
+
+    rsd::io::blank
+    return 0
+}
+
+# ==============================================================================
+# Action: logs
+# ==============================================================================
+
+# Fetch and display journal logs for a systemd unit.
+#
+# @param string $* Arguments: <unit> [-n N] [--since "time"]
+# @return int 0 on success.
+function rsd::c::systemd::logs() {
+    local unit="$1"
+    shift
+
+    if [[ -z "$unit" ]]; then
+        rsd::io::error "Usage: rsd systemd logs <unit> [-n N] [--since \"time\"]"
+        return 2
+    fi
+
+    if ! rsd::l::systemd::validate_unit_name "$unit"; then
+        return 2
+    fi
+
+    # Parse logs-specific options from remaining args
+    local -A log_args=()
+    local -a log_remaining=()
+    if [[ $# -gt 0 ]]; then
+        rsd::parse_args "RSD_C_SYSTEMD_LOGS_ARGS_PARAM" log_args log_remaining "$@"
+    fi
+
+    local lines="${log_args[n]:-50}"
+    local since="${log_args[since]:-}"
+
+    rsd::io::status "Journal logs for ${unit} (last ${lines} lines):"
+    rsd::io::blank
+
+    rsd::l::systemd::logs "$unit" "$lines" "$since"
+
+    return $?
+}
+
+# ==============================================================================
+# Action: create
+# ==============================================================================
+
+# Create a systemd service or timer unit file from CLI options.
+# Auto-detects .service vs .timer from the unit name suffix.
+# Validates the unit name and all dependency references before writing.
+#
+# @param string $* Arguments: <unit-name> [options]
+# @return int 0 on success, 2 on validation/usage error.
+function rsd::c::systemd::create() {
+    # Parse create-specific options
+    local old_stop="${RSD_PARSE_CONFIG[stop-on-command]:-1}"
+    local old_unknown="${RSD_PARSE_CONFIG[unknown-option]:-ignore}"
+    RSD_PARSE_CONFIG[stop-on-command]=0
+    RSD_PARSE_CONFIG[unknown-option]="error"
+    local -A cargs=()
+    local -a cremaining=()
+    rsd::parse_args "RSD_C_SYSTEMD_CREATE_ARGS_PARAM" cargs cremaining "$@"
+    RSD_PARSE_CONFIG[stop-on-command]="$old_stop"
+    RSD_PARSE_CONFIG[unknown-option]="$old_unknown"
+
+    local unit_name="${cargs[command]}"
+
+    if [[ -z "$unit_name" ]]; then
+        rsd::io::error "Usage: rsd systemd create <unit-name> --exec <cmd> [options]"
+        return 2
+    fi
+
+    # 1. Validate the primary unit name
+    if ! rsd::l::systemd::validate_unit_name "$unit_name"; then
+        return 2
+    fi
+
+    # 2. Restrict create to .service and .timer
+    local suffix="${unit_name##*.}"
+    case ".$suffix" in
+        .service|.timer) ;;
+        *)
+            rsd::io::error "The 'create' action only supports .service and .timer units."
+            rsd::io::info  "Use 'rsd systemd status' or 'rsd systemd enable' for other types."
+            return 2
+            ;;
+    esac
+
+    # 3. Validate dependency references (comma-separated unit names)
+    local dep_opt
+    for dep_opt in after wants requires before wanted-by; do
+        local dep_key="${dep_opt}"
+        if [[ -n "${cargs[$dep_key]:-}" ]]; then
+            if ! rsd::l::systemd::validate_unit_refs "--${dep_opt}" "${cargs[$dep_key]}"; then
+                return 2
+            fi
+        fi
+    done
+
+    # 4. Validate --timer-unit if specified
+    if [[ -n "${cargs[timer-unit]:-}" ]]; then
+        if ! rsd::l::systemd::validate_unit_name "${cargs[timer-unit]}"; then
+            rsd::io::error "Invalid --timer-unit value."
+            return 2
+        fi
+    fi
+
+    # 5. Route to service or timer generation
+    if [[ ".$suffix" == ".timer" ]]; then
+        rsd::l::c::systemd::create_timer "$unit_name" cargs
+    else
+        rsd::l::c::systemd::create_service "$unit_name" cargs
+    fi
+
+    return $?
+}
+
+# Internal: Create a .service unit file from parsed CLI options.
+#
+# @param string  $1 Unit name.
+# @param string& $2 nameref to associative array of parsed CLI args.
+# @return int 0 on success.
+function rsd::l::c::systemd::create_service() {
+    local unit_name="$1"
+    declare -n _cargs="$2"
+
+    # Require --exec
+    if [[ -z "${_cargs[exec]:-}" ]]; then
+        rsd::io::error "Missing required option: --exec <command>"
+        return 2
+    fi
+
+    # Validate --type if provided
+    local svc_type="${_cargs[type]:-simple}"
+    case "$svc_type" in
+        simple|forking|oneshot|notify) ;;
+        *)
+            rsd::io::error "Invalid --type value: '$svc_type'"
+            rsd::io::info  "Valid types: simple, forking, oneshot, notify"
+            return 2
+            ;;
+    esac
+
+    # Validate --restart if provided
+    if [[ -n "${_cargs[restart]:-}" ]]; then
+        case "${_cargs[restart]}" in
+            no|on-failure|always|on-abnormal|on-success|on-abort|on-watchdog) ;;
+            *)
+                rsd::io::error "Invalid --restart value: '${_cargs[restart]}'"
+                rsd::io::info  "Valid policies: no, on-failure, always, on-abnormal"
+                return 2
+                ;;
+        esac
+    fi
+
+    # Map CLI option keys to the generate_service parameter keys
+    # CLI uses dashes, generator uses underscores
+    declare -A gen_params=(
+        [exec]="${_cargs[exec]}"
+        [type]="$svc_type"
+    )
+    [[ -n "${_cargs[description]:-}" ]]  && gen_params[description]="${_cargs[description]}"
+    [[ -n "${_cargs[user]:-}" ]]         && gen_params[user]="${_cargs[user]}"
+    [[ -n "${_cargs[group]:-}" ]]        && gen_params[group]="${_cargs[group]}"
+    [[ -n "${_cargs[workdir]:-}" ]]      && gen_params[workdir]="${_cargs[workdir]}"
+    [[ -n "${_cargs[restart]:-}" ]]      && gen_params[restart]="${_cargs[restart]}"
+    [[ -n "${_cargs[restart-sec]:-}" ]]  && gen_params[restart_sec]="${_cargs[restart-sec]}"
+    [[ -n "${_cargs[env]:-}" ]]          && gen_params[env]="${_cargs[env]}"
+    [[ -n "${_cargs[exec-stop]:-}" ]]    && gen_params[exec_stop]="${_cargs[exec-stop]}"
+    [[ -n "${_cargs[pid-file]:-}" ]]     && gen_params[pid_file]="${_cargs[pid-file]}"
+    [[ -n "${_cargs[after]:-}" ]]        && gen_params[after]="${_cargs[after]}"
+    [[ -n "${_cargs[wants]:-}" ]]        && gen_params[wants]="${_cargs[wants]}"
+    [[ -n "${_cargs[requires]:-}" ]]     && gen_params[requires]="${_cargs[requires]}"
+    [[ -n "${_cargs[before]:-}" ]]       && gen_params[before]="${_cargs[before]}"
+    [[ -n "${_cargs[wanted-by]:-}" ]]    && gen_params[wanted_by]="${_cargs[wanted-by]}"
+
+    # Generate the unit file content
+    local content
+    content=$(rsd::l::systemd::generate_service gen_params "$unit_name")
+
+    rsd::io::status "Creating service unit: ${unit_name}"
+
+    # Determine enable/start flags
+    local do_enable=1
+    local do_start=1
+    [[ -n "${_cargs[no-enable]:-}" ]] && do_enable=0 && do_start=0
+    [[ -n "${_cargs[no-start]:-}" ]]  && do_start=0
+
+    # Preview the generated content
+    rsd::io::info "Generated unit file:"
+    rsd::io::blank
+    local line
+    while IFS= read -r line; do
+        rsd::io::info "  $line"
+    done <<< "$content"
+    rsd::io::blank
+
+    # Install
+    if ! rsd::l::systemd::install_unit "$unit_name" "$content" "$do_enable" "$do_start"; then
+        rsd::io::error "Failed to install unit file."
+        return 10
+    fi
+
+    local dest
+    dest=$(rsd::l::systemd::unit_path "$unit_name")
+
+    rsd::io::ok "Service unit '${unit_name}' created successfully."
+    rsd::io::info "  Path: ${dest}"
+    if [[ "$do_enable" -eq 1 ]]; then
+        rsd::io::info "  Enabled: yes"
+        rsd::io::info "  Started: $([ "$do_start" -eq 1 ] && echo 'yes' || echo 'no')"
+    else
+        rsd::io::info "  Enabled: no (use --no-enable to keep disabled)"
+    fi
+
+    return 0
+}
+
+# Internal: Create a .timer unit file from parsed CLI options.
+#
+# @param string  $1 Timer unit name.
+# @param string& $2 nameref to associative array of parsed CLI args.
+# @return int 0 on success.
+function rsd::l::c::systemd::create_timer() {
+    local timer_name="$1"
+    declare -n _tcargs="$2"
+
+    # At least one scheduling directive is required
+    if [[ -z "${_tcargs[on-calendar]:-}" && -z "${_tcargs[on-boot-sec]:-}" && -z "${_tcargs[on-unit-active-sec]:-}" ]]; then
+        rsd::io::error "Timer requires at least one of: --on-calendar, --on-boot-sec, --on-unit-active-sec"
+        return 2
+    fi
+
+    # Map CLI option keys to generator parameter keys
+    declare -A tgen_params=()
+    [[ -n "${_tcargs[description]:-}" ]]          && tgen_params[description]="${_tcargs[description]}"
+    [[ -n "${_tcargs[on-calendar]:-}" ]]           && tgen_params[on_calendar]="${_tcargs[on-calendar]}"
+    [[ -n "${_tcargs[on-boot-sec]:-}" ]]           && tgen_params[on_boot_sec]="${_tcargs[on-boot-sec]}"
+    [[ -n "${_tcargs[on-unit-active-sec]:-}" ]]    && tgen_params[on_unit_active_sec]="${_tcargs[on-unit-active-sec]}"
+    [[ -n "${_tcargs[timer-unit]:-}" ]]            && tgen_params[timer_unit]="${_tcargs[timer-unit]}"
+    [[ -n "${_tcargs[persistent]:-}" ]]            && tgen_params[persistent]="1"
+    [[ -n "${_tcargs[after]:-}" ]]                 && tgen_params[after]="${_tcargs[after]}"
+    [[ -n "${_tcargs[wants]:-}" ]]                 && tgen_params[wants]="${_tcargs[wants]}"
+    [[ -n "${_tcargs[wanted-by]:-}" ]]             && tgen_params[wanted_by]="${_tcargs[wanted-by]}"
+
+    # Generate timer content
+    local content
+    content=$(rsd::l::systemd::generate_timer tgen_params "$timer_name")
+
+    rsd::io::status "Creating timer unit: ${timer_name}"
+
+    # Determine enable/start flags
+    local do_enable=1
+    local do_start=1
+    [[ -n "${_tcargs[no-enable]:-}" ]] && do_enable=0 && do_start=0
+    [[ -n "${_tcargs[no-start]:-}" ]]  && do_start=0
+
+    # Preview
+    rsd::io::info "Generated unit file:"
+    rsd::io::blank
+    local line
+    while IFS= read -r line; do
+        rsd::io::info "  $line"
+    done <<< "$content"
+    rsd::io::blank
+
+    # Install
+    if ! rsd::l::systemd::install_unit "$timer_name" "$content" "$do_enable" "$do_start"; then
+        rsd::io::error "Failed to install timer unit file."
+        return 10
+    fi
+
+    local dest
+    dest=$(rsd::l::systemd::unit_path "$timer_name")
+
+    rsd::io::ok "Timer unit '${timer_name}' created successfully."
+    rsd::io::info "  Path: ${dest}"
+
+    # Inform about companion service
+    local companion="${timer_name%.timer}.service"
+    if [[ -z "${_tcargs[timer-unit]:-}" ]]; then
+        rsd::io::info "  Activates: ${companion} (default)"
+    else
+        rsd::io::info "  Activates: ${_tcargs[timer-unit]}"
+    fi
+
+    return 0
+}
+
+# ==============================================================================
+# Action: enable
+# ==============================================================================
+
+# Enable and start a systemd unit.
+#
+# @param string $1 Unit name.
+# @return int 0 on success.
+function rsd::c::systemd::enable() {
+    local unit="$1"
+
+    if [[ -z "$unit" ]]; then
+        rsd::io::error "Usage: rsd systemd enable <unit>"
+        return 2
+    fi
+
+    if ! rsd::l::systemd::validate_unit_name "$unit"; then
+        return 2
+    fi
+
+    rsd::io::status "Enabling and starting: ${unit}"
+
+    if ! rsd::l::systemd::enable "$unit" 1; then
+        rsd::io::error "Failed to enable '${unit}'."
+        return 10
+    fi
+
+    rsd::io::ok "Unit '${unit}' enabled and started."
+    return 0
+}
+
+# ==============================================================================
+# Action: disable
+# ==============================================================================
+
+# Disable a systemd unit from starting at boot.
+#
+# @param string $1 Unit name.
+# @return int 0 on success.
+function rsd::c::systemd::disable() {
+    local unit="$1"
+
+    if [[ -z "$unit" ]]; then
+        rsd::io::error "Usage: rsd systemd disable <unit>"
+        return 2
+    fi
+
+    if ! rsd::l::systemd::validate_unit_name "$unit"; then
+        return 2
+    fi
+
+    rsd::io::status "Disabling: ${unit}"
+
+    if ! rsd::l::systemd::disable "$unit"; then
+        rsd::io::error "Failed to disable '${unit}'."
+        return 10
+    fi
+
+    rsd::io::ok "Unit '${unit}' disabled."
+    return 0
+}
+
+# ==============================================================================
+# Action: remove
+# ==============================================================================
+
+# Stop, disable, and delete a systemd unit file.
+#
+# @param string $1 Unit name.
+# @return int 0 on success.
+function rsd::c::systemd::remove() {
+    local unit="$1"
+
+    if [[ -z "$unit" ]]; then
+        rsd::io::error "Usage: rsd systemd remove <unit>"
+        return 2
+    fi
+
+    if ! rsd::l::systemd::validate_unit_name "$unit"; then
+        return 2
+    fi
+
+    rsd::io::status "Removing unit: ${unit}"
+
+    if ! rsd::l::systemd::remove_unit "$unit"; then
+        rsd::io::error "Failed to remove '${unit}'."
+        return 10
+    fi
+
+    rsd::io::ok "Unit '${unit}' stopped, disabled, and removed."
+    return 0
+}

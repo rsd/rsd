@@ -76,9 +76,10 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 # Load dependencies
-[[ "$RSD_HOST_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/host.lib)"
-[[ "$RSD_APT_LIB" != "1" ]]  && source "$(rsd::get_libdir_file lib/apt.lib)"
-[[ "$RSD_PG_LIB" != "1" ]]   && source "$(rsd::get_libdir_file lib/pg.lib)"
+[[ "$RSD_HOST_LIB" != "1" ]]    && source "$(rsd::get_libdir_file lib/host.lib)"
+[[ "$RSD_APT_LIB" != "1" ]]     && source "$(rsd::get_libdir_file lib/apt.lib)"
+[[ "$RSD_PG_LIB" != "1" ]]      && source "$(rsd::get_libdir_file lib/pg.lib)"
+[[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
 
 # ==============================================================================
 # Constants
@@ -504,13 +505,13 @@ function rsd::r::timescaledb_install::disable_telemetry::rollback() {
 function rsd::r::timescaledb_install::restart_service() {
     rsd::io::status "Restarting PostgreSQL service..."
 
-    rsd::l::target::exec_sudo "" systemctl restart postgresql
-    rsd::l::target::exec_sudo "" systemctl enable postgresql
+    rsd::l::systemd::restart "postgresql.service"
+    rsd::l::systemd::enable "postgresql.service" 0
 
     # Brief sanity check — is it running?
-    if ! rsd::l::target::exec_sudo "" systemctl is-active --quiet postgresql; then
+    if ! rsd::l::systemd::is_active "postgresql.service"; then
         rsd::io::error "PostgreSQL failed to start after restart."
-        rsd::io::info "Check: journalctl -xeu postgresql"
+        rsd::io::info "Check: rsd systemd logs postgresql.service"
         return 1
     fi
 

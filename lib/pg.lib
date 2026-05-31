@@ -136,7 +136,7 @@ function rsd::l::pg::resolve() {
     rsd::io::info "Probed: sudo -u postgres, TCP localhost:5432, peer auth, TCP as current user."
     rsd::io::info "Options:"
     rsd::io::info "  1. Provide explicit connection: --pg-host <host> --pg-user <user>"
-    rsd::io::info "  2. Check that PostgreSQL is running: systemctl status postgresql"
+    rsd::io::info "  2. Check that PostgreSQL is running: rsd systemd status postgresql.service"
     rsd::io::info "  3. Verify pg_hba.conf allows the connection method."
     return 1
 }

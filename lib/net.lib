@@ -34,8 +34,8 @@ function rsd::l::net::hostname() {
             return 0
         fi
     fi
-    if  rsd::check_binaries systemctl hostnamectl grep awk; then
-        if systemctl > /dev/null 2>&1; then
+    if  rsd::check_binaries hostnamectl grep awk; then
+        if [[ -d /run/systemd/system ]]; then
             hostname=$(hostnamectl | grep "Static hostname" | awk '{print $3}')
             if [[ -n $hostname ]]; then
                 echo $hostname

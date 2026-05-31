@@ -1,0 +1,583 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# Systemd Service Management Library
+# ==============================================================================
+#
+# Target-aware primitives for querying, managing, and creating systemd
+# unit files. All operations route through rsd::l::target::exec or
+# rsd::l::target::exec_sudo, so they work transparently on both local
+# and remote targets.
+#
+# Dependencies:
+#   - target.lib  (loaded automatically by the RSD framework)
+#   - sudo.lib    (loaded on-demand by exec_sudo for local targets)
+#   - remote.lib  (loaded by the framework when $RSD_REMOTE_TARGET is set)
+#   - io.lib      (loaded for structured messaging)
+#
+# All functions that mutate state require the 'systemctl' binary on the
+# target host. Query functions also need 'systemctl'. Journal functions
+# need 'journalctl'. Callers should verify availability with
+# rsd::l::target::has_bin before invoking.
+#
+# NOTE: Template units (name@.service) are NOT supported in v0.1.0.
+#       Support is planned for v0.2.0.
+#
+# namespace rsd::l::systemd::
+#
+# @see docs/systemd.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+if [[ "$RSD_SYSTEMD_LIB" == "1" ]]; then
+    return 0
+fi
+RSD_SYSTEMD_LIB=1
+RSD_SYSTEMD_LIB_VERSION="0.1.0"
+
+# Load target-aware dispatch primitives
+[[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
+
+# Load structured IO messaging
+[[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
+
+# ==============================================================================
+# Tier 0 — Validation
+# ==============================================================================
+# Validates unit names and dependency references against the freedesktop.org
+# systemd naming specification before any systemctl call is made.
+
+# Validate a systemd unit name against the freedesktop.org naming rules.
+# Checks: suffix, character whitelist, empty prefix, leading dot, length,
+# and rejects template units (deferred to v0.2.0).
+#
+# @param string $1 The unit name to validate (e.g., "nginx.service").
+# @return int 0 if valid, 2 if invalid (Bad Usage exit code per §6).
+function rsd::l::systemd::validate_unit_name() {
+    local name="$1"
+
+    if [[ -z "$name" ]]; then
+        rsd::io::error "Unit name cannot be empty."
+        return 2
+    fi
+
+    if [[ ${#name} -gt 255 ]]; then
+        rsd::io::error "Unit name exceeds 255 characters: '${name:0:40}...'"
+        return 2
+    fi
+
+    # Must contain at least one dot (prefix.suffix)
+    if [[ "$name" != *.* ]]; then
+        rsd::io::error "Invalid unit name '$name' — missing type suffix."
+        rsd::io::info  "Valid suffixes: .service .timer .target .socket .mount .path .slice .scope"
+        return 2
+    fi
+
+    local suffix="${name##*.}"
+    case ".$suffix" in
+        .service|.timer|.target|.socket|.mount|.path|.slice|.scope|.swap|.automount|.device)
+            ;;
+        *)
+            rsd::io::error "Invalid unit type suffix '.$suffix' in '$name'."
+            rsd::io::info  "Valid suffixes: .service .timer .target .socket .mount .path .slice .scope"
+            return 2
+            ;;
+    esac
+
+    local prefix="${name%.*}"
+
+    if [[ -z "$prefix" ]]; then
+        rsd::io::error "Unit name has no prefix before '.$suffix'."
+        return 2
+    fi
+
+    if [[ "$prefix" == .* ]]; then
+        rsd::io::error "Unit name cannot start with a dot: '$name'"
+        return 2
+    fi
+
+    # Character whitelist: ASCII letters, digits, colon, dash, underscore, dot, backslash, @
+    if [[ "$prefix" =~ [^a-zA-Z0-9:._@\\-] ]]; then
+        rsd::io::error "Invalid characters in unit name prefix: '$prefix'"
+        rsd::io::info  "Allowed: letters, digits, colon, dash, underscore, dot, backslash"
+        return 2
+    fi
+
+    # Template guard — deferred to v0.2.0
+    if [[ "$prefix" == *@* ]]; then
+        rsd::io::error "Template units (name@.suffix) are not supported in v0.1.0."
+        rsd::io::info  "Support planned for v0.2.0."
+        return 2
+    fi
+
+    return 0
+}
+
+# Validate each unit reference in a comma-separated dependency value.
+# Catches typos like 'tailscaled' (missing .service suffix) before
+# writing the unit file.
+#
+# @param string $1 Option name (for error context, e.g., "--after").
+# @param string $2 Comma-separated unit names.
+# @return int 0 if all valid, 2 on first invalid.
+function rsd::l::systemd::validate_unit_refs() {
+    local option="$1"
+    local csv="$2"
+    local -a refs
+    IFS=',' read -ra refs <<< "$csv"
+
+    local ref
+    for ref in "${refs[@]}"; do
+        bash::trim ref
+        [[ -z "$ref" ]] && continue
+        if ! rsd::l::systemd::validate_unit_name "$ref"; then
+            rsd::io::error "Invalid unit reference in $option: '$ref'"
+            return 2
+        fi
+    done
+    return 0
+}
+
+# ==============================================================================
+# Tier 1 — Query (no sudo)
+# ==============================================================================
+
+# Check if the target host is running systemd as its init system.
+# Probes PID 1's comm to verify. Use as a guard before calling
+# any other systemd function on unknown hosts.
+#
+# @return int 0 if systemd, 1 if not.
+function rsd::l::systemd::is_systemd() {
+    rsd::l::target::exec test -d /run/systemd/system
+}
+
+# Check if a systemd unit is currently active (running).
+#
+# @param string $1 Unit name (e.g., "nginx.service").
+# @return int 0 if active, non-zero otherwise.
+function rsd::l::systemd::is_active() {
+    local unit="$1"
+    rsd::l::target::exec systemctl is-active --quiet "$unit"
+}
+
+# Check if a systemd unit is enabled (starts at boot).
+#
+# @param string $1 Unit name (e.g., "nginx.service").
+# @return int 0 if enabled, non-zero otherwise.
+function rsd::l::systemd::is_enabled() {
+    local unit="$1"
+    rsd::l::target::exec systemctl is-enabled --quiet "$unit"
+}
+
+# Capture the full status output of a systemd unit into a nameref variable.
+#
+# @param string& $1 nameref output variable for the status text.
+# @param string  $2 Unit name.
+# @return int 0 on success, non-zero if systemctl fails.
+function rsd::l::systemd::get_status() {
+    local _out_var="$1"
+    local unit="$2"
+    declare -n _r_status="$_out_var"
+    _r_status=$(rsd::l::target::exec systemctl status --no-pager "$unit" 2>&1)
+}
+
+# Read a single machine-readable property from a systemd unit.
+# Uses `systemctl show -p <property> --value` for clean output.
+#
+# @param string& $1 nameref output variable for the property value.
+# @param string  $2 Unit name.
+# @param string  $3 Property name (e.g., "ActiveState", "MainPID").
+# @return int 0 on success.
+function rsd::l::systemd::get_property() {
+    local _out_var="$1"
+    local unit="$2"
+    local prop="$3"
+    declare -n _r_prop="$_out_var"
+    _r_prop=$(rsd::l::target::exec systemctl show -p "$prop" --value "$unit" 2>/dev/null)
+}
+
+# Check if a unit file exists on the target (regardless of active state).
+# Uses `systemctl cat` which returns 0 if the unit file can be resolved.
+#
+# @param string $1 Unit name.
+# @return int 0 if exists, non-zero if not.
+function rsd::l::systemd::unit_exists() {
+    local unit="$1"
+    rsd::l::target::exec systemctl cat "$unit" &>/dev/null
+}
+
+# ==============================================================================
+# Tier 2 — Lifecycle (sudo)
+# ==============================================================================
+
+# Start a systemd unit.
+#
+# @param string $1 Unit name.
+# @return int Exit code of systemctl.
+function rsd::l::systemd::start() {
+    local unit="$1"
+    rsd::l::target::exec_sudo "" systemctl start "$unit"
+}
+
+# Stop a systemd unit.
+#
+# @param string $1 Unit name.
+# @return int Exit code of systemctl.
+function rsd::l::systemd::stop() {
+    local unit="$1"
+    rsd::l::target::exec_sudo "" systemctl stop "$unit"
+}
+
+# Restart a systemd unit.
+#
+# @param string $1 Unit name.
+# @return int Exit code of systemctl.
+function rsd::l::systemd::restart() {
+    local unit="$1"
+    rsd::l::target::exec_sudo "" systemctl restart "$unit"
+}
+
+# Reload a systemd unit's configuration (sends SIGHUP).
+# Not all services support reload — check the unit's documentation.
+#
+# @param string $1 Unit name.
+# @return int Exit code of systemctl.
+function rsd::l::systemd::reload() {
+    local unit="$1"
+    rsd::l::target::exec_sudo "" systemctl reload "$unit"
+}
+
+# Enable a systemd unit to start at boot.
+# Uses --now to also start the unit immediately.
+#
+# @param string $1 Unit name.
+# @param int    $2 If 1, also start now (default). If 0, enable only.
+# @return int Exit code of systemctl.
+function rsd::l::systemd::enable() {
+    local unit="$1"
+    local start_now="${2:-1}"
+
+    if [[ "$start_now" -eq 1 ]]; then
+        rsd::l::target::exec_sudo "" systemctl enable --now "$unit"
+    else
+        rsd::l::target::exec_sudo "" systemctl enable "$unit"
+    fi
+}
+
+# Disable a systemd unit from starting at boot.
+#
+# @param string $1 Unit name.
+# @return int Exit code of systemctl.
+function rsd::l::systemd::disable() {
+    local unit="$1"
+    rsd::l::target::exec_sudo "" systemctl disable "$unit"
+}
+
+# Reload the systemd daemon to pick up new or changed unit files.
+# Must be called after writing or modifying files in /etc/systemd/system/.
+#
+# @return int Exit code of systemctl.
+function rsd::l::systemd::daemon_reload() {
+    rsd::l::target::exec_sudo "" systemctl daemon-reload
+}
+
+# ==============================================================================
+# Tier 3 — Unit File Creation
+# ==============================================================================
+
+# Admin-managed unit file directory.
+declare -g RSD_SYSTEMD_UNIT_DIR="/etc/systemd/system"
+
+# Return the canonical path for an admin-managed unit file.
+#
+# @param string $1 Unit name (e.g., "myapp.service").
+# @return stdout Absolute path (e.g., "/etc/systemd/system/myapp.service").
+function rsd::l::systemd::unit_path() {
+    local unit="$1"
+    echo "${RSD_SYSTEMD_UNIT_DIR}/${unit}"
+}
+
+# Generate a .service unit file content from parameters.
+# Pure function — builds a string, performs no I/O. This enables
+# dry-run previews and testability without sudo or a real filesystem.
+#
+# All parameters are passed via an associative array nameref.
+# Required key: "exec" (ExecStart value).
+# Optional keys: type, description, user, group, workdir, restart,
+#   restart_sec, env, exec_stop, pid_file, after, wants, requires,
+#   before, wanted_by.
+#
+# @param string& $1 nameref to associative array with parameters.
+# @param string  $2 Unit name (for default description).
+# @return stdout The complete unit file content.
+function rsd::l::systemd::generate_service() {
+    declare -n _params="$1"
+    local unit_name="$2"
+
+    local svc_type="${_params[type]:-simple}"
+    local description="${_params[description]:-RSD-managed service: ${unit_name}}"
+    local exec_start="${_params[exec]}"
+    local user="${_params[user]:-}"
+    local group="${_params[group]:-}"
+    local workdir="${_params[workdir]:-}"
+    local restart="${_params[restart]:-}"
+    local restart_sec="${_params[restart_sec]:-}"
+    local env_csv="${_params[env]:-}"
+    local exec_stop="${_params[exec_stop]:-}"
+    local pid_file="${_params[pid_file]:-}"
+
+    # Dependency directives (comma → space)
+    local after="${_params[after]:-}"
+    local wants="${_params[wants]:-}"
+    local requires="${_params[requires]:-}"
+    local before="${_params[before]:-}"
+    local wanted_by="${_params[wanted_by]:-}"
+
+    # Apply smart defaults based on service type
+    if [[ -z "$restart" ]]; then
+        case "$svc_type" in
+            oneshot) restart="no" ;;
+            *)       restart="on-failure" ;;
+        esac
+    fi
+
+    if [[ -z "$restart_sec" && "$restart" != "no" ]]; then
+        restart_sec="5"
+    fi
+
+    if [[ -z "$after" ]]; then
+        case "$svc_type" in
+            oneshot) ;;
+            *)       after="network.target" ;;
+        esac
+    fi
+
+    if [[ -z "$wanted_by" ]]; then
+        case "$svc_type" in
+            oneshot) ;;
+            *)       wanted_by="multi-user.target" ;;
+        esac
+    fi
+
+    # Comma → space conversion for multi-value directives
+    after="${after//,/ }"
+    wants="${wants//,/ }"
+    requires="${requires//,/ }"
+    before="${before//,/ }"
+    wanted_by="${wanted_by//,/ }"
+
+    # Build the unit file
+    local content=""
+    content+="# Managed by RSD — do not edit manually"$'\n'
+    content+="# Created: $(date -Iseconds)"$'\n'
+    content+=""$'\n'
+
+    # [Unit] section
+    content+="[Unit]"$'\n'
+    content+="Description=${description}"$'\n'
+    [[ -n "$after" ]]    && content+="After=${after}"$'\n'
+    [[ -n "$wants" ]]    && content+="Wants=${wants}"$'\n'
+    [[ -n "$requires" ]] && content+="Requires=${requires}"$'\n'
+    [[ -n "$before" ]]   && content+="Before=${before}"$'\n'
+    content+=""$'\n'
+
+    # [Service] section
+    content+="[Service]"$'\n'
+    content+="Type=${svc_type}"$'\n'
+    [[ -n "$user" ]]     && content+="User=${user}"$'\n'
+    [[ -n "$group" ]]    && content+="Group=${group}"$'\n'
+    [[ -n "$workdir" ]]  && content+="WorkingDirectory=${workdir}"$'\n'
+    content+="ExecStart=${exec_start}"$'\n'
+    [[ -n "$exec_stop" ]]  && content+="ExecStop=${exec_stop}"$'\n'
+    [[ -n "$pid_file" ]]   && content+="PIDFile=${pid_file}"$'\n'
+
+    # Environment entries (comma-separated K=V pairs → one per line)
+    if [[ -n "$env_csv" ]]; then
+        local -a env_pairs
+        IFS=',' read -ra env_pairs <<< "$env_csv"
+        local pair
+        for pair in "${env_pairs[@]}"; do
+            bash::trim pair
+            [[ -z "$pair" ]] && continue
+            content+="Environment=${pair}"$'\n'
+        done
+    fi
+
+    if [[ "$restart" != "no" || "$svc_type" != "oneshot" ]]; then
+        content+="Restart=${restart}"$'\n'
+        [[ -n "$restart_sec" && "$restart" != "no" ]] && content+="RestartSec=${restart_sec}"$'\n'
+    fi
+
+    content+="StandardOutput=journal"$'\n'
+    content+="StandardError=journal"$'\n'
+
+    # [Install] section — only if there is a WantedBy target
+    if [[ -n "$wanted_by" ]]; then
+        content+=""$'\n'
+        content+="[Install]"$'\n'
+        content+="WantedBy=${wanted_by}"$'\n'
+    fi
+
+    printf '%s' "$content"
+}
+
+# Generate a .timer unit file content from parameters.
+# Pure function — builds a string, performs no I/O.
+#
+# @param string& $1 nameref to associative array with parameters.
+# @param string  $2 Timer unit name (e.g., "renew-cert.timer").
+# @return stdout The complete timer unit file content.
+function rsd::l::systemd::generate_timer() {
+    declare -n _tparams="$1"
+    local timer_name="$2"
+
+    local description="${_tparams[description]:-RSD-managed timer: ${timer_name}}"
+    local on_calendar="${_tparams[on_calendar]:-}"
+    local on_boot_sec="${_tparams[on_boot_sec]:-}"
+    local on_unit_active_sec="${_tparams[on_unit_active_sec]:-}"
+    local persistent="${_tparams[persistent]:-}"
+    local after="${_tparams[after]:-}"
+    local wants="${_tparams[wants]:-}"
+    local wanted_by="${_tparams[wanted_by]:-timers.target}"
+
+    # Resolve the companion service unit name
+    local timer_basename="${timer_name%.timer}"
+    local timer_unit="${_tparams[timer_unit]:-${timer_basename}.service}"
+
+    # Comma → space conversion
+    after="${after//,/ }"
+    wants="${wants//,/ }"
+    wanted_by="${wanted_by//,/ }"
+
+    local content=""
+    content+="# Managed by RSD — do not edit manually"$'\n'
+    content+="# Created: $(date -Iseconds)"$'\n'
+    content+=""$'\n'
+
+    # [Unit] section
+    content+="[Unit]"$'\n'
+    content+="Description=${description}"$'\n'
+    [[ -n "$after" ]] && content+="After=${after}"$'\n'
+    [[ -n "$wants" ]] && content+="Wants=${wants}"$'\n'
+    content+=""$'\n'
+
+    # [Timer] section
+    content+="[Timer]"$'\n'
+    content+="Unit=${timer_unit}"$'\n'
+    [[ -n "$on_calendar" ]]        && content+="OnCalendar=${on_calendar}"$'\n'
+    [[ -n "$on_boot_sec" ]]        && content+="OnBootSec=${on_boot_sec}"$'\n'
+    [[ -n "$on_unit_active_sec" ]] && content+="OnUnitActiveSec=${on_unit_active_sec}"$'\n'
+    [[ -n "$persistent" ]]         && content+="Persistent=true"$'\n'
+    content+=""$'\n'
+
+    # [Install] section
+    content+="[Install]"$'\n'
+    content+="WantedBy=${wanted_by}"$'\n'
+
+    printf '%s' "$content"
+}
+
+# Write a unit file to /etc/systemd/system/, daemon-reload, and
+# optionally enable + start.
+#
+# Uses the same temp-file-then-move pattern as apt.lib::write_source
+# to safely transport multi-line content through SSH+sudo.
+#
+# @param string $1 Unit name (e.g., "myapp.service").
+# @param string $2 Full unit file content.
+# @param int    $3 If 1, enable after install (default: 1).
+# @param int    $4 If 1, start now after enable (default: 1).
+# @return int 0 on success, 2 on validation failure, 14 on mktemp failure.
+function rsd::l::systemd::install_unit() {
+    local unit_name="$1"
+    local content="$2"
+    local do_enable="${3:-1}"
+    local do_start="${4:-1}"
+
+    # Validate unit name at library boundary
+    if ! rsd::l::systemd::validate_unit_name "$unit_name"; then
+        return 2
+    fi
+
+    local dest
+    dest=$(rsd::l::systemd::unit_path "$unit_name")
+
+    # Stage through secure temp file
+    local tmpfile
+    tmpfile=$(rsd::l::target::mktemp "rsd-unit.XXXXXX") || return 14
+
+    printf '%s\n' "$content" | rsd::l::target::exec tee "$tmpfile" >/dev/null
+
+    # Move to destination with sudo
+    rsd::l::target::exec_sudo "" mv "$tmpfile" "$dest"
+    rsd::l::target::exec_sudo "" chmod 0644 "$dest"
+
+    # Reload daemon to pick up the new file
+    rsd::l::systemd::daemon_reload
+
+    if [[ "$do_enable" -eq 1 ]]; then
+        rsd::l::systemd::enable "$unit_name" "$do_start"
+    fi
+
+    return 0
+}
+
+# Remove a unit file: stop → disable → delete → daemon-reload.
+# Safe to call if the unit does not exist (idempotent).
+#
+# @param string $1 Unit name.
+# @return int 0 on success.
+function rsd::l::systemd::remove_unit() {
+    local unit_name="$1"
+
+    if ! rsd::l::systemd::validate_unit_name "$unit_name"; then
+        return 2
+    fi
+
+    # Stop and disable if running/enabled (ignore errors if not loaded)
+    rsd::l::systemd::stop "$unit_name" 2>/dev/null
+    rsd::l::systemd::disable "$unit_name" 2>/dev/null
+
+    local dest
+    dest=$(rsd::l::systemd::unit_path "$unit_name")
+
+    rsd::l::target::exec_sudo "" rm -f "$dest"
+    rsd::l::systemd::daemon_reload
+
+    return 0
+}
+
+# ==============================================================================
+# Tier 4 — Journal
+# ==============================================================================
+
+# Fetch recent journal logs for a unit.
+# Always uses --no-pager for non-interactive output.
+#
+# @param string $1 Unit name.
+# @param int    $2 Number of lines (default: 50).
+# @param string $3 Since filter (optional, e.g., "1 hour ago").
+# @return stdout Journal output.
+function rsd::l::systemd::logs() {
+    local unit="$1"
+    local lines="${2:-50}"
+    local since="${3:-}"
+
+    local -a args=(
+        "-u" "$unit"
+        "--no-pager"
+        "-n" "$lines"
+        "-o" "short-iso"
+    )
+
+    if [[ -n "$since" ]]; then
+        args+=("--since" "$since")
+    fi
+
+    rsd::l::target::exec journalctl "${args[@]}"
+}

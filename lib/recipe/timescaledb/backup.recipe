@@ -76,7 +76,8 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 # Load dependencies
-[[ "$RSD_PG_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/pg.lib)"
+[[ "$RSD_PG_LIB" != "1" ]]      && source "$(rsd::get_libdir_file lib/pg.lib)"
+[[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
 
 # Recipe-specific CLI options
 declare -g -A RSD_RECIPE_OPTIONS=(
@@ -176,7 +177,7 @@ function rsd::r::timescaledb_backup::validate_env() {
     rsd::io::status "Validating backup environment..."
 
     # PostgreSQL running?
-    if ! rsd::l::target::exec systemctl is-active --quiet postgresql; then
+    if ! rsd::l::systemd::is_active "postgresql.service"; then
         rsd::io::error "PostgreSQL is not running on the target."
         return 1
     fi
