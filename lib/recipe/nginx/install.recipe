@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# Nginx — Production Provisioning Recipe
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Installs Nginx from Ubuntu 26.04's native repositories and configures
+# baseline security and performance defaults.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+#  1. install_packages    — Installs nginx from Ubuntu's default repos.
+#  2. configure_defaults  — Sets production defaults: server_tokens off,
+#                           client_max_body_size 64m, gzip compression,
+#                           removes the default site symlink.
+#  3. restart_service     — Restarts and enables the nginx service.
+#  4. validate_install    — Smoke-tests: nginx version, config syntax
+#                           check (nginx -t), service status.
+#
+# WHY UBUNTU'S NGINX
+# ------------------
+# Ubuntu's nginx package runs the worker process as www-data — the same
+# user PHP-FPM uses by default. This eliminates socket permission
+# coordination between the two services. The worker user alignment is
+# the primary advantage over nginx.org's packages (which run as nginx).
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. Each task has a pre_check that detects
+# whether the desired state is already satisfied.
+#
+# SCOPE
+# -----
+# Works on both local and remote targets.
+#
+# AFTER THIS RECIPE
+# -----------------
+# To add virtual hosts, create server blocks in /etc/nginx/sites-available/
+# and symlink them to /etc/nginx/sites-enabled/.
+#
+# Usage: rsd recipe run nginx/install
+#        rsd @target recipe run nginx/install
+#        rsd @target recipe run nginx/install --dry-run --verbose
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load dependencies
+[[ "$RSD_HOST_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/host.lib)"
+[[ "$RSD_APT_LIB" != "1" ]]  && source "$(rsd::get_libdir_file lib/apt.lib)"
+
+# ==============================================================================
+# Constants
+# ==============================================================================
+
+declare -g RSD_NGINX_CONF="/etc/nginx/nginx.conf"
+declare -g RSD_NGINX_SITES_ENABLED="/etc/nginx/sites-enabled"
+declare -g RSD_NGINX_DEFAULT_SITE="${RSD_NGINX_SITES_ENABLED}/default"
+
+# ==============================================================================
+# Platform Resolution
+# ==============================================================================
+
+# Resolve and validate target platform for Nginx installation.
+# Requires Ubuntu 26.04+ (debian family). Caches results globally.
+#
+# @return int 0 on success.
+# @return exit 2 on platform mismatch.
+function rsd::l::r::nginx_install::resolve_platform() {
+    [[ -n "${RSD_NGINX_PLATFORM_OK:-}" ]] && return 0
+
+    local host_alias="localhost"
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        host_alias="${RSD_REMOTE_TARGET#@}"
+    fi
+
+    local distro="" family="" version=""
+    rsd::l::host::get_property "$host_alias" "family" family
+    rsd::l::host::get_property "$host_alias" "distro" distro
+    rsd::l::host::get_property "$host_alias" "version" version
+
+    if [[ "$family" != "debian" || "$distro" != "ubuntu" ]]; then
+        rsd::io::error "This recipe requires Ubuntu. Detected: family=$family, distro=$distro."
+        exit 2
+    fi
+
+    if ! rsd::l::host::version_gte "$version" "26.04"; then
+        rsd::io::error "This recipe requires Ubuntu 26.04+. Detected version: $version."
+        exit 2
+    fi
+
+    declare -g RSD_NGINX_PLATFORM_OK=1
+}
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::nginx_install::register() {
+    rsd::l::r::nginx_install::resolve_platform
+
+    rsd::r::register_task "nginx_install::install_packages"
+    rsd::r::register_task "nginx_install::configure_defaults" "rollback"
+    rsd::r::register_task "nginx_install::restart_service"
+    rsd::r::register_task "nginx_install::validate_install"
+}
+
+# ==============================================================================
+# Task: install_packages
+# ==============================================================================
+
+function rsd::r::nginx_install::install_packages::pre_check() {
+    rsd::l::target::exec dpkg -l nginx 2>/dev/null | grep -q '^ii'
+}
+
+function rsd::r::nginx_install::install_packages() {
+    rsd::io::status "Installing Nginx from Ubuntu repositories..."
+
+    if ! rsd::l::apt::install nginx; then
+        rsd::io::error "Nginx installation failed."
+        return 1
+    fi
+
+    rsd::io::ok "Nginx installed."
+}
+
+# ==============================================================================
+# Task: configure_defaults
+# ==============================================================================
+# Sets baseline secure and performant defaults in nginx.conf.
+# Removes the default site to prevent serving a generic welcome page.
+
+function rsd::r::nginx_install::configure_defaults::pre_check() {
+    rsd::l::target::file_contains "server_tokens off" "$RSD_NGINX_CONF"
+}
+
+function rsd::r::nginx_install::configure_defaults() {
+    rsd::io::status "Configuring Nginx production defaults..."
+
+    if ! rsd::l::target::file_exists "$RSD_NGINX_CONF"; then
+        rsd::io::error "Nginx config not found at: $RSD_NGINX_CONF"
+        return 1
+    fi
+
+    # Backup original
+    if ! rsd::l::target::exec_sudo "" cp "$RSD_NGINX_CONF" "${RSD_NGINX_CONF}.rsd.bak"; then
+        rsd::io::error "Failed to create backup of nginx.conf."
+        return 1
+    fi
+
+    # --- server_tokens off ---
+    # Prevents Nginx from disclosing its version in response headers and error pages.
+    if rsd::l::target::file_contains "server_tokens" "$RSD_NGINX_CONF"; then
+        rsd::l::target::exec_sudo "" sed -i \
+            's/^[[:space:]]*#*[[:space:]]*server_tokens.*/\tserver_tokens off;/' \
+            "$RSD_NGINX_CONF"
+    else
+        # Inject after the http { line
+        rsd::l::target::exec_sudo "" sed -i \
+            '/^http\s*{/a\\tserver_tokens off;' \
+            "$RSD_NGINX_CONF"
+    fi
+
+    # --- client_max_body_size ---
+    # Default 1m is too restrictive for file uploads. 64m covers most use cases.
+    if rsd::l::target::file_contains "client_max_body_size" "$RSD_NGINX_CONF"; then
+        rsd::l::target::exec_sudo "" sed -i \
+            's/^[[:space:]]*#*[[:space:]]*client_max_body_size.*/\tclient_max_body_size 64m;/' \
+            "$RSD_NGINX_CONF"
+    else
+        rsd::l::target::exec_sudo "" sed -i \
+            '/^http\s*{/a\\tclient_max_body_size 64m;' \
+            "$RSD_NGINX_CONF"
+    fi
+
+    # --- Gzip compression ---
+    # Enable gzip for text-based content types to reduce bandwidth.
+    if rsd::l::target::file_contains "gzip on" "$RSD_NGINX_CONF"; then
+        rsd::io::info "Gzip already enabled."
+    else
+        # Ubuntu's default nginx.conf typically has gzip directives commented out.
+        # Uncomment them if present, otherwise inject.
+        if rsd::l::target::file_contains "# gzip on" "$RSD_NGINX_CONF"; then
+            rsd::l::target::exec_sudo "" sed -i \
+                's/^[[:space:]]*#\s*gzip on;/\tgzip on;/' \
+                "$RSD_NGINX_CONF"
+            rsd::l::target::exec_sudo "" sed -i \
+                's/^[[:space:]]*#\s*gzip_types/\tgzip_types/' \
+                "$RSD_NGINX_CONF"
+        else
+            rsd::l::target::exec_sudo "" sed -i \
+                '/^http\s*{/a\\tgzip on;\n\tgzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;' \
+                "$RSD_NGINX_CONF"
+        fi
+    fi
+
+    # --- Remove default site ---
+    # The default site serves a generic welcome page. Removing it prevents
+    # accidental exposure and forces explicit virtual host configuration.
+    if rsd::l::target::file_exists "$RSD_NGINX_DEFAULT_SITE"; then
+        rsd::l::target::exec_sudo "" rm -f "$RSD_NGINX_DEFAULT_SITE"
+        rsd::io::info "Default site removed from sites-enabled."
+    fi
+
+    rsd::io::ok "Nginx production defaults configured."
+    rsd::io::info "  server_tokens:        off"
+    rsd::io::info "  client_max_body_size: 64m"
+    rsd::io::info "  gzip:                 on"
+}
+
+function rsd::r::nginx_install::configure_defaults::rollback() {
+    if rsd::l::target::file_exists "${RSD_NGINX_CONF}.rsd.bak"; then
+        rsd::l::target::exec_sudo "" mv "${RSD_NGINX_CONF}.rsd.bak" "$RSD_NGINX_CONF"
+    fi
+}
+
+# ==============================================================================
+# Task: restart_service
+# ==============================================================================
+
+function rsd::r::nginx_install::restart_service() {
+    rsd::io::status "Restarting Nginx service..."
+
+    # Validate config before restart to avoid downtime from syntax errors
+    if ! rsd::l::target::exec_sudo "" nginx -t 2>/dev/null; then
+        rsd::io::error "Nginx configuration test failed. Not restarting."
+        rsd::io::info "Check: nginx -t"
+        return 1
+    fi
+
+    rsd::l::target::exec_sudo "" systemctl restart nginx
+    rsd::l::target::exec_sudo "" systemctl enable nginx
+
+    # Brief sanity check
+    if ! rsd::l::target::exec_sudo "" systemctl is-active --quiet nginx; then
+        rsd::io::error "Nginx failed to start after restart."
+        rsd::io::info "Check: journalctl -xeu nginx"
+        return 1
+    fi
+
+    rsd::io::ok "Nginx restarted and enabled."
+}
+
+# ==============================================================================
+# Task: validate_install
+# ==============================================================================
+# Read-only smoke test. Verifies Nginx is working correctly.
+
+function rsd::r::nginx_install::validate_install() {
+    rsd::io::blank
+    rsd::io::banner "Validating Nginx Installation"
+    rsd::io::blank
+
+    # 1. Nginx version
+    local nginx_version=""
+    nginx_version=$(rsd::l::target::exec nginx -v 2>&1)
+    rsd::io::info "Version:     $nginx_version"
+
+    # 2. Config syntax test
+    if rsd::l::target::exec_sudo "" nginx -t 2>/dev/null; then
+        rsd::io::info "Config test: OK"
+    else
+        rsd::io::error "Config test: FAILED"
+        return 1
+    fi
+
+    # 3. Service status
+    local nginx_status=""
+    nginx_status=$(rsd::l::target::exec_sudo "" systemctl is-active nginx 2>/dev/null)
+    rsd::io::info "Service:     $nginx_status"
+
+    if [[ "$nginx_status" != "active" ]]; then
+        rsd::io::error "Nginx is not active."
+        return 1
+    fi
+
+    # 4. Worker process user
+    local worker_user=""
+    worker_user=$(rsd::l::target::exec sh -c "'ps aux | grep \"nginx: worker\" | grep -v grep | head -1 | awk \"{print \\$1}\"'" 2>/dev/null)
+    if [[ -n "$worker_user" ]]; then
+        rsd::io::info "Worker user: $worker_user"
+    fi
+
+    rsd::io::blank
+    rsd::io::banner "Nginx install completed successfully."
+    rsd::io::blank
+    rsd::io::info "Config:        $RSD_NGINX_CONF"
+    rsd::io::info "Sites:         $RSD_NGINX_SITES_ENABLED/"
+    rsd::io::info "Worker user:   www-data (matches PHP-FPM)"
+    rsd::io::blank
+    rsd::io::info "Next steps:"
+    rsd::io::info "  1. Create server blocks in /etc/nginx/sites-available/"
+    rsd::io::info "  2. Symlink to /etc/nginx/sites-enabled/"
+    rsd::io::info "  3. Test config: nginx -t && systemctl reload nginx"
+    rsd::io::blank
+}

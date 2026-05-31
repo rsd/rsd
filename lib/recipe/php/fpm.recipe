@@ -1,0 +1,443 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# PHP-FPM — Production Provisioning Recipe
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Installs PHP 8.5 FPM from Ubuntu 26.04's native repositories and configures
+# it for production use. No third-party PPA required — Ubuntu 26.04 ships
+# PHP 8.5 natively.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+#  1. install_packages    — Installs php8.5-fpm and a production-ready set
+#                           of extensions (opcache, mysql, curl, mbstring,
+#                           xml, gd, zip, intl, bcmath, readline).
+#  2. configure_opcache   — Writes optimized OPcache settings for production
+#                           (interned strings buffer, max accelerated files).
+#  3. configure_pool      — Tunes the www pool: Unix socket path, ownership
+#                           (www-data), and socket mode (0660).
+#  4. harden_php_ini      — Sets expose_php=Off, display_errors=Off,
+#                           cgi.fix_pathinfo=0 in the FPM php.ini.
+#  5. restart_service     — Restarts and enables the php8.5-fpm service.
+#  6. validate_install    — Smoke-tests: PHP version, FPM service status,
+#                           socket file existence, loaded modules.
+#
+# OPTIONS
+# -------
+#  --php-version <ver>    Override PHP version (default: 8.5). Allows
+#                         future-proofing for 8.6+.
+#  --extensions <csv>     Comma-separated list of additional extensions
+#                         to install beyond the base set (e.g., "redis,imagick").
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. Each task has a pre_check that detects
+# whether the desired state is already satisfied.
+#
+# SCOPE
+# -----
+# Works on both local and remote targets.
+#
+# Usage: rsd recipe run php/fpm
+#        rsd @target recipe run php/fpm
+#        rsd @target recipe run php/fpm --php-version 8.5 --extensions redis,imagick
+#        rsd @target recipe run php/fpm --dry-run --verbose
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load dependencies
+[[ "$RSD_HOST_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/host.lib)"
+[[ "$RSD_APT_LIB" != "1" ]]  && source "$(rsd::get_libdir_file lib/apt.lib)"
+
+# Recipe-specific CLI options
+declare -g -A RSD_RECIPE_OPTIONS=(
+    ["php-version"]=1
+    ["extensions"]=1
+)
+
+# ==============================================================================
+# Constants (populated after option parsing in register)
+# ==============================================================================
+
+declare -g RSD_PHP_VERSION=""
+declare -g RSD_PHP_FPM_CONF=""
+declare -g RSD_PHP_FPM_INI=""
+declare -g RSD_PHP_OPCACHE_INI=""
+declare -g RSD_PHP_FPM_SOCKET=""
+declare -g RSD_PHP_FPM_SERVICE=""
+
+# Base extensions — production-ready set covering most web application needs
+declare -g -a RSD_PHP_BASE_EXTENSIONS=()
+
+# Populate version-dependent constants.
+# Called once from register() after option parsing resolves the PHP version.
+function rsd::l::r::php_fpm::init_constants() {
+    local ver="$RSD_PHP_VERSION"
+
+    RSD_PHP_FPM_CONF="/etc/php/${ver}/fpm/pool.d/www.conf"
+    RSD_PHP_FPM_INI="/etc/php/${ver}/fpm/php.ini"
+    RSD_PHP_OPCACHE_INI="/etc/php/${ver}/fpm/conf.d/10-opcache.ini"
+    RSD_PHP_FPM_SOCKET="/var/run/php/php${ver}-fpm.sock"
+    RSD_PHP_FPM_SERVICE="php${ver}-fpm"
+
+    RSD_PHP_BASE_EXTENSIONS=(
+        "php${ver}-fpm"
+        "php${ver}-cli"
+        "php${ver}-common"
+        "php${ver}-opcache"
+        "php${ver}-mysql"
+        "php${ver}-curl"
+        "php${ver}-mbstring"
+        "php${ver}-xml"
+        "php${ver}-gd"
+        "php${ver}-zip"
+        "php${ver}-intl"
+        "php${ver}-bcmath"
+        "php${ver}-readline"
+    )
+}
+
+# ==============================================================================
+# Platform Resolution
+# ==============================================================================
+
+# Resolve and validate target platform for PHP-FPM installation.
+# Requires Ubuntu 26.04+ (debian family). Caches results globally.
+#
+# @return int 0 on success.
+# @return exit 2 on platform mismatch.
+function rsd::l::r::php_fpm::resolve_platform() {
+    # Return cached if already resolved
+    [[ -n "${RSD_PHP_FPM_PLATFORM_OK:-}" ]] && return 0
+
+    local host_alias="localhost"
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        host_alias="${RSD_REMOTE_TARGET#@}"
+    fi
+
+    local distro="" family="" version=""
+    rsd::l::host::get_property "$host_alias" "family" family
+    rsd::l::host::get_property "$host_alias" "distro" distro
+    rsd::l::host::get_property "$host_alias" "version" version
+
+    if [[ "$family" != "debian" || "$distro" != "ubuntu" ]]; then
+        rsd::io::error "This recipe requires Ubuntu. Detected: family=$family, distro=$distro."
+        exit 2
+    fi
+
+    if ! rsd::l::host::version_gte "$version" "26.04"; then
+        rsd::io::error "This recipe requires Ubuntu 26.04+. Detected version: $version."
+        exit 2
+    fi
+
+    declare -g RSD_PHP_FPM_PLATFORM_OK=1
+}
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::php_fpm::register() {
+    # Platform guard — exits early with code 2 if not Ubuntu 26.04+
+    rsd::l::r::php_fpm::resolve_platform
+
+    # Resolve PHP version from options or default
+    RSD_PHP_VERSION="${RSD_COMMAND_ARGS[php-version]:-8.5}"
+    rsd::l::r::php_fpm::init_constants
+
+    rsd::r::register_task "php_fpm::install_packages"
+    rsd::r::register_task "php_fpm::configure_opcache" "rollback"
+    rsd::r::register_task "php_fpm::configure_pool" "rollback"
+    rsd::r::register_task "php_fpm::harden_php_ini" "rollback"
+    rsd::r::register_task "php_fpm::restart_service"
+    rsd::r::register_task "php_fpm::validate_install"
+}
+
+# ==============================================================================
+# Task: install_packages
+# ==============================================================================
+
+function rsd::r::php_fpm::install_packages::pre_check() {
+    rsd::l::target::exec dpkg -l "php${RSD_PHP_VERSION}-fpm" 2>/dev/null | grep -q '^ii'
+}
+
+function rsd::r::php_fpm::install_packages() {
+    rsd::io::status "Installing PHP ${RSD_PHP_VERSION} FPM and extensions..."
+
+    # Build full package list: base + user-supplied extras
+    local -a packages=("${RSD_PHP_BASE_EXTENSIONS[@]}")
+
+    local extra_csv="${RSD_COMMAND_ARGS[extensions]:-}"
+    if [[ -n "$extra_csv" ]]; then
+        local ext
+        IFS=',' read -ra extras <<< "$extra_csv"
+        for ext in "${extras[@]}"; do
+            # Trim whitespace
+            bash::trim ext
+            [[ -z "$ext" ]] && continue
+            # Prefix with phpX.Y- if not already prefixed
+            if [[ "$ext" != php* ]]; then
+                ext="php${RSD_PHP_VERSION}-${ext}"
+            fi
+            packages+=("$ext")
+        done
+        rsd::io::info "Additional extensions: $extra_csv"
+    fi
+
+    rsd::io::info "Packages to install: ${packages[*]}"
+
+    if ! rsd::l::apt::install "${packages[@]}"; then
+        rsd::io::error "Package installation failed."
+        return 1
+    fi
+
+    rsd::io::ok "PHP ${RSD_PHP_VERSION} FPM and extensions installed."
+}
+
+# ==============================================================================
+# Task: configure_opcache
+# ==============================================================================
+# Writes production-optimized OPcache settings. These override the
+# conservative defaults shipped by Ubuntu's php-opcache package.
+
+function rsd::r::php_fpm::configure_opcache::pre_check() {
+    rsd::l::target::file_contains "opcache.memory_consumption=256" "$RSD_PHP_OPCACHE_INI"
+}
+
+function rsd::r::php_fpm::configure_opcache() {
+    rsd::io::status "Configuring OPcache for production..."
+
+    if ! rsd::l::target::file_exists "$RSD_PHP_OPCACHE_INI"; then
+        rsd::io::error "OPcache config not found at: $RSD_PHP_OPCACHE_INI"
+        return 1
+    fi
+
+    # Backup original
+    if ! rsd::l::target::exec_sudo "" cp "$RSD_PHP_OPCACHE_INI" "${RSD_PHP_OPCACHE_INI}.rsd.bak"; then
+        rsd::io::error "Failed to create backup of OPcache config."
+        return 1
+    fi
+
+    local opcache_content
+    opcache_content="; RSD-managed OPcache production settings
+; Original backed up to ${RSD_PHP_OPCACHE_INI}.rsd.bak
+zend_extension=opcache
+opcache.enable=1
+opcache.memory_consumption=256
+opcache.interned_strings_buffer=64
+opcache.max_accelerated_files=30000
+opcache.validate_timestamps=0
+opcache.save_comments=1
+opcache.enable_cli=0"
+
+    # Write via temp file to avoid multi-line escaping issues through SSH+sudo
+    local tmpfile
+    tmpfile=$(rsd::l::target::mktemp "rsd-opcache.XXXXXX") || return 14
+
+    printf '%s\n' "$opcache_content" | rsd::l::target::exec tee "$tmpfile" >/dev/null
+    rsd::l::target::exec_sudo "" mv "$tmpfile" "$RSD_PHP_OPCACHE_INI"
+    rsd::l::target::exec_sudo "" chmod 0644 "$RSD_PHP_OPCACHE_INI"
+
+    rsd::io::ok "OPcache configured for production."
+    rsd::io::info "  opcache.validate_timestamps=0 — restart FPM after deployments."
+}
+
+function rsd::r::php_fpm::configure_opcache::rollback() {
+    if rsd::l::target::file_exists "${RSD_PHP_OPCACHE_INI}.rsd.bak"; then
+        rsd::l::target::exec_sudo "" mv "${RSD_PHP_OPCACHE_INI}.rsd.bak" "$RSD_PHP_OPCACHE_INI"
+    fi
+}
+
+# ==============================================================================
+# Task: configure_pool
+# ==============================================================================
+# Ensures the www pool uses a Unix socket with correct ownership for
+# Nginx (www-data) and secure permissions.
+
+function rsd::r::php_fpm::configure_pool::pre_check() {
+    rsd::l::target::file_contains "listen.owner = www-data" "$RSD_PHP_FPM_CONF" && \
+    rsd::l::target::file_contains "listen.mode = 0660" "$RSD_PHP_FPM_CONF"
+}
+
+function rsd::r::php_fpm::configure_pool() {
+    rsd::io::status "Configuring PHP-FPM www pool..."
+
+    if ! rsd::l::target::file_exists "$RSD_PHP_FPM_CONF"; then
+        rsd::io::error "Pool config not found at: $RSD_PHP_FPM_CONF"
+        return 1
+    fi
+
+    # Backup original
+    if ! rsd::l::target::exec_sudo "" cp "$RSD_PHP_FPM_CONF" "${RSD_PHP_FPM_CONF}.rsd.bak"; then
+        rsd::io::error "Failed to create backup of pool config."
+        return 1
+    fi
+
+    # Ensure listen directive uses the Unix socket
+    rsd::l::target::exec_sudo "" sed -i \
+        "s|^listen = .*|listen = ${RSD_PHP_FPM_SOCKET}|" \
+        "$RSD_PHP_FPM_CONF"
+
+    # Set socket ownership and permissions
+    # Uncomment and set listen.owner, listen.group, listen.mode
+    rsd::l::target::exec_sudo "" sed -i \
+        's/^;*\s*listen\.owner\s*=.*/listen.owner = www-data/' \
+        "$RSD_PHP_FPM_CONF"
+
+    rsd::l::target::exec_sudo "" sed -i \
+        's/^;*\s*listen\.group\s*=.*/listen.group = www-data/' \
+        "$RSD_PHP_FPM_CONF"
+
+    rsd::l::target::exec_sudo "" sed -i \
+        's/^;*\s*listen\.mode\s*=.*/listen.mode = 0660/' \
+        "$RSD_PHP_FPM_CONF"
+
+    rsd::io::ok "PHP-FPM pool configured."
+    rsd::io::info "  Socket: $RSD_PHP_FPM_SOCKET"
+    rsd::io::info "  Owner:  www-data:www-data (mode 0660)"
+}
+
+function rsd::r::php_fpm::configure_pool::rollback() {
+    if rsd::l::target::file_exists "${RSD_PHP_FPM_CONF}.rsd.bak"; then
+        rsd::l::target::exec_sudo "" mv "${RSD_PHP_FPM_CONF}.rsd.bak" "$RSD_PHP_FPM_CONF"
+    fi
+}
+
+# ==============================================================================
+# Task: harden_php_ini
+# ==============================================================================
+# Production hardening: disable information leaks, disable error display
+# for end users, and fix the pathinfo security issue.
+
+function rsd::r::php_fpm::harden_php_ini::pre_check() {
+    rsd::l::target::file_contains "expose_php = Off" "$RSD_PHP_FPM_INI" && \
+    rsd::l::target::file_contains "display_errors = Off" "$RSD_PHP_FPM_INI" && \
+    rsd::l::target::file_contains "cgi.fix_pathinfo = 0" "$RSD_PHP_FPM_INI"
+}
+
+function rsd::r::php_fpm::harden_php_ini() {
+    rsd::io::status "Hardening PHP-FPM php.ini..."
+
+    if ! rsd::l::target::file_exists "$RSD_PHP_FPM_INI"; then
+        rsd::io::error "php.ini not found at: $RSD_PHP_FPM_INI"
+        return 1
+    fi
+
+    # Backup original
+    if ! rsd::l::target::exec_sudo "" cp "$RSD_PHP_FPM_INI" "${RSD_PHP_FPM_INI}.rsd.bak"; then
+        rsd::io::error "Failed to create backup of php.ini."
+        return 1
+    fi
+
+    # expose_php — prevents X-Powered-By header from leaking PHP version
+    rsd::l::target::exec_sudo "" sed -i \
+        's/^expose_php\s*=.*/expose_php = Off/' \
+        "$RSD_PHP_FPM_INI"
+
+    # display_errors — errors go to logs, not to user-facing responses
+    rsd::l::target::exec_sudo "" sed -i \
+        's/^display_errors\s*=.*/display_errors = Off/' \
+        "$RSD_PHP_FPM_INI"
+
+    # cgi.fix_pathinfo — prevents PATH_INFO interpretation exploits
+    rsd::l::target::exec_sudo "" sed -i \
+        's/^;*\s*cgi\.fix_pathinfo\s*=.*/cgi.fix_pathinfo = 0/' \
+        "$RSD_PHP_FPM_INI"
+
+    rsd::io::ok "php.ini hardened for production."
+}
+
+function rsd::r::php_fpm::harden_php_ini::rollback() {
+    if rsd::l::target::file_exists "${RSD_PHP_FPM_INI}.rsd.bak"; then
+        rsd::l::target::exec_sudo "" mv "${RSD_PHP_FPM_INI}.rsd.bak" "$RSD_PHP_FPM_INI"
+    fi
+}
+
+# ==============================================================================
+# Task: restart_service
+# ==============================================================================
+
+function rsd::r::php_fpm::restart_service() {
+    rsd::io::status "Restarting PHP-FPM service..."
+
+    rsd::l::target::exec_sudo "" systemctl restart "$RSD_PHP_FPM_SERVICE"
+    rsd::l::target::exec_sudo "" systemctl enable "$RSD_PHP_FPM_SERVICE"
+
+    # Brief sanity check
+    if ! rsd::l::target::exec_sudo "" systemctl is-active --quiet "$RSD_PHP_FPM_SERVICE"; then
+        rsd::io::error "PHP-FPM failed to start after restart."
+        rsd::io::info "Check: journalctl -xeu $RSD_PHP_FPM_SERVICE"
+        return 1
+    fi
+
+    rsd::io::ok "PHP-FPM restarted and enabled."
+}
+
+# ==============================================================================
+# Task: validate_install
+# ==============================================================================
+# Read-only smoke test. Verifies PHP is working and FPM is running.
+
+function rsd::r::php_fpm::validate_install() {
+    rsd::io::blank
+    rsd::io::banner "Validating PHP-FPM Installation"
+    rsd::io::blank
+
+    # 1. PHP version
+    local php_version=""
+    php_version=$(rsd::l::target::exec php -r 'echo PHP_VERSION;' 2>/dev/null)
+    if [[ -z "$php_version" ]]; then
+        rsd::io::error "Could not determine PHP version."
+        return 1
+    fi
+    rsd::io::info "PHP Version: $php_version"
+
+    # 2. FPM service status
+    local fpm_status=""
+    fpm_status=$(rsd::l::target::exec_sudo "" systemctl is-active "$RSD_PHP_FPM_SERVICE" 2>/dev/null)
+    rsd::io::info "FPM Service: $fpm_status"
+
+    if [[ "$fpm_status" != "active" ]]; then
+        rsd::io::error "PHP-FPM is not active."
+        return 1
+    fi
+
+    # 3. Socket file existence
+    if rsd::l::target::file_exists "$RSD_PHP_FPM_SOCKET"; then
+        rsd::io::info "FPM Socket:  $RSD_PHP_FPM_SOCKET (exists)"
+    else
+        rsd::io::warn "FPM Socket:  $RSD_PHP_FPM_SOCKET (not found — may use TCP)"
+    fi
+
+    # 4. Key loaded modules
+    local modules=""
+    modules=$(rsd::l::target::exec php -m 2>/dev/null)
+    local -a check_mods=("opcache" "curl" "mbstring" "mysqlnd" "gd" "intl" "zip")
+    local mod
+    rsd::io::info "Loaded modules check:"
+    for mod in "${check_mods[@]}"; do
+        if echo "$modules" | grep -qi "^${mod}$"; then
+            rsd::io::info "  ✓ $mod"
+        else
+            rsd::io::warn "  ✗ $mod (not loaded)"
+        fi
+    done
+
+    rsd::io::blank
+    rsd::io::banner "PHP-FPM install completed successfully."
+    rsd::io::blank
+    rsd::io::info "Socket path: $RSD_PHP_FPM_SOCKET"
+    rsd::io::info "Config:      $RSD_PHP_FPM_CONF"
+    rsd::io::info "php.ini:     $RSD_PHP_FPM_INI"
+    rsd::io::blank
+}
