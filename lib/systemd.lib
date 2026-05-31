@@ -38,7 +38,7 @@ if [[ "$RSD_SYSTEMD_LIB" == "1" ]]; then
     return 0
 fi
 RSD_SYSTEMD_LIB=1
-RSD_SYSTEMD_LIB_VERSION="0.1.0"
+RSD_SYSTEMD_LIB_VERSION="0.1.1"
 
 # Load target-aware dispatch primitives
 [[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
@@ -358,10 +358,7 @@ function rsd::l::systemd::generate_service() {
     fi
 
     if [[ -z "$wanted_by" ]]; then
-        case "$svc_type" in
-            oneshot) ;;
-            *)       wanted_by="multi-user.target" ;;
-        esac
+        wanted_by="multi-user.target"
     fi
 
     # Comma → space conversion for multi-value directives
@@ -373,7 +370,7 @@ function rsd::l::systemd::generate_service() {
 
     # Build the unit file
     local content=""
-    content+="# Managed by RSD — do not edit manually"$'\n'
+    content+="# Created by RSD"$'\n'
     content+="# Created: $(date -Iseconds)"$'\n'
     content+=""$'\n'
 
@@ -455,7 +452,7 @@ function rsd::l::systemd::generate_timer() {
     wanted_by="${wanted_by//,/ }"
 
     local content=""
-    content+="# Managed by RSD — do not edit manually"$'\n'
+    content+="# Created by RSD"$'\n'
     content+="# Created: $(date -Iseconds)"$'\n'
     content+=""$'\n'
 

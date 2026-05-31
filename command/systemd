@@ -32,7 +32,7 @@ fi
 [[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
 
 RSD_C_SYSTEMD_SHORT_DESC="Systemd Service Management"
-RSD_C_SYSTEMD_VERSION="0.1.0"
+RSD_C_SYSTEMD_VERSION="0.1.1"
 
 # Command is remote-aware (Mode A — local orchestration)
 RSD_C_SYSTEMD_REMOTE_AWARE=1
@@ -72,6 +72,42 @@ declare -g -A RSD_C_SYSTEMD_CREATE_ARGS_PARAM=(
 )
 
 declare -g -A RSD_C_SYSTEMD_LOGS_ARGS_PARAM=(
+    ["n"]=1
+    ["since"]=1
+)
+
+# Top-level arg config — must mirror all sub-action options so the
+# intermediate rsd::parse_args in rsd::command() doesn't eat multi-word
+# option values (e.g., --description "Renew Tailscale ...") as positionals.
+declare -g -A RSD_C_SYSTEMD_ARGS_PARAM=(
+    # Service configuration
+    ["exec"]=1
+    ["type"]=1
+    ["description"]=1
+    ["user"]=1
+    ["group"]=1
+    ["workdir"]=1
+    ["restart"]=1
+    ["restart-sec"]=1
+    ["env"]=1
+    ["exec-stop"]=1
+    ["pid-file"]=1
+    # Dependencies
+    ["after"]=1
+    ["wants"]=1
+    ["requires"]=1
+    ["before"]=1
+    ["wanted-by"]=1
+    # Flags
+    ["no-enable"]=0
+    ["no-start"]=0
+    # Timer-specific
+    ["on-calendar"]=1
+    ["on-boot-sec"]=1
+    ["on-unit-active-sec"]=1
+    ["timer-unit"]=1
+    ["persistent"]=0
+    # Logs-specific
     ["n"]=1
     ["since"]=1
 )
