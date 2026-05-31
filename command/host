@@ -12,7 +12,7 @@ fi
 [[ "$RSD_HOST_LIB" != "1" ]] && $(rsd::source_lib_or_die lib/host.lib)
 
 RSD_C_HOST_SHORT_DESC="Host Platform Identification Subsystem"
-RSD_C_HOST_VERSION="0.1.1"
+RSD_C_HOST_VERSION="0.2.0"
 
 # Host command is remote-aware (Mode A) to orchestrate local/remote discovery natively
 RSD_C_HOST_REMOTE_AWARE=1
@@ -27,6 +27,7 @@ function rsd::c::host::help() {
     echo -e "\t\t\tidentify              Discover and display host properties"
     echo -e "\t\t\tsave [alias]          Identify and save host properties to hosts.ini"
     echo -e "\t\t\tshow [alias]          Display saved host properties from hosts.ini"
+    echo -e "\t\t\tinstall               Install or update RSD on a remote target"
 }
 
 # Discover and display host properties.
@@ -181,3 +182,34 @@ function rsd::c::host::show() {
     return 0
 }
 
+# Install or update RSD on a remote target.
+# Intent: Force-syncs the local RSD tree to the remote host via the
+#         bootstrap_install mechanism (tar + stream + install).
+#         Requires a remote target — local install is handled by --install.
+#
+# @return int 0 on success, 2 on usage error, 13 on install failure.
+function rsd::c::host::install() {
+    if [[ -z "$RSD_REMOTE_TARGET" ]]; then
+        rsd::io::error "'host install' requires a remote target."
+        rsd::io::info  "Usage: rsd @target host install"
+        rsd::io::info  "For local installation use: rsd --install user"
+        return 2
+    fi
+
+    source "$(rsd::get_libdir_file lib/remote.lib)"
+
+    rsd::io::status "Syncing RSD ($RSD_VERSION) to ${RSD_REMOTE_TARGET}..."
+
+    if ! rsd::l::remote::bootstrap_install "$RSD_REMOTE_TARGET"; then
+        rsd::io::error "Failed to install RSD on ${RSD_REMOTE_TARGET}."
+        return 13
+    fi
+
+    # Verify installed version
+    local remote_ver
+    remote_ver=$(rsd::l::remote::execute "$RSD_REMOTE_TARGET" "\$HOME/.local/bin/rsd" "--version" 2>/dev/null)
+    bash::trim remote_ver
+
+    rsd::io::ok "RSD ${remote_ver:-unknown} installed on ${RSD_REMOTE_TARGET}."
+    return 0
+}
