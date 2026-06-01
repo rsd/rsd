@@ -1,0 +1,621 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# Storage Command — Cross-Cloud File Operations
+# ==============================================================================
+#
+# Orchestrates file operations across local filesystems and cloud storage
+# providers (S3, Google Drive, Backblaze B2, SFTP, etc.) via rclone.
+#
+# RSD handles WHERE rclone runs (local or remote host via target dispatch).
+# rclone handles WHERE the data lives (cloud endpoints via remote:path syntax).
+# These are orthogonal dimensions:
+#   rsd @bi storage copy s3:bucket/ gdrive:archive/
+#   ^^^^^^^^^^           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#   "run on @bi"         "rclone moves data between s3 and gdrive"
+#
+# Usage:
+#   rsd storage copy <source> <dest> [flags]
+#   rsd storage move <source> <dest> [flags]
+#   rsd storage sync <source> <dest> [--confirm | --dry-run]
+#   rsd storage ls <remote:path> [--long]
+#   rsd storage size <remote:path>
+#   rsd storage check <source> <dest>
+#   rsd storage config
+#   rsd storage setup [--remotes name1,name2]
+#   rsd storage doctor
+#
+# Remote execution:
+#   rsd @bi storage copy s3:prod-dumps/ /tmp/local-copy/
+#   rsd @bi storage setup --remotes s3,gdrive
+#
+# @see docs/storage.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+[[ "$RSD_STORAGE_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/storage.lib)"
+
+RSD_C_STORAGE_SHORT_DESC="Cross-Cloud File Operations (rclone)"
+RSD_C_STORAGE_VERSION="0.1.0"
+
+# Command is remote-aware (Mode A — local orchestration)
+RSD_C_STORAGE_REMOTE_AWARE=1
+
+# ==============================================================================
+# Argument Configuration
+# ==============================================================================
+
+declare -g -A RSD_C_STORAGE_ARGS_PARAM=(
+    # Shared flags
+    ["dry-run"]=0
+    ["confirm"]=0
+    ["verbose"]=0
+    ["long"]=0
+    # setup-specific
+    ["remotes"]=1
+    # rclone pass-through
+    ["transfers"]=1
+    ["checkers"]=1
+    ["config"]=1
+    ["filter"]=1
+    ["include"]=1
+    ["exclude"]=1
+    ["max-transfer"]=1
+    ["bwlimit"]=1
+)
+
+# ==============================================================================
+# Help
+# ==============================================================================
+
+# Display sub-commands and description for the storage module.
+#
+# @return void
+function rsd::c::storage::help() {
+    echo -e "\n\tStorage Command Help:\n"
+    echo -e "\t\tActions:"
+    echo -e "\t\t\tcopy <src> <dest>       Copy files (no delete at dest)"
+    echo -e "\t\t\tmove <src> <dest>       Move files (copy + delete source)"
+    echo -e "\t\t\tsync <src> <dest>       Make dest identical to source (DELETES!)"
+    echo -e "\t\t\tls <remote:path>        List contents of a remote"
+    echo -e "\t\t\tsize <remote:path>      Calculate total size"
+    echo -e "\t\t\tcheck <src> <dest>      Verify source and dest are identical"
+    echo -e "\t\t\tconfig                  Interactive rclone configuration"
+    echo -e "\t\t\tsetup [--remotes ...]   Bootstrap rclone + push config to target"
+    echo -e "\t\t\tdoctor                  Check config, tokens, connectivity"
+    echo -e ""
+    echo -e "\t\tShared Flags:"
+    echo -e "\t\t\t--dry-run              Show what would be done without doing it"
+    echo -e "\t\t\t--verbose              Increase rclone output verbosity"
+    echo -e "\t\t\t--transfers N          Number of parallel transfers (default: 4)"
+    echo -e "\t\t\t--bwlimit RATE         Bandwidth limit (e.g., 10M)"
+    echo -e "\t\t\t--config PATH          Override rclone config file path"
+    echo -e ""
+    echo -e "\t\tSync Safety:"
+    echo -e "\t\t\t'sync' requires --confirm or --dry-run."
+    echo -e "\t\t\tWithout either, a dry-run is performed automatically."
+    echo -e ""
+    echo -e "\t\tSetup Flags:"
+    echo -e "\t\t\t--remotes name1,name2  Push only specified remote configs"
+    echo -e ""
+    echo -e "\t\tPath Syntax:"
+    echo -e "\t\t\trclone remote:path format is used directly."
+    echo -e "\t\t\tExamples: s3:bucket/path, gdrive:folder/, /local/path"
+    echo -e ""
+    echo -e "\t\tExamples:"
+    echo -e "\t\t\trsd storage copy s3:my-bucket/logs/ gdrive:archive/logs/"
+    echo -e "\t\t\trsd storage move s3:old-data/ b2:cold-storage/ --dry-run"
+    echo -e "\t\t\trsd @bi storage ls s3:production-dumps/ --long"
+    echo -e "\t\t\trsd @bi storage setup --remotes s3,gdrive"
+    echo -e "\t\t\trsd storage doctor"
+}
+
+# ==============================================================================
+# Internal: Build common rclone flags from parsed args
+# ==============================================================================
+
+# Assemble rclone CLI flags from the parsed RSD command args.
+# Intent: Translate RSD flag names to rclone equivalents for pass-through.
+#
+# @param string& $1 nameref: array to append flags to.
+# @return void
+function rsd::l::c::storage::build_flags() {
+    declare -n _flags="$1"
+
+    [[ -n "${RSD_COMMAND_ARGS[dry-run]:-}" ]]      && _flags+=("--dry-run")
+    [[ -n "${RSD_COMMAND_ARGS[verbose]:-}" ]]       && _flags+=("-v")
+    [[ -n "${RSD_COMMAND_ARGS[transfers]:-}" ]]     && _flags+=("--transfers" "${RSD_COMMAND_ARGS[transfers]}")
+    [[ -n "${RSD_COMMAND_ARGS[checkers]:-}" ]]      && _flags+=("--checkers" "${RSD_COMMAND_ARGS[checkers]}")
+    [[ -n "${RSD_COMMAND_ARGS[bwlimit]:-}" ]]       && _flags+=("--bwlimit" "${RSD_COMMAND_ARGS[bwlimit]}")
+    [[ -n "${RSD_COMMAND_ARGS[filter]:-}" ]]        && _flags+=("--filter" "${RSD_COMMAND_ARGS[filter]}")
+    [[ -n "${RSD_COMMAND_ARGS[include]:-}" ]]       && _flags+=("--include" "${RSD_COMMAND_ARGS[include]}")
+    [[ -n "${RSD_COMMAND_ARGS[exclude]:-}" ]]       && _flags+=("--exclude" "${RSD_COMMAND_ARGS[exclude]}")
+    [[ -n "${RSD_COMMAND_ARGS[max-transfer]:-}" ]]  && _flags+=("--max-transfer" "${RSD_COMMAND_ARGS[max-transfer]}")
+
+    # Override config path if explicitly specified
+    if [[ -n "${RSD_COMMAND_ARGS[config]:-}" ]]; then
+        RSD_RCLONE_CONF="${RSD_COMMAND_ARGS[config]}"
+    fi
+}
+
+# ==============================================================================
+# Action: ls
+# ==============================================================================
+
+# List the contents of a remote storage path.
+#
+# @param string $1 Remote path (e.g., s3:my-bucket/).
+# @return int 0 on success.
+function rsd::c::storage::ls() {
+    local remote_path="$1"
+
+    if [[ -z "$remote_path" ]]; then
+        rsd::io::error "Usage: rsd storage ls <remote:path>"
+        return 2
+    fi
+
+    if ! rsd::l::storage::check_rclone; then
+        return 3
+    fi
+
+    local -a flags=()
+    rsd::l::c::storage::build_flags flags
+
+    local ls_cmd="lsf"
+    if [[ -n "${RSD_COMMAND_ARGS[long]:-}" ]]; then
+        ls_cmd="ls"
+    fi
+
+    rsd::l::storage::exec "$ls_cmd" "${flags[@]}" "$remote_path"
+}
+
+# ==============================================================================
+# Action: copy
+# ==============================================================================
+
+# Copy files from source to destination without deleting at destination.
+#
+# @param string $1 Source path.
+# @param string $2 Destination path.
+# @return int 0 on success.
+function rsd::c::storage::copy() {
+    local src="$1"
+    local dst="$2"
+
+    if [[ -z "$src" || -z "$dst" ]]; then
+        rsd::io::error "Usage: rsd storage copy <source> <destination>"
+        return 2
+    fi
+
+    if ! rsd::l::storage::check_rclone; then
+        return 3
+    fi
+
+    # Advisory token health check
+    rsd::l::storage::pre_flight_check "$src" "$dst"
+
+    local -a flags=()
+    rsd::l::c::storage::build_flags flags
+
+    rsd::io::status "Copying: $src → $dst"
+    rsd::l::storage::exec copy "${flags[@]}" "$src" "$dst"
+    local rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        rsd::io::ok "Copy complete."
+    else
+        rsd::io::error "Copy failed (exit code: $rc)."
+    fi
+
+    return $rc
+}
+
+# ==============================================================================
+# Action: move
+# ==============================================================================
+
+# Move files from source to destination (copy + delete source).
+#
+# @param string $1 Source path.
+# @param string $2 Destination path.
+# @return int 0 on success.
+function rsd::c::storage::move() {
+    local src="$1"
+    local dst="$2"
+
+    if [[ -z "$src" || -z "$dst" ]]; then
+        rsd::io::error "Usage: rsd storage move <source> <destination>"
+        return 2
+    fi
+
+    if ! rsd::l::storage::check_rclone; then
+        return 3
+    fi
+
+    rsd::l::storage::pre_flight_check "$src" "$dst"
+
+    local -a flags=()
+    rsd::l::c::storage::build_flags flags
+
+    rsd::io::status "Moving: $src → $dst"
+    rsd::l::storage::exec move "${flags[@]}" "$src" "$dst"
+    local rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        rsd::io::ok "Move complete."
+    else
+        rsd::io::error "Move failed (exit code: $rc)."
+    fi
+
+    return $rc
+}
+
+# ==============================================================================
+# Action: sync
+# ==============================================================================
+
+# Sync source to destination (DESTRUCTIVE: deletes files at dest not in source).
+# Safety gate: requires --confirm flag or defaults to --dry-run.
+#
+# @param string $1 Source path.
+# @param string $2 Destination path.
+# @return int 0 on success.
+function rsd::c::storage::sync() {
+    local src="$1"
+    local dst="$2"
+
+    if [[ -z "$src" || -z "$dst" ]]; then
+        rsd::io::error "Usage: rsd storage sync <source> <destination> [--confirm | --dry-run]"
+        return 2
+    fi
+
+    if ! rsd::l::storage::check_rclone; then
+        return 3
+    fi
+
+    rsd::l::storage::pre_flight_check "$src" "$dst"
+
+    local -a flags=()
+    rsd::l::c::storage::build_flags flags
+
+    # Safety gate: if neither --confirm nor --dry-run specified, force dry-run
+    if [[ -z "${RSD_COMMAND_ARGS[confirm]:-}" && -z "${RSD_COMMAND_ARGS[dry-run]:-}" ]]; then
+        rsd::io::warn "sync is destructive — files at destination not in source WILL BE DELETED."
+        rsd::io::warn "Running in --dry-run mode. Use --confirm to execute for real."
+        rsd::io::blank
+        flags+=("--dry-run")
+    fi
+
+    if [[ -n "${RSD_COMMAND_ARGS[confirm]:-}" ]]; then
+        rsd::io::warn "DESTRUCTIVE SYNC: $src → $dst"
+        rsd::io::warn "Files at destination not present in source will be DELETED."
+    fi
+
+    rsd::io::status "Syncing: $src → $dst"
+    rsd::l::storage::exec sync "${flags[@]}" "$src" "$dst"
+    local rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        if [[ -z "${RSD_COMMAND_ARGS[confirm]:-}" && -z "${RSD_COMMAND_ARGS[dry-run]:-}" ]]; then
+            rsd::io::ok "Dry-run complete. Use --confirm to execute."
+        else
+            rsd::io::ok "Sync complete."
+        fi
+    else
+        rsd::io::error "Sync failed (exit code: $rc)."
+    fi
+
+    return $rc
+}
+
+# ==============================================================================
+# Action: size
+# ==============================================================================
+
+# Calculate the total size of a remote path.
+#
+# @param string $1 Remote path.
+# @return int 0 on success.
+function rsd::c::storage::size() {
+    local remote_path="$1"
+
+    if [[ -z "$remote_path" ]]; then
+        rsd::io::error "Usage: rsd storage size <remote:path>"
+        return 2
+    fi
+
+    if ! rsd::l::storage::check_rclone; then
+        return 3
+    fi
+
+    rsd::io::status "Calculating size: $remote_path"
+    rsd::l::storage::exec size "$remote_path"
+}
+
+# ==============================================================================
+# Action: check
+# ==============================================================================
+
+# Verify that source and destination are identical (checksums/sizes).
+#
+# @param string $1 Source path.
+# @param string $2 Destination path.
+# @return int 0 if identical, non-zero if differences found.
+function rsd::c::storage::check() {
+    local src="$1"
+    local dst="$2"
+
+    if [[ -z "$src" || -z "$dst" ]]; then
+        rsd::io::error "Usage: rsd storage check <source> <destination>"
+        return 2
+    fi
+
+    if ! rsd::l::storage::check_rclone; then
+        return 3
+    fi
+
+    rsd::io::status "Checking: $src ↔ $dst"
+    rsd::l::storage::exec check "$src" "$dst"
+    local rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        rsd::io::ok "Source and destination are identical."
+    else
+        rsd::io::warn "Differences found between source and destination."
+    fi
+
+    return $rc
+}
+
+# ==============================================================================
+# Action: config
+# ==============================================================================
+
+# Launch interactive rclone configuration.
+# Intent: Wraps rclone config to use the RSD-managed config path.
+#
+# @return int 0 on success.
+function rsd::c::storage::config() {
+    if ! rsd::l::storage::check_rclone; then
+        return 3
+    fi
+
+    # Ensure the RSD config directory exists
+    local rsd_conf_path
+    rsd_conf_path=$(rsd::l::storage::rsd_config_path)
+    local rsd_conf_dir
+    rsd_conf_dir=$(dirname "$rsd_conf_path")
+
+    if [[ ! -d "$rsd_conf_dir" ]]; then
+        mkdir -p "$rsd_conf_dir"
+    fi
+
+    rsd::io::blank
+    rsd::io::banner "rclone Configuration"
+    rsd::io::blank
+    rsd::io::info "Config file: $rsd_conf_path"
+    rsd::io::blank
+    rsd::io::info "Best practices for OAuth remotes (Google Drive, OneDrive):"
+    rsd::io::info "  1. Use your OWN Google Cloud Client ID (not rclone's shared one)"
+    rsd::io::info "  2. Ensure your OAuth consent screen is NOT in 'Testing' mode"
+    rsd::io::info "  3. For headless servers, prefer Service Accounts over user OAuth"
+    rsd::io::blank
+
+    # Run rclone config interactively, writing to RSD-managed path
+    RSD_RCLONE_CONF="$rsd_conf_path" rsd::l::storage::exec config
+
+    local rc=$?
+    if [[ $rc -eq 0 ]]; then
+        rsd::io::blank
+        rsd::io::ok "Configuration updated."
+        rsd::io::info "Run 'rsd storage doctor' to verify connectivity."
+    fi
+
+    return $rc
+}
+
+# ==============================================================================
+# Action: setup
+# ==============================================================================
+
+# Bootstrap rclone on a remote target and push partial config.
+# Intent: One-command provisioning for remote hosts.
+#
+# @param string $* Arguments: [--remotes name1,name2]
+# @return int 0 on success.
+function rsd::c::storage::setup() {
+    if [[ -z "$RSD_REMOTE_TARGET" ]]; then
+        rsd::io::error "setup requires a remote target."
+        rsd::io::info  "Usage: rsd @target storage setup [--remotes s3,gdrive]"
+        return 2
+    fi
+
+    rsd::io::blank
+    rsd::io::banner "Storage Setup: ${RSD_REMOTE_TARGET}"
+    rsd::io::blank
+
+    # Step 1: Check if rclone exists on remote, offer to install
+    rsd::io::step "1/3" "Checking rclone on remote target..."
+    if ! rsd::l::storage::check_rclone; then
+        rsd::io::status "Installing rclone on ${RSD_REMOTE_TARGET}..."
+        rsd::io::info   "Use 'rsd ${RSD_REMOTE_TARGET} recipe run rclone/install' for full control."
+
+        # Attempt lightweight bootstrap via recipe
+        if bash::is_function rsd::r::register_task; then
+            source "$(rsd::get_libdir_file lib/recipe/rclone/install.recipe)"
+            # Dispatch to the recipe engine would be done via:
+            #   rsd @target recipe run rclone/install
+            # For setup, we just inform the user.
+        fi
+        rsd::io::error "rclone must be installed first."
+        rsd::io::info  "Run: rsd ${RSD_REMOTE_TARGET} recipe run rclone/install"
+        return 3
+    fi
+    rsd::io::ok "rclone found on remote."
+
+    # Step 2: Push partial config
+    rsd::io::step "2/3" "Pushing config to remote..."
+
+    local local_conf
+    if ! local_conf=$(rsd::l::storage::resolve_config); then
+        rsd::io::error "No local rclone config found."
+        rsd::io::info  "Run 'rsd storage config' first to configure remotes."
+        return 1
+    fi
+
+    local remote_conf_dir="\$HOME/.config/rsd"
+    local remote_conf_path="\$HOME/.config/rsd/rclone.conf"
+
+    # Ensure remote config directory exists
+    rsd::l::target::exec mkdir -p "$remote_conf_dir"
+
+    local config_content=""
+    if [[ -n "${RSD_COMMAND_ARGS[remotes]:-}" ]]; then
+        # Partial push — extract only requested remotes
+        rsd::io::info "Extracting remotes: ${RSD_COMMAND_ARGS[remotes]}"
+        if ! config_content=$(rsd::l::storage::extract_remotes "$local_conf" "${RSD_COMMAND_ARGS[remotes]}"); then
+            return 1
+        fi
+    else
+        # Prompt user to select remotes
+        rsd::io::info "Available remotes in local config:"
+        local available
+        available=$(rsd::l::storage::list_remotes)
+        if [[ -z "$available" ]]; then
+            rsd::io::error "No remotes configured in local config."
+            rsd::io::info  "Run 'rsd storage config' first."
+            return 1
+        fi
+        echo "$available" | while read -r name; do
+            rsd::io::info "  - $name"
+        done
+        rsd::io::blank
+        rsd::io::info "Use --remotes name1,name2 to specify which remotes to push."
+        rsd::io::info "Pushing ALL remotes..."
+        config_content=$(cat "$local_conf")
+    fi
+
+    # Push config via file_push (streams through SSH tunnel)
+    if ! printf '%s' "$config_content" | rsd::l::target::exec tee "$remote_conf_path" > /dev/null; then
+        rsd::io::error "Failed to push config to remote."
+        return 1
+    fi
+
+    # Restrict permissions on remote config
+    rsd::l::target::exec chmod 0600 "$remote_conf_path"
+    rsd::io::ok "Config pushed to remote."
+
+    # Step 3: Verify connectivity
+    rsd::io::step "3/3" "Verifying remote connectivity..."
+
+    local remote_name
+    if [[ -n "${RSD_COMMAND_ARGS[remotes]:-}" ]]; then
+        local IFS=","
+        for remote_name in ${RSD_COMMAND_ARGS[remotes]}; do
+            remote_name="${remote_name#"${remote_name%%[![:space:]]*}"}"
+            remote_name="${remote_name%"${remote_name##*[![:space:]]}"}"
+            rsd::io::status "Testing: ${remote_name}:"
+            if rsd::l::storage::exec lsd "${remote_name}:" > /dev/null 2>&1; then
+                rsd::io::ok "  ${remote_name}: connected."
+            else
+                rsd::io::warn "  ${remote_name}: connection failed. Check credentials."
+            fi
+        done
+    else
+        rsd::io::info "Skipping connectivity test (no --remotes specified)."
+    fi
+
+    rsd::io::blank
+    rsd::io::ok "Setup complete for ${RSD_REMOTE_TARGET}."
+    rsd::io::blank
+}
+
+# ==============================================================================
+# Action: doctor
+# ==============================================================================
+
+# Diagnose storage configuration: binary, config, token health, connectivity.
+# Intent: Single command to troubleshoot storage issues proactively.
+#
+# @return int 0 on success.
+function rsd::c::storage::doctor() {
+    rsd::io::blank
+    rsd::io::banner "Storage Health Check"
+    rsd::io::blank
+
+    local issues=0
+
+    # 1. Binary check
+    rsd::io::status "Checking rclone binary..."
+    if rsd::l::target::has_bin rclone; then
+        local version
+        version=$(rsd::l::storage::rclone_version)
+        rsd::io::ok "rclone binary found: ${version:-unknown}"
+    else
+        rsd::io::error "rclone not found."
+        rsd::io::info  "Install with: rsd recipe run rclone/install"
+        ((issues++))
+    fi
+
+    # 2. Config check
+    rsd::io::status "Checking config..."
+    local conf
+    if conf=$(rsd::l::storage::resolve_config); then
+        rsd::io::ok "Config: $conf"
+    else
+        rsd::io::warn "No rclone config file found."
+        rsd::io::info "Run 'rsd storage config' to create one."
+        ((issues++))
+        rsd::io::blank
+        rsd::io::info "Issues found: $issues"
+        return 0
+    fi
+
+    # 3. Remote health check
+    rsd::io::status "Checking configured remotes..."
+    local remotes
+    remotes=$(rsd::l::storage::list_remotes)
+
+    if [[ -z "$remotes" ]]; then
+        rsd::io::warn "No remotes configured."
+        rsd::io::info "Run 'rsd storage config' to add remotes."
+        ((issues++))
+    else
+        local remote_name status msg
+        while IFS= read -r remote_name; do
+            [[ -z "$remote_name" ]] && continue
+
+            rsd::l::storage::check_token_health "$remote_name" status msg
+
+            case "$status" in
+                ok)
+                    rsd::io::ok "Remote '$remote_name' — $msg"
+                    ;;
+                static)
+                    rsd::io::ok "Remote '$remote_name' — $msg"
+                    ;;
+                warn)
+                    rsd::io::warn "Remote '$remote_name' — $msg"
+                    ((issues++))
+                    ;;
+                error)
+                    rsd::io::error "Remote '$remote_name' — $msg"
+                    ((issues++))
+                    ;;
+            esac
+        done <<< "$remotes"
+    fi
+
+    rsd::io::blank
+    if [[ $issues -eq 0 ]]; then
+        rsd::io::ok "All checks passed."
+    else
+        rsd::io::warn "$issues issue(s) found."
+    fi
+    rsd::io::blank
+}

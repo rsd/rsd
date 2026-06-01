@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# rclone — Binary Bootstrap Recipe
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Downloads and installs the rclone binary on local or remote targets.
+# rclone is a single static binary with zero runtime dependencies, making
+# it ideal for user-space installation without root privileges.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+#  1. validate_env  — Detect target OS/arch, check for existing install,
+#                     compare versions if already present.
+#  2. download      — Fetch the rclone release archive for the target platform
+#                     to a secure temp directory.
+#  3. install       — Extract the binary from the archive, place it in
+#                     ~/.local/bin/ with 0755 permissions.
+#  4. verify        — Run `rclone version` on the target to confirm success.
+#
+# PLATFORM SUPPORT
+# ----------------
+# Linux (amd64, arm64, armv7, armv6), macOS (amd64, arm64), FreeBSD (amd64).
+# Architecture detection uses uname -s/-m mapped to rclone's naming scheme.
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. validate_env detects existing installs and
+# reports the current version. The install task overwrites the binary in place.
+#
+# SCOPE
+# -----
+# Works on both local and remote targets:
+#   rsd recipe run rclone/install
+#   rsd @bi recipe run rclone/install
+#
+# @see docs/storage.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load dependencies
+[[ "$RSD_STORAGE_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/storage.lib)"
+
+# ==============================================================================
+# Constants
+# ==============================================================================
+
+declare -g RSD_RCLONE_INSTALL_DIR="${HOME}/.local/bin"
+declare -g RSD_RCLONE_INSTALL_VERSION=""
+
+# Resolved at registration time by detect_platform
+declare -g RSD_RCLONE_TARGET_OS=""
+declare -g RSD_RCLONE_TARGET_ARCH=""
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::rclone_install::register() {
+    # Pre-resolve target platform at registration time
+    if ! rsd::l::storage::detect_platform RSD_RCLONE_TARGET_OS RSD_RCLONE_TARGET_ARCH; then
+        rsd::io::error "Cannot determine target platform for rclone installation."
+        return 2
+    fi
+
+    rsd::r::register_task "rclone_install::validate_env"
+    rsd::r::register_task "rclone_install::download"
+    rsd::r::register_task "rclone_install::install"
+    rsd::r::register_task "rclone_install::verify"
+}
+
+# ==============================================================================
+# Task: validate_env
+# ==============================================================================
+
+# Check target environment: detect existing rclone, report version, ensure
+# the install directory exists and is writable.
+#
+# @return int 0 always (advisory task — never blocks).
+function rsd::r::rclone_install::validate_env() {
+    rsd::io::status "Validating target environment..."
+    rsd::io::info   "Platform: ${RSD_RCLONE_TARGET_OS}/${RSD_RCLONE_TARGET_ARCH}"
+
+    # Check for existing rclone
+    if rsd::l::target::has_bin rclone; then
+        local current_version
+        current_version=$(rsd::l::storage::rclone_version)
+        rsd::io::info "Existing rclone found: ${current_version:-unknown version}"
+        rsd::io::info "Will be updated in place."
+    else
+        rsd::io::info "No existing rclone installation detected."
+    fi
+
+    # Ensure install directory exists
+    if ! rsd::l::target::exec test -d "$RSD_RCLONE_INSTALL_DIR" 2>/dev/null; then
+        rsd::io::status "Creating install directory: $RSD_RCLONE_INSTALL_DIR"
+        rsd::l::target::exec mkdir -p "$RSD_RCLONE_INSTALL_DIR"
+    fi
+
+    # Check writability
+    if ! rsd::l::target::exec test -w "$RSD_RCLONE_INSTALL_DIR" 2>/dev/null; then
+        rsd::io::error "Install directory not writable: $RSD_RCLONE_INSTALL_DIR"
+        return 13
+    fi
+
+    rsd::io::ok "Environment validated."
+}
+
+# ==============================================================================
+# Task: download
+# ==============================================================================
+
+# Download the rclone release archive for the target platform to a secure
+# temp directory.  Uses mktemp with 0700 permissions per AGENTS.md §8.
+#
+# @return int 0 on success, 1 on download failure.
+function rsd::r::rclone_install::download() {
+    rsd::check_binaries_or_fail curl
+
+    local archive_name="rclone-current-${RSD_RCLONE_TARGET_OS}-${RSD_RCLONE_TARGET_ARCH}.zip"
+    local download_url="${RSD_RCLONE_DOWNLOAD_BASE}/${archive_name}"
+
+    rsd::io::status "Downloading rclone for ${RSD_RCLONE_TARGET_OS}/${RSD_RCLONE_TARGET_ARCH}..."
+    rsd::io::info   "URL: ${download_url}"
+
+    # Create secure temp directory on the target
+    local tmpdir
+    tmpdir=$(rsd::l::target::exec mktemp -d -t rsd-rclone.XXXXXX 2>/dev/null)
+    if [[ -z "$tmpdir" ]]; then
+        rsd::io::error "Failed to create secure temp directory on target."
+        return 14
+    fi
+
+    # Restrict permissions
+    rsd::l::target::exec chmod 0700 "$tmpdir"
+
+    # Store for use by install task
+    declare -g RSD_RCLONE_TMPDIR="$tmpdir"
+
+    # Download the archive
+    if ! rsd::l::target::exec curl -fSL --retry 3 --retry-delay 2 \
+        -o "${tmpdir}/${archive_name}" "$download_url" 2>/dev/null; then
+        rsd::io::error "Download failed: $download_url"
+        rsd::l::target::exec rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # Verify we got a non-empty file
+    if ! rsd::l::target::exec test -s "${tmpdir}/${archive_name}" 2>/dev/null; then
+        rsd::io::error "Downloaded file is empty or missing."
+        rsd::l::target::exec rm -rf "$tmpdir"
+        return 1
+    fi
+
+    declare -g RSD_RCLONE_ARCHIVE="${tmpdir}/${archive_name}"
+    rsd::io::ok "Download complete: ${archive_name}"
+}
+
+# ==============================================================================
+# Task: install
+# ==============================================================================
+
+# Extract the rclone binary from the downloaded archive and place it in
+# the user-space install directory.
+#
+# @return int 0 on success.
+function rsd::r::rclone_install::install() {
+    rsd::check_binaries_or_fail unzip
+
+    if [[ -z "${RSD_RCLONE_TMPDIR:-}" || -z "${RSD_RCLONE_ARCHIVE:-}" ]]; then
+        rsd::io::error "No download artifact found. Run the download task first."
+        return 1
+    fi
+
+    rsd::io::status "Extracting rclone binary..."
+
+    # Extract to temp directory
+    if ! rsd::l::target::exec unzip -o -j "${RSD_RCLONE_ARCHIVE}" \
+        "*/rclone" -d "${RSD_RCLONE_TMPDIR}" 2>/dev/null; then
+        rsd::io::error "Failed to extract rclone from archive."
+        rsd::l::target::exec rm -rf "$RSD_RCLONE_TMPDIR"
+        return 1
+    fi
+
+    # Move binary to install location
+    rsd::io::status "Installing to ${RSD_RCLONE_INSTALL_DIR}/rclone..."
+    if ! rsd::l::target::exec mv -f "${RSD_RCLONE_TMPDIR}/rclone" \
+        "${RSD_RCLONE_INSTALL_DIR}/rclone"; then
+        rsd::io::error "Failed to move rclone binary to install directory."
+        rsd::l::target::exec rm -rf "$RSD_RCLONE_TMPDIR"
+        return 1
+    fi
+
+    # Set executable permissions
+    rsd::l::target::exec chmod 0755 "${RSD_RCLONE_INSTALL_DIR}/rclone"
+
+    # Cleanup temp directory
+    rsd::l::target::exec rm -rf "$RSD_RCLONE_TMPDIR"
+
+    rsd::io::ok "rclone binary installed."
+}
+
+# ==============================================================================
+# Task: verify
+# ==============================================================================
+
+# Verify the installed rclone binary works correctly.
+#
+# @return int 0 on success, 1 on verification failure.
+function rsd::r::rclone_install::verify() {
+    rsd::io::status "Verifying rclone installation..."
+
+    local version
+    version=$(rsd::l::target::exec "${RSD_RCLONE_INSTALL_DIR}/rclone" version 2>/dev/null | head -n1)
+
+    if [[ -z "$version" ]]; then
+        rsd::io::error "rclone verification failed — binary did not execute."
+        return 1
+    fi
+
+    rsd::io::ok "Installed: $version"
+
+    # Check if install dir is in PATH
+    local in_path
+    in_path=$(rsd::l::target::exec sh -c 'command -v rclone' 2>/dev/null)
+    if [[ -z "$in_path" ]]; then
+        rsd::io::warn "rclone installed but ${RSD_RCLONE_INSTALL_DIR} may not be in PATH."
+        rsd::io::info "Add to your shell profile: export PATH=\"${RSD_RCLONE_INSTALL_DIR}:\$PATH\""
+    fi
+
+    rsd::io::blank
+    rsd::io::banner "rclone installation complete"
+    rsd::io::blank
+    rsd::io::info "Next steps:"
+    rsd::io::info "  Configure remotes: rsd storage config"
+    rsd::io::info "  List remotes:      rsd storage ls <remote>:"
+    rsd::io::info "  Check health:      rsd storage doctor"
+    rsd::io::blank
+}

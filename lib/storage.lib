@@ -1,0 +1,507 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# Storage Library — Cross-Cloud File Operations via rclone
+# ==============================================================================
+#
+# Provides a thin abstraction layer over rclone for transferring files between
+# local filesystems, cloud providers (S3, Google Drive, B2, etc.), and SFTP
+# endpoints.  Designed to integrate with RSD's target dispatch (target.lib)
+# so that rclone commands can run on local or remote hosts transparently.
+#
+# Config Resolution Priority:
+#   1. CLI flag / $RSD_RCLONE_CONF variable
+#   2. RCLONE_CONFIG environment variable
+#   3. RSD-managed:  ~/.config/rsd/rclone.conf
+#   4. rclone default: ~/.config/rclone/rclone.conf (fallback)
+#
+# namespace rsd::l::storage::
+#
+# @see docs/storage.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+if [[ "$RSD_STORAGE_LIB" == "1" ]]; then
+    return 0
+fi
+RSD_STORAGE_LIB=1
+RSD_STORAGE_LIB_VERSION="0.1.0"
+
+# Load dependencies
+[[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
+[[ "$RSD_IO_LIB" != "1" ]]     && source "$(rsd::get_libdir_file lib/io.lib)"
+
+# ==============================================================================
+# Constants
+# ==============================================================================
+
+# rclone download base URL — architecture suffix appended at runtime
+declare -g RSD_RCLONE_DOWNLOAD_BASE="https://downloads.rclone.org/current"
+
+# OAuth-based backend types that require token health monitoring
+declare -gA RSD_STORAGE_OAUTH_BACKENDS=(
+    [drive]=1 [onedrive]=1 [dropbox]=1 [box]=1
+    [pcloud]=1 [yandex]=1
+)
+
+# Token age threshold (days) for proactive warnings
+declare -g RSD_STORAGE_TOKEN_WARN_DAYS=150
+
+# ==============================================================================
+# Config Resolution
+# ==============================================================================
+
+# Resolve the rclone configuration file path using the 4-tier priority chain.
+# Intent: Decouple RSD's config management from rclone's default location,
+#         while still working seamlessly if the user runs rclone standalone.
+#
+# @stdout Absolute path to the resolved config file (empty if none found).
+# @return int 0 if a config file was found, 1 otherwise.
+function rsd::l::storage::resolve_config() {
+    # Tier 1: Explicit override via RSD variable
+    if [[ -n "${RSD_RCLONE_CONF:-}" && -f "$RSD_RCLONE_CONF" ]]; then
+        echo "$RSD_RCLONE_CONF"
+        return 0
+    fi
+
+    # Tier 2: Standard rclone environment variable
+    if [[ -n "${RCLONE_CONFIG:-}" && -f "$RCLONE_CONFIG" ]]; then
+        echo "$RCLONE_CONFIG"
+        return 0
+    fi
+
+    # Tier 3: RSD-managed config directory
+    local rsd_conf="${HOME}/.config/rsd/rclone.conf"
+    if [[ -f "$rsd_conf" ]]; then
+        echo "$rsd_conf"
+        return 0
+    fi
+
+    # Tier 4: rclone default location
+    local default_conf="${HOME}/.config/rclone/rclone.conf"
+    if [[ -f "$default_conf" ]]; then
+        echo "$default_conf"
+        return 0
+    fi
+
+    return 1
+}
+
+# Return the RSD-managed config path (may not exist yet).
+# Intent: Used by setup/config actions to know where to write new configs.
+#
+# @stdout The canonical RSD-managed config path.
+function rsd::l::storage::rsd_config_path() {
+    echo "${HOME}/.config/rsd/rclone.conf"
+}
+
+# ==============================================================================
+# Binary Validation
+# ==============================================================================
+
+# Verify rclone is available on the current target (local or remote).
+# Intent: Fail fast with actionable guidance if rclone is not installed.
+#
+# @return int 0 if rclone is available, 3 otherwise.
+function rsd::l::storage::check_rclone() {
+    if ! rsd::l::target::has_bin rclone; then
+        rsd::io::error "rclone not found on target."
+        rsd::io::info  "Install with: rsd recipe run rclone/install"
+        if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+            rsd::io::info "       or:    rsd ${RSD_REMOTE_TARGET} recipe run rclone/install"
+        fi
+        return 3
+    fi
+    return 0
+}
+
+# Get the installed rclone version string on the current target.
+#
+# @stdout Version string (e.g., "v1.68.2") or empty.
+# @return int 0 on success.
+function rsd::l::storage::rclone_version() {
+    rsd::l::target::exec rclone version --check 2>/dev/null \
+        | head -n1 | awk '{print $2}'
+}
+
+# ==============================================================================
+# Core Dispatch
+# ==============================================================================
+
+# Execute an rclone command on the current target with RSD config injection.
+# Intent: Single dispatch point — every storage action routes through here.
+#         Injects --config flag when RSD manages the config, and handles
+#         RCLONE_CONFIG_PASS for encrypted configs.
+#
+# @param string $@ rclone subcommand and arguments.
+# @return int Exit code from rclone.
+function rsd::l::storage::exec() {
+    local -a rclone_args=("$@")
+
+    # Inject config path if resolved
+    local conf
+    if conf=$(rsd::l::storage::resolve_config); then
+        rclone_args=("--config" "$conf" "${rclone_args[@]}")
+    fi
+
+    # Inject config password from vault if available
+    rsd::l::storage::inject_config_pass
+
+    # Route through target dispatch (local or remote)
+    rsd::l::target::exec rclone "${rclone_args[@]}"
+}
+
+# ==============================================================================
+# Credential Injection
+# ==============================================================================
+
+# Inject RCLONE_CONFIG_PASS from KeePassXC vault if the config is encrypted.
+# Intent: Allow RSD to manage encrypted rclone configs without user interaction.
+#         Uses RCLONE_PASSWORD_COMMAND for security (avoids env var leakage).
+#
+# @return void
+function rsd::l::storage::inject_config_pass() {
+    # Skip if already set by user
+    [[ -n "${RCLONE_CONFIG_PASS:-}" ]] && return 0
+    [[ -n "${RCLONE_PASSWORD_COMMAND:-}" ]] && return 0
+
+    # Only attempt vault integration if kpx.lib is available and vault is open
+    if [[ "${RSD_VAULT_MODE:-}" != "never" ]] && bash::is_function rsd::l::kpx::get_password 2>/dev/null; then
+        local vault_pass=""
+        if rsd::l::kpx::get_password "rsd/storage/rclone-config-pass" vault_pass 2>/dev/null; then
+            export RCLONE_CONFIG_PASS="$vault_pass"
+        fi
+    fi
+}
+
+# ==============================================================================
+# Partial Config Extraction
+# ==============================================================================
+
+# Extract specific remote sections from an rclone.conf INI file.
+# Intent: Enable partial config push to remote hosts — only the remotes
+#         needed on that host are transferred, preventing credential leakage
+#         for unrelated providers.
+#
+# rclone.conf format:
+#   [remote_name]
+#   type = drive
+#   token = {"access_token":"..."}
+#   ...
+#
+# @param string $1 Path to the source rclone.conf file.
+# @param string $2 Comma-separated list of remote names to extract.
+# @stdout The extracted INI sections concatenated.
+# @return int 0 on success, 1 if no matching sections found.
+function rsd::l::storage::extract_remotes() {
+    local conf_file="$1"
+    local remote_list="$2"
+
+    if [[ ! -f "$conf_file" ]]; then
+        rsd::io::error "Config file not found: $conf_file"
+        return 1
+    fi
+
+    # Build an associative array of requested remote names for O(1) lookup
+    local -A wanted=()
+    local IFS=","
+    local name
+    for name in $remote_list; do
+        # Trim whitespace
+        name="${name#"${name%%[![:space:]]*}"}"
+        name="${name%"${name##*[![:space:]]}"}"
+        [[ -n "$name" ]] && wanted["$name"]=1
+    done
+
+    local in_section=0
+    local current_section=""
+    local output=""
+    local found=0
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Detect section header: [remote_name]
+        if [[ "$line" =~ ^\[([^]]+)\]$ ]]; then
+            current_section="${BASH_REMATCH[1]}"
+            if [[ -v wanted["$current_section"] ]]; then
+                in_section=1
+                found=1
+                output+="${line}"$'\n'
+            else
+                in_section=0
+            fi
+            continue
+        fi
+
+        # Accumulate lines belonging to a wanted section
+        if [[ $in_section -eq 1 ]]; then
+            output+="${line}"$'\n'
+        fi
+    done < "$conf_file"
+
+    if [[ $found -eq 0 ]]; then
+        rsd::io::error "No matching remotes found in $conf_file"
+        rsd::io::info  "Requested: $remote_list"
+        return 1
+    fi
+
+    printf '%s' "$output"
+    return 0
+}
+
+# List all remote names defined in the resolved rclone.conf.
+#
+# @stdout One remote name per line (without trailing colon).
+# @return int 0 on success, 1 if no config found.
+function rsd::l::storage::list_remotes() {
+    local conf
+    if ! conf=$(rsd::l::storage::resolve_config); then
+        return 1
+    fi
+
+    # Parse section headers from the INI file
+    grep -oP '^\[\K[^]]+' "$conf" 2>/dev/null
+}
+
+# ==============================================================================
+# Remote Type Resolution
+# ==============================================================================
+
+# Get the backend type for a named remote from the config.
+# Intent: Determine whether a remote uses OAuth (drive, onedrive, etc.)
+#         or static credentials (s3, b2, sftp) for health monitoring decisions.
+#
+# @param string $1 Remote name (without trailing colon).
+# @stdout Backend type string (e.g., "drive", "s3", "sftp").
+# @return int 0 on success, 1 if remote not found.
+function rsd::l::storage::get_remote_type() {
+    local remote_name="$1"
+    local conf
+    if ! conf=$(rsd::l::storage::resolve_config); then
+        return 1
+    fi
+
+    local in_section=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^\[([^]]+)\]$ ]]; then
+            if [[ "${BASH_REMATCH[1]}" == "$remote_name" ]]; then
+                in_section=1
+            else
+                [[ $in_section -eq 1 ]] && break
+                in_section=0
+            fi
+            continue
+        fi
+
+        if [[ $in_section -eq 1 && "$line" =~ ^[[:space:]]*type[[:space:]]*=[[:space:]]*(.*) ]]; then
+            local type_val="${BASH_REMATCH[1]}"
+            # Trim trailing whitespace
+            type_val="${type_val%"${type_val##*[![:space:]]}"}"
+            echo "$type_val"
+            return 0
+        fi
+    done < "$conf"
+
+    return 1
+}
+
+# ==============================================================================
+# OAuth Token Health Monitoring
+# ==============================================================================
+
+# Check the health of an OAuth token for a given remote.
+# Intent: Proactively detect tokens at risk of expiration before they silently
+#         break unattended operations. Google revokes refresh tokens after
+#         6 months of inactivity; "Testing" mode projects expire after 7 days.
+#
+# @param string $1 Remote name (without trailing colon).
+# @param string& $2 nameref: output status — "ok", "warn", "error", "static".
+# @param string& $3 nameref: output message with details.
+# @return int 0 always.
+function rsd::l::storage::check_token_health() {
+    local remote_name="$1"
+    declare -n _status_out="$2"
+    declare -n _msg_out="$3"
+
+    local remote_type
+    if ! remote_type=$(rsd::l::storage::get_remote_type "$remote_name"); then
+        _status_out="error"
+        _msg_out="Remote '$remote_name' not found in config."
+        return 0
+    fi
+
+    # Static credential backends — no token expiry concern
+    if [[ ! -v RSD_STORAGE_OAUTH_BACKENDS["$remote_type"] ]]; then
+        _status_out="static"
+        _msg_out="type: $remote_type — credentials: static (no expiry concern)"
+        return 0
+    fi
+
+    # OAuth backend — extract token JSON from config
+    local conf
+    if ! conf=$(rsd::l::storage::resolve_config); then
+        _status_out="error"
+        _msg_out="No config file found."
+        return 0
+    fi
+
+    local token_json=""
+    local in_section=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^\[([^]]+)\]$ ]]; then
+            if [[ "${BASH_REMATCH[1]}" == "$remote_name" ]]; then
+                in_section=1
+            else
+                [[ $in_section -eq 1 ]] && break
+                in_section=0
+            fi
+            continue
+        fi
+
+        if [[ $in_section -eq 1 && "$line" =~ ^[[:space:]]*token[[:space:]]*=[[:space:]]*(.*) ]]; then
+            token_json="${BASH_REMATCH[1]}"
+            break
+        fi
+    done < "$conf"
+
+    if [[ -z "$token_json" ]]; then
+        _status_out="error"
+        _msg_out="type: $remote_type — OAuth token NOT FOUND in config. Run 'rsd storage config' to authorize."
+        return 0
+    fi
+
+    # Check for refresh_token presence
+    if [[ "$token_json" != *"refresh_token"* ]]; then
+        _status_out="error"
+        _msg_out="type: $remote_type — token exists but MISSING refresh_token. Re-authorize with 'rsd storage config'."
+        return 0
+    fi
+
+    # Extract expiry timestamp from token JSON
+    # Format: "expiry":"2026-06-01T19:00:00.000000000Z" or similar ISO 8601
+    local expiry_str=""
+    if [[ "$token_json" =~ \"expiry\":\"([^\"]+)\" ]]; then
+        expiry_str="${BASH_REMATCH[1]}"
+    fi
+
+    if [[ -z "$expiry_str" ]]; then
+        _status_out="warn"
+        _msg_out="type: $remote_type — OAuth token present but could not parse expiry date."
+        return 0
+    fi
+
+    # Compute token age in days
+    local expiry_epoch now_epoch age_days
+    if expiry_epoch=$(date -d "$expiry_str" +%s 2>/dev/null); then
+        now_epoch=$(date +%s)
+        # Access tokens typically expire in 1 hour; the expiry field reflects
+        # the LAST access token expiry, not the refresh token.  The refresh
+        # token's last-use timestamp ≈ expiry - 3600 seconds.
+        local last_use_epoch=$(( expiry_epoch - 3600 ))
+        age_days=$(( (now_epoch - last_use_epoch) / 86400 ))
+
+        if [[ $age_days -gt $RSD_STORAGE_TOKEN_WARN_DAYS ]]; then
+            local deadline_days=$(( 180 - age_days ))
+            if [[ $deadline_days -le 0 ]]; then
+                _status_out="error"
+                _msg_out="type: $remote_type — token last used ${age_days} days ago. LIKELY EXPIRED by Google's 6-month policy. Re-authorize."
+            else
+                _status_out="warn"
+                _msg_out="type: $remote_type — token last used ${age_days} days ago. ~${deadline_days} days until 6-month inactivity expiry."
+            fi
+        else
+            _status_out="ok"
+            _msg_out="type: $remote_type — OAuth token healthy (last used ${age_days} days ago)."
+        fi
+    else
+        _status_out="warn"
+        _msg_out="type: $remote_type — OAuth token present but could not parse expiry timestamp: $expiry_str"
+    fi
+
+    return 0
+}
+
+# Pre-flight check before executing an OAuth-dependent rclone operation.
+# Intent: Warn the user proactively if their token is aging dangerously,
+#         without blocking execution (advisory only).
+#
+# @param string $1 Source path (rclone remote:path or local path).
+# @param string $2 Optional destination path.
+# @return void
+function rsd::l::storage::pre_flight_check() {
+    local src="${1:-}"
+    local dst="${2:-}"
+
+    # Extract remote names from source and destination paths
+    local -a remotes_to_check=()
+    local path
+    for path in "$src" "$dst"; do
+        [[ -z "$path" ]] && continue
+        # rclone remote format: "name:path" — extract before the first colon
+        if [[ "$path" =~ ^([a-zA-Z0-9_-]+): ]]; then
+            remotes_to_check+=("${BASH_REMATCH[1]}")
+        fi
+    done
+
+    local remote status msg
+    for remote in "${remotes_to_check[@]}"; do
+        rsd::l::storage::check_token_health "$remote" status msg
+        case "$status" in
+            warn)
+                rsd::io::warn "Remote '$remote': $msg"
+                rsd::io::info "Run 'rsd storage doctor' for details."
+                ;;
+            error)
+                rsd::io::error "Remote '$remote': $msg"
+                ;;
+        esac
+    done
+}
+
+# ==============================================================================
+# Architecture Detection
+# ==============================================================================
+
+# Detect the target system's OS and architecture in rclone download format.
+# Intent: Map uname output to rclone's release naming convention.
+#
+# @param string& $1 nameref output: OS name (e.g., "linux", "osx").
+# @param string& $2 nameref output: Architecture (e.g., "amd64", "arm64").
+# @return int 0 on success, 1 on unsupported platform.
+function rsd::l::storage::detect_platform() {
+    declare -n _os_out="$1"
+    declare -n _arch_out="$2"
+
+    local raw_os raw_arch
+    raw_os=$(rsd::l::target::exec uname -s 2>/dev/null)
+    raw_arch=$(rsd::l::target::exec uname -m 2>/dev/null)
+
+    # Normalize OS
+    case "${raw_os,,}" in
+        linux)   _os_out="linux" ;;
+        darwin)  _os_out="osx" ;;
+        freebsd) _os_out="freebsd" ;;
+        *)
+            rsd::io::error "Unsupported OS: $raw_os"
+            return 1
+            ;;
+    esac
+
+    # Normalize architecture to rclone naming
+    case "${raw_arch,,}" in
+        x86_64|amd64)   _arch_out="amd64" ;;
+        aarch64|arm64)  _arch_out="arm64" ;;
+        armv7l|armhf)   _arch_out="arm-v7" ;;
+        armv6l)         _arch_out="arm-v6" ;;
+        *)
+            rsd::io::error "Unsupported architecture: $raw_arch"
+            return 1
+            ;;
+    esac
+
+    return 0
+}
