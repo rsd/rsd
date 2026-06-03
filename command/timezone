@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+[[ "$RSD_TIMEZONE_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/timezone.lib)"
+
+RSD_C_TIMEZONE_SHORT_DESC="Timezone Management"
+RSD_C_TIMEZONE_VERSION="0.1.0"
+
+# Timezone command is remote-aware (Mode A) to query/set on remote targets
+RSD_C_TIMEZONE_REMOTE_AWARE=1
+
+# Help and usage action.
+# Intent: Display sub-commands and description for the timezone module.
+#
+# @return void
+function rsd::c::timezone::help() {
+    echo -e "\n\tTimezone Command Help:\n"
+    echo -e "\t\tActions:"
+    echo -e "\t\t\tshow                  Display current timezone, local time, and NTP status"
+    echo -e "\t\t\tset <timezone>        Set the system timezone (e.g., America/Sao_Paulo)"
+    echo -e "\t\t\tlist [filter]         List valid timezone names, optionally filtered"
+}
+
+# Display the current timezone, local time, and NTP sync status.
+# Intent: Quick diagnostic view of the target's time configuration.
+#
+# @return int 0 on success, 1 on platform check failure.
+function rsd::c::timezone::show() {
+    if ! rsd::l::tz::is_supported; then
+        return 1
+    fi
+
+    local current_tz=""
+    local ntp_status=""
+
+    if ! rsd::l::tz::get_current current_tz; then
+        return 1
+    fi
+
+    rsd::l::tz::get_ntp_status ntp_status
+
+    local current_time
+    current_time=$(rsd::l::target::exec date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null)
+
+    rsd::io::blank
+    rsd::io::info "Timezone:          ${current_tz}"
+    rsd::io::info "Local time:        ${current_time}"
+    rsd::io::info "NTP synchronized:  ${ntp_status:-unknown}"
+    rsd::io::blank
+}
+
+# Set the system timezone with validation and verification.
+# Intent: Interactive ad-hoc timezone change with pre-validation,
+#         sudo elevation, and post-change confirmation.
+#
+# @param string $1 The target timezone (tz database name).
+# @return int 0 on success, 1 on failure, 2 on bad usage.
+function rsd::c::timezone::set() {
+    local target_tz="$1"
+
+    if [[ -z "$target_tz" ]]; then
+        rsd::io::error "Usage: rsd timezone set <timezone>"
+        rsd::io::info  "Example: rsd timezone set America/Sao_Paulo"
+        rsd::io::info  "Run 'rsd timezone list' to see valid timezone names."
+        return 2
+    fi
+
+    if ! rsd::l::tz::is_supported; then
+        return 1
+    fi
+
+    # Check if already set
+    local current_tz=""
+    rsd::l::tz::get_current current_tz
+    if [[ "$current_tz" == "$target_tz" ]]; then
+        rsd::io::ok "Timezone is already set to '${target_tz}'. No change needed."
+        return 0
+    fi
+
+    # Validate the requested timezone against the target's tz database
+    if ! rsd::l::tz::is_valid "$target_tz"; then
+        rsd::io::error "Invalid timezone: '${target_tz}'"
+        rsd::io::info  "Run 'rsd timezone list' to see valid timezone names."
+        return 2
+    fi
+
+    rsd::io::status "Setting timezone to '${target_tz}'..."
+
+    if ! rsd::l::tz::set "$target_tz"; then
+        rsd::io::error "Failed to set timezone to '${target_tz}'."
+        return 1
+    fi
+
+    # Verify the change
+    local verified_tz=""
+    rsd::l::tz::get_current verified_tz
+
+    if [[ "$verified_tz" == "$target_tz" ]]; then
+        local current_time
+        current_time=$(rsd::l::target::exec date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null)
+        rsd::io::ok "Timezone set to '${verified_tz}'."
+        rsd::io::info "Current system time: ${current_time}"
+    else
+        rsd::io::error "Timezone verification failed."
+        rsd::io::info  "Expected: ${target_tz}"
+        rsd::io::info  "Actual:   ${verified_tz}"
+        return 1
+    fi
+}
+
+# List valid timezone names from the target host.
+# Intent: Discovery tool — optionally filters by region prefix.
+#
+# @param string $1 Optional filter pattern (e.g., "America", "Europe").
+# @return int 0 on success.
+function rsd::c::timezone::list() {
+    local filter="${1:-}"
+
+    if ! rsd::l::tz::is_supported; then
+        return 1
+    fi
+
+    rsd::l::tz::list "$filter"
+}

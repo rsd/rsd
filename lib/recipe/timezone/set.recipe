@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# Timezone — Set System Timezone
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Configures the system timezone on a systemd-based Linux server via
+# timedatectl. Works on Ubuntu, Debian, Arch, Fedora, RHEL, openSUSE —
+# any distribution running systemd.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+#  1. Task: validate_env
+#     Pre-check: none (always runs).
+#     Apply: Verifies systemd is running, timedatectl is available,
+#     and the requested timezone is valid against the target's tz database.
+#
+#  2. Task: apply (recovery: forward)
+#     Pre-check: Current timezone already matches the target timezone.
+#     Apply: Calls timedatectl set-timezone via sudo to change the
+#     system timezone.
+#
+#  3. Task: verify
+#     Pre-check: none (always runs).
+#     Apply: Reads the current timezone and NTP sync status from the
+#     target, compares to the requested timezone, and displays the
+#     current local time as visual confirmation.
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. The pre_check on 'apply' compares the
+# current timezone to the target — if already matching, the task is
+# skipped. validate_env and verify run unconditionally (stateless
+# diagnostics).
+#
+# SCOPE
+# -----
+# Works on both local and remote targets. The timezone name must be
+# a valid tz database entry (e.g., "America/Sao_Paulo", "UTC").
+#
+# RECOVERY
+# --------
+# All tasks use "forward" recovery. Timezone changes are non-destructive —
+# if the wrong timezone is set, re-run with the correct value.
+#
+# Usage:
+#   rsd recipe run timezone/set
+#   rsd recipe run timezone/set --timezone UTC
+#   rsd recipe run timezone/set --timezone Europe/London --dry-run
+#   rsd @target recipe run timezone/set --timezone America/Sao_Paulo
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load timezone library
+[[ "$RSD_TIMEZONE_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/timezone.lib)"
+
+# Recipe-specific CLI options
+declare -g -A RSD_RECIPE_OPTIONS=(
+    ["timezone"]=1
+)
+
+# ==============================================================================
+# Globals (populated during registration)
+# ==============================================================================
+
+declare -g RSD_TZ_TARGET="America/Sao_Paulo"
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::timezone_set::register() {
+    RSD_TZ_TARGET="${RSD_COMMAND_ARGS[timezone]:-America/Sao_Paulo}"
+
+    rsd::r::register_task "timezone_set::validate_env"
+    rsd::r::register_task "timezone_set::apply"
+    rsd::r::register_task "timezone_set::verify"
+}
+
+# ==============================================================================
+# Task: validate_env
+# ==============================================================================
+# Fail-fast on platform or input problems before attempting mutation.
+
+function rsd::r::timezone_set::validate_env() {
+    rsd::io::status "Validating environment..."
+
+    # Platform gate: systemd + timedatectl must be available
+    if ! rsd::l::tz::is_supported; then
+        return 1
+    fi
+    rsd::io::ok "systemd and timedatectl are available."
+
+    # Validate the requested timezone against the target's tz database
+    if ! rsd::l::tz::is_valid "$RSD_TZ_TARGET"; then
+        rsd::io::error "Invalid timezone: '${RSD_TZ_TARGET}'"
+        rsd::io::info  "Run 'rsd timezone list' to see valid timezone names."
+        return 1
+    fi
+    rsd::io::ok "Timezone '${RSD_TZ_TARGET}' is valid."
+}
+
+# ==============================================================================
+# Task: apply
+# ==============================================================================
+# Set the system timezone. Skipped if already matching (idempotent).
+
+function rsd::r::timezone_set::apply::pre_check() {
+    local current_tz=""
+    rsd::l::tz::get_current current_tz || return 1
+    [[ "$current_tz" == "$RSD_TZ_TARGET" ]]
+}
+
+function rsd::r::timezone_set::apply() {
+    rsd::io::status "Setting timezone to '${RSD_TZ_TARGET}'..."
+
+    if ! rsd::l::tz::set "$RSD_TZ_TARGET"; then
+        rsd::io::error "timedatectl set-timezone failed."
+        return 1
+    fi
+
+    rsd::io::ok "Timezone set to '${RSD_TZ_TARGET}'."
+}
+
+# ==============================================================================
+# Task: verify
+# ==============================================================================
+# Post-change confirmation. Always runs to give visual feedback.
+
+function rsd::r::timezone_set::verify() {
+    rsd::io::status "Verifying timezone configuration..."
+
+    local current_tz=""
+    if ! rsd::l::tz::get_current current_tz; then
+        rsd::io::error "Could not read timezone after change."
+        return 1
+    fi
+
+    if [[ "$current_tz" != "$RSD_TZ_TARGET" ]]; then
+        rsd::io::error "Timezone verification failed."
+        rsd::io::info  "Expected: ${RSD_TZ_TARGET}"
+        rsd::io::info  "Actual:   ${current_tz}"
+        return 1
+    fi
+    rsd::io::ok "Timezone: ${current_tz}"
+
+    # NTP sync status (diagnostic, non-blocking)
+    local ntp_status=""
+    rsd::l::tz::get_ntp_status ntp_status
+    rsd::io::ok "NTP synchronized: ${ntp_status:-unknown}"
+
+    # Display current time for visual confirmation
+    local current_time
+    current_time=$(rsd::l::target::exec date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null)
+    rsd::io::ok "Current time: ${current_time}"
+}

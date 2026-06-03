@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# Timezone Management Library
+# ==============================================================================
+#
+# Target-aware primitives for querying and configuring the system timezone
+# via timedatectl (systemd). All operations route through
+# rsd::l::target::exec or rsd::l::target::exec_sudo, so they work
+# transparently on both local and remote targets.
+#
+# timedatectl is available on every systemd-based distribution:
+#   Ubuntu, Debian, Arch Linux, Fedora, RHEL, openSUSE.
+# Non-systemd systems (Alpine/OpenRC) are NOT supported by this library.
+#
+# Dependencies:
+#   - target.lib  (loaded automatically by the RSD framework)
+#   - io.lib      (loaded for structured messaging)
+#   - systemd.lib (for is_systemd platform gate)
+#
+# namespace rsd::l::tz::
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+if [[ "$RSD_TIMEZONE_LIB" == "1" ]]; then
+    return 0
+fi
+RSD_TIMEZONE_LIB=1
+RSD_TIMEZONE_LIB_VERSION="0.1.0"
+
+# Load target-aware dispatch primitives
+[[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
+
+# Load structured IO messaging
+[[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
+
+# Load systemd for platform gating
+[[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
+
+# ==============================================================================
+# Platform Gate
+# ==============================================================================
+
+# Verify the target host supports timedatectl (systemd + binary present).
+# Callers should invoke this before any mutation to fail-fast with a clear
+# diagnostic rather than a cryptic "command not found".
+#
+# @return int 0 if supported, 1 if not.
+function rsd::l::tz::is_supported() {
+    if ! rsd::l::systemd::is_systemd; then
+        rsd::io::error "Target host is not running systemd. timedatectl is unavailable."
+        return 1
+    fi
+
+    if ! rsd::l::target::has_bin timedatectl; then
+        rsd::io::error "timedatectl binary not found on target host."
+        return 1
+    fi
+
+    return 0
+}
+
+# ==============================================================================
+# Query Functions
+# ==============================================================================
+
+# Read the current system timezone from the target host.
+# Uses the machine-readable timedatectl show interface.
+#
+# @param string& $1 nameref output variable for the timezone string.
+# @return int 0 on success, 1 on failure.
+function rsd::l::tz::get_current() {
+    local _out_var="$1"
+    declare -n _r_tz="$_out_var"
+    _r_tz=$(rsd::l::target::exec timedatectl show -p Timezone --value 2>/dev/null)
+
+    if [[ -z "$_r_tz" ]]; then
+        rsd::io::error "Failed to read current timezone from target."
+        return 1
+    fi
+}
+
+# Check if NTP synchronization is active on the target host.
+#
+# @param string& $1 nameref output variable ("yes" or "no").
+# @return int 0 on success.
+function rsd::l::tz::get_ntp_status() {
+    local _out_var="$1"
+    declare -n _r_ntp="$_out_var"
+    _r_ntp=$(rsd::l::target::exec timedatectl show -p NTPSynchronized --value 2>/dev/null)
+}
+
+# Validate a timezone name against the target host's tz database.
+# Queries the target's own timedatectl list-timezones, which is always
+# authoritative for that host's installed tzdata version.
+#
+# @param string $1 The timezone name to validate (e.g., "America/Sao_Paulo").
+# @return int 0 if valid, 1 if invalid.
+function rsd::l::tz::is_valid() {
+    local tz="$1"
+
+    if [[ -z "$tz" ]]; then
+        return 1
+    fi
+
+    rsd::l::target::exec timedatectl list-timezones 2>/dev/null | grep -qx "$tz"
+}
+
+# List all valid timezone names from the target host.
+# Optionally filters by a prefix pattern (e.g., "America", "Europe").
+#
+# @param string $1 Optional filter prefix (grep pattern).
+# @return stdout One timezone per line.
+function rsd::l::tz::list() {
+    local filter="${1:-}"
+
+    if [[ -n "$filter" ]]; then
+        rsd::l::target::exec timedatectl list-timezones 2>/dev/null | grep -i "$filter"
+    else
+        rsd::l::target::exec timedatectl list-timezones 2>/dev/null
+    fi
+}
+
+# ==============================================================================
+# Mutation Functions
+# ==============================================================================
+
+# Set the system timezone on the target host.
+# Requires elevated privileges (timedatectl set-timezone modifies
+# /etc/localtime and /etc/timezone).
+#
+# @param string $1 The timezone name (e.g., "America/Sao_Paulo").
+# @return int 0 on success, 1 on failure.
+function rsd::l::tz::set() {
+    local tz="$1"
+
+    if [[ -z "$tz" ]]; then
+        rsd::io::error "Timezone name is required."
+        return 2
+    fi
+
+    rsd::l::target::exec_sudo "" timedatectl set-timezone "$tz"
+}
