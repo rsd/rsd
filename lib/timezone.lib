@@ -41,7 +41,7 @@ if [[ "$RSD_TIMEZONE_LIB" == "1" ]]; then
     return 0
 fi
 RSD_TIMEZONE_LIB=1
-RSD_TIMEZONE_LIB_VERSION="0.2.0"
+RSD_TIMEZONE_LIB_VERSION="0.2.2"
 
 # Load target-aware dispatch primitives
 [[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
@@ -138,6 +138,7 @@ function rsd::l::tz::get_current() {
     case "$RSD_TZ_METHOD" in
         timedatectl)
             _r_tz=$(rsd::l::target::exec timedatectl show -p Timezone --value 2>/dev/null)
+            bash::trim _r_tz
             ;;
         debconf|posix)
             # Try /etc/timezone first (Debian-family canonical source)
@@ -173,6 +174,7 @@ function rsd::l::tz::get_ntp_status() {
 
     if [[ "$RSD_TZ_METHOD" == "timedatectl" ]]; then
         _r_ntp=$(rsd::l::target::exec timedatectl show -p NTPSynchronized --value 2>/dev/null)
+        bash::trim _r_ntp
     else
         _r_ntp="unknown"
     fi
@@ -191,14 +193,12 @@ function rsd::l::tz::is_valid() {
         return 1
     fi
 
-    rsd::l::tz::_detect_method
-
-    if [[ "$RSD_TZ_METHOD" == "timedatectl" ]]; then
-        rsd::l::target::exec timedatectl list-timezones 2>/dev/null | grep -qx "$tz"
-    else
-        # POSIX fallback: verify the zoneinfo file exists on the target
-        rsd::l::target::exec test -f "/usr/share/zoneinfo/${tz}" 2>/dev/null
-    fi
+    # Validate by checking the zoneinfo file on the target.
+    # This works for all methods — timedatectl list-timezones is just
+    # a frontend to the same /usr/share/zoneinfo database.
+    # Using a single `test -f` avoids SSH quoting issues with piped
+    # sh -c commands through multi-hop tunnels.
+    rsd::l::target::exec test -f "/usr/share/zoneinfo/${tz}" 2>/dev/null
 }
 
 # List all valid timezone names from the target host.
