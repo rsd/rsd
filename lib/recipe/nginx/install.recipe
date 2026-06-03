@@ -119,7 +119,7 @@ function rsd::r::nginx_install::register() {
 # ==============================================================================
 
 function rsd::r::nginx_install::install_packages::pre_check() {
-    rsd::l::target::exec dpkg -l nginx 2>/dev/null | grep -q '^ii'
+    rsd::l::target::exec sh -c "dpkg -l nginx 2>/dev/null | grep -q '^ii'"
 }
 
 function rsd::r::nginx_install::install_packages() {
@@ -263,6 +263,7 @@ function rsd::r::nginx_install::validate_install() {
     # 1. Nginx version
     local nginx_version=""
     nginx_version=$(rsd::l::target::exec nginx -v 2>&1)
+    bash::trim nginx_version
     rsd::io::info "Version:     $nginx_version"
 
     # 2. Config syntax test
@@ -284,6 +285,7 @@ function rsd::r::nginx_install::validate_install() {
     # 4. Worker process user
     local worker_user=""
     worker_user=$(rsd::l::target::exec sh -c "'ps aux | grep \"nginx: worker\" | grep -v grep | head -1 | awk \"{print \\$1}\"'" 2>/dev/null)
+    bash::trim worker_user
     if [[ -n "$worker_user" ]]; then
         rsd::io::info "Worker user: $worker_user"
     fi

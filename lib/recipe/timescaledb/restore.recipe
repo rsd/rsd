@@ -178,6 +178,7 @@ function rsd::r::timescaledb_restore::resolve_input() {
         local latest
         latest=$(rsd::l::target::exec_at "$RSD_RST_FROM_IS_REMOTE" \
             sh -c "ls -1t '${from}/${RSD_RST_DB_NAME}_'*'.dump' 2>/dev/null | head -1")
+        bash::trim latest
         if [[ -z "$latest" ]]; then
             rsd::io::error "No dump file found for '${RSD_RST_DB_NAME}' in: ${from}"
             rsd::io::info "Expected: ${from}/${RSD_RST_DB_NAME}_<timestamp>_<compress>.dump"
@@ -233,9 +234,11 @@ function rsd::r::timescaledb_restore::resolve_input() {
     if [[ -n "$RSD_RST_ROLE_FILE" ]]; then
         RSD_RST_ROLE_NAME=$(rsd::l::target::exec_at "$RSD_RST_FROM_IS_REMOTE" \
             grep -oP 'CREATE ROLE\s+"\K[^"]+' "$RSD_RST_ROLE_FILE" | head -1)
+        bash::trim RSD_RST_ROLE_NAME
         if [[ -z "$RSD_RST_ROLE_NAME" ]]; then
             RSD_RST_ROLE_NAME=$(rsd::l::target::exec_at "$RSD_RST_FROM_IS_REMOTE" \
                 grep -oP 'CREATE ROLE\s+\K\S+' "$RSD_RST_ROLE_FILE" | head -1 | tr -d ';')
+            bash::trim RSD_RST_ROLE_NAME
         fi
         [[ -n "$RSD_RST_ROLE_NAME" ]] && rsd::io::ok "Role name: ${RSD_RST_ROLE_NAME}"
     fi

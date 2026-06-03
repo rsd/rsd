@@ -133,6 +133,7 @@ function rsd::r::rclone_install::download() {
     # Create secure temp directory on the target
     local tmpdir
     tmpdir=$(rsd::l::target::exec mktemp -d -t rsd-rclone.XXXXXX 2>/dev/null)
+    bash::trim tmpdir
     if [[ -z "$tmpdir" ]]; then
         rsd::io::error "Failed to create secure temp directory on target."
         return 14
@@ -219,6 +220,7 @@ function rsd::r::rclone_install::verify() {
 
     local version
     version=$(rsd::l::target::exec "${RSD_RCLONE_INSTALL_DIR}/rclone" version 2>/dev/null | head -n1)
+    bash::trim version
 
     if [[ -z "$version" ]]; then
         rsd::io::error "rclone verification failed — binary did not execute."
@@ -230,6 +232,7 @@ function rsd::r::rclone_install::verify() {
     # Check if install dir is in PATH
     local in_path
     in_path=$(rsd::l::target::exec sh -c 'command -v rclone' 2>/dev/null)
+    bash::trim in_path
     if [[ -z "$in_path" ]]; then
         rsd::io::warn "rclone installed but ${RSD_RCLONE_INSTALL_DIR} may not be in PATH."
         rsd::io::info "Add to your shell profile: export PATH=\"${RSD_RCLONE_INSTALL_DIR}:\$PATH\""

@@ -367,7 +367,7 @@ function rsd::r::timescaledb_install::verify_repos() {
 # ==============================================================================
 
 function rsd::r::timescaledb_install::install_packages::pre_check() {
-    rsd::l::target::exec dpkg -l "timescaledb-2-postgresql-${RSD_TSDB_PG_VERSION}" 2>/dev/null | grep -q '^ii'
+    rsd::l::target::exec sh -c "dpkg -l 'timescaledb-2-postgresql-${RSD_TSDB_PG_VERSION}' 2>/dev/null | grep -q '^ii'"
 }
 
 function rsd::r::timescaledb_install::install_packages() {

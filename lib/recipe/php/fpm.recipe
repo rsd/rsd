@@ -168,7 +168,7 @@ function rsd::r::php_fpm::register() {
 # ==============================================================================
 
 function rsd::r::php_fpm::install_packages::pre_check() {
-    rsd::l::target::exec dpkg -l "php${RSD_PHP_VERSION}-fpm" 2>/dev/null | grep -q '^ii'
+    rsd::l::target::exec sh -c "dpkg -l 'php${RSD_PHP_VERSION}-fpm' 2>/dev/null | grep -q '^ii'"
 }
 
 function rsd::r::php_fpm::install_packages() {
@@ -386,6 +386,7 @@ function rsd::r::php_fpm::validate_install() {
     # 1. PHP version
     local php_version=""
     php_version=$(rsd::l::target::exec php -v 2>/dev/null | head -1)
+    bash::trim php_version
     if [[ -z "$php_version" ]]; then
         rsd::io::error "Could not determine PHP version."
         return 1

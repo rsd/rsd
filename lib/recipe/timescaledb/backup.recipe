@@ -452,7 +452,9 @@ function rsd::r::timescaledb_backup::summary() {
     local dump_size dump_hr role_size role_hr
     if [[ "$RSD_BKP_OUTPUT_IS_REMOTE" == "1" ]]; then
         dump_size=$(rsd::l::target::exec stat -c%s "$dump_path" 2>/dev/null)
+        bash::trim dump_size
         role_size=$(rsd::l::target::exec stat -c%s "$role_file" 2>/dev/null)
+        bash::trim role_size
     else
         dump_size=$(stat -c%s "$dump_path" 2>/dev/null)
         role_size=$(stat -c%s "$role_file" 2>/dev/null)
