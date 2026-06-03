@@ -90,6 +90,36 @@ EOF
     [ "${verified_config[".port"]}" = "8080" ]
 }
 
+@test "rsd::config::write_ini groups keys by section without duplicate headers" {
+    local ini_file="${TEST_CONF_DIR}/multi_section.ini"
+
+    declare -A multi_config
+    multi_config["alpha.name"]="first"
+    multi_config["alpha.value"]="100"
+    multi_config["beta.name"]="second"
+    multi_config["beta.value"]="200"
+    multi_config["alpha.extra"]="yes"
+
+    rsd::config::write_ini "$ini_file" multi_config
+    [ "$?" -eq 0 ]
+
+    # Each section header must appear exactly once
+    local alpha_count beta_count
+    alpha_count=$(grep -c '^\[alpha\]$' "$ini_file")
+    beta_count=$(grep -c '^\[beta\]$' "$ini_file")
+    [ "$alpha_count" -eq 1 ]
+    [ "$beta_count" -eq 1 ]
+
+    # Round-trip: verify all values survive
+    declare -A reload_config
+    rsd::config::read_ini "$ini_file" reload_config
+    [ "${reload_config["alpha.name"]}" = "first" ]
+    [ "${reload_config["alpha.value"]}" = "100" ]
+    [ "${reload_config["alpha.extra"]}" = "yes" ]
+    [ "${reload_config["beta.name"]}" = "second" ]
+    [ "${reload_config["beta.value"]}" = "200" ]
+}
+
 @test "rsd::config::get_file respects priority order: CLI override > workspace > user > system" {
     # Isolate parameters
     RSD_LIBRARY_SEARCH_PATH=()

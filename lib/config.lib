@@ -21,7 +21,7 @@ fi
 #        command line parsing should have precedence.
 # FIXME: Some searchpaths end up duplicates.  It is not a real problem, but should be sanitized too.
 
-RSD_CONFIGLIB_VERSION='0.3.1'
+RSD_CONFIGLIB_VERSION='0.3.2'
 
 declare -ga RSD_CONFIGLIB_SEARCH_PATH
 RSD_CONFIGDIR=()
@@ -185,13 +185,20 @@ function rsd::config::write_ini() {
     # FIXME: Should do a backup first
     > "$file"  # Clear the file if it exists or create a new one
 
-    for key in "${!config[@]}"; do
+    # Intent: Bash associative arrays iterate in non-deterministic hash order.
+    # Sorting keys lexicographically groups all keys sharing the same section
+    # prefix, preventing duplicate [section] headers in the output.
+    local sorted_keys
+    IFS=$'\n' read -r -d '' -a sorted_keys < <(printf '%s\n' "${!config[@]}" | sort && printf '\0')
+
+    for key in "${sorted_keys[@]}"; do
         section="${key%%.*}"
         local actual_key="${key#*.}"
 
         if [[ "$section" != "$previous_section" ]]; then
-                printf "[%s]\n" "$section" >> "$file"
-                previous_section="$section"
+            [[ -n "$previous_section" ]] && printf "\n" >> "$file"
+            printf "[%s]\n" "$section" >> "$file"
+            previous_section="$section"
         fi
         printf "%s = %s\n" "$actual_key" "${config[$key]}" >> "$file"
     done
