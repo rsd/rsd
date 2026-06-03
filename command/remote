@@ -13,7 +13,7 @@ fi
 [[ "$RSD_REMOTE_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/remote.lib)"
 
 RSD_C_REMOTE_SHORT_DESC="Remote RSD Environment Management Subsystem"
-RSD_C_REMOTE_VERSION="0.1.0"
+RSD_C_REMOTE_VERSION="0.2.0"
 
 # Module is remote-aware to allow routing local/remote target orchestration natively
 RSD_C_REMOTE_REMOTE_AWARE=1
@@ -23,7 +23,12 @@ function rsd::c::remote::help() {
     echo -e "\n\tRemote Command Help:\n"
     echo -e "\t\tUsage:"
     echo -e "\t\t\trsd <remote_target> remote <action> [options]"
-    echo -e "\n\t\tActions:"
+    echo -e "\n\t\tTarget Management (local — no @target required):"
+    echo -e "\t\t\talias <name> <spec>   Register a host alias (e.g., flow flow.jumba.com.br)"
+    echo -e "\t\t\tpathway <name> <hops> Register a multi-hop pathway (e.g., prod @gw,app)"
+    echo -e "\t\t\tlist                  Show all registered aliases and pathways"
+    echo -e "\t\t\tremove <name>         Remove a host alias or pathway"
+    echo -e "\n\t\tRemote Operations (requires @target):"
     echo -e "\t\t\tcheck       Verify if target has dependencies to install RSD"
     echo -e "\t\t\tinstall     Stream and bootstrap install RSD on the target host"
     echo -e "\t\t\tverify      Perform post-install framework verification"
@@ -321,11 +326,226 @@ EOF
     fi
 }
 
+# ==============================================================================
+# Alias & Pathway Management
+# ==============================================================================
+# These actions manage the user-scope remote.ini configuration file.
+# They do NOT require a remote target (@host) — they operate locally.
+
+# Resolve the user-scope remote.ini path.
+# Intent: Centralize the config file path computation for all alias/pathway actions.
+#
+# @return stdout The absolute path to the user remote.ini file.
+function rsd::c::remote::_ini_path() {
+    echo "${RSD_CONFIG_DIR:-$HOME/.config/rsd}/remote.ini"
+}
+
+# Load the remote.ini into R_INI_remote, creating the file and array if absent.
+# Intent: Defensive bootstrap — ensures the associative array and file exist
+#         before any read/write operations.
+#
+# @return int 0 on success.
+function rsd::c::remote::_load_ini() {
+    local ini_file
+    ini_file=$(rsd::c::remote::_ini_path)
+
+    # Ensure the directory and file exist
+    local dir
+    dir=$(dirname "$ini_file")
+    [[ -d "$dir" ]] || mkdir -p "$dir"
+    [[ -f "$ini_file" ]] || touch "$ini_file"
+
+    # Declare the global array if not yet declared
+    declare -gA R_INI_remote 2>/dev/null || true
+
+    rsd::config::read_ini "$ini_file" "R_INI_remote"
+}
+
+# Flush the in-memory R_INI_remote back to disk.
+#
+# @return int 0 on success, 13 on write failure.
+function rsd::c::remote::_save_ini() {
+    local ini_file
+    ini_file=$(rsd::c::remote::_ini_path)
+    rsd::config::write_ini "$ini_file" "R_INI_remote" || return 13
+}
+
+# Register a host alias.
+# Intent: Maps a short name to a full host specification so that
+#         `rsd @flow` resolves to `ssh://user@flow.jumba.com.br`.
+#
+# @param string $1 The alias name (e.g., "flow").
+# @param string $2 The full host specification (e.g., "flow.jumba.com.br" or "ssh://admin@host:2222").
+# @return int 0 on success, 2 on bad usage, 13 on write failure.
+function rsd::c::remote::alias() {
+    local name="$1"
+    local spec="$2"
+
+    if [[ -z "$name" || -z "$spec" ]]; then
+        rsd::io::error "Usage: rsd remote alias <name> <host_spec>"
+        rsd::io::info  "Example: rsd remote alias flow flow.jumba.com.br"
+        rsd::io::info  "Example: rsd remote alias gateway ssh://admin@bastion:2222"
+        return 2
+    fi
+
+    rsd::c::remote::_load_ini
+
+    # Check for overwrite
+    local existing_host="${R_INI_remote[hosts.${name}]:-}"
+    local existing_pathway="${R_INI_remote[pathways.${name}]:-}"
+
+    if [[ -n "$existing_host" ]]; then
+        rsd::io::warn "Overwriting existing host alias '${name}' (was: ${existing_host})."
+    elif [[ -n "$existing_pathway" ]]; then
+        rsd::io::warn "A pathway named '${name}' already exists. Host alias takes precedence during resolution."
+    fi
+
+    R_INI_remote["hosts.${name}"]="$spec"
+
+    if ! rsd::c::remote::_save_ini; then
+        rsd::io::error "Failed to write remote.ini."
+        return 13
+    fi
+
+    rsd::io::ok "Alias '${name}' -> '${spec}' saved."
+    rsd::io::info "Usage: rsd @${name} <command>"
+}
+
+# Register a multi-hop pathway.
+# Intent: Maps a short name to a comma-separated chain of hops (aliases or raw specs)
+#         so that `rsd @prod` resolves to `@gateway,target,container`.
+#
+# @param string $1 The pathway name (e.g., "prod").
+# @param string $2 The hop chain (e.g., "@gateway,target" or "@gw,ssh://app,lxc://web").
+# @return int 0 on success, 2 on bad usage, 13 on write failure.
+function rsd::c::remote::pathway() {
+    local name="$1"
+    local hops="$2"
+
+    if [[ -z "$name" || -z "$hops" ]]; then
+        rsd::io::error "Usage: rsd remote pathway <name> <hop_chain>"
+        rsd::io::info  "Example: rsd remote pathway prod @gateway,app-server"
+        rsd::io::info  "Example: rsd remote pathway full @gateway,hypervisor,lxc://webapp,docker://api"
+        return 2
+    fi
+
+    rsd::c::remote::_load_ini
+
+    local existing="${R_INI_remote[pathways.${name}]:-}"
+    if [[ -n "$existing" ]]; then
+        rsd::io::warn "Overwriting existing pathway '${name}' (was: ${existing})."
+    fi
+
+    R_INI_remote["pathways.${name}"]="$hops"
+
+    if ! rsd::c::remote::_save_ini; then
+        rsd::io::error "Failed to write remote.ini."
+        return 13
+    fi
+
+    rsd::io::ok "Pathway '${name}' -> '${hops}' saved."
+    rsd::io::info "Usage: rsd @${name} <command>"
+}
+
+# List all registered host aliases and pathways.
+# Intent: Quick inventory of the user's remote target configuration.
+#
+# @return int 0 on success.
+function rsd::c::remote::list() {
+    rsd::c::remote::_load_ini
+
+    local key
+    local has_hosts=0
+    local has_pathways=0
+
+    # Collect and display hosts
+    rsd::io::blank
+    rsd::io::info "Host Aliases:"
+
+    # Sort keys for deterministic display
+    local -a sorted_keys
+    IFS=$'\n' read -r -d '' -a sorted_keys < <(printf '%s\n' "${!R_INI_remote[@]}" | sort && printf '\0') || true
+
+    for key in "${sorted_keys[@]}"; do
+        if [[ "$key" == hosts.* ]]; then
+            local alias_name="${key#hosts.}"
+            rsd::io::info "  ${alias_name}  ->  ${R_INI_remote[$key]}"
+            has_hosts=1
+        fi
+    done
+    if [[ $has_hosts -eq 0 ]]; then
+        rsd::io::info "  (none)"
+    fi
+
+    rsd::io::blank
+    rsd::io::info "Pathways:"
+
+    for key in "${sorted_keys[@]}"; do
+        if [[ "$key" == pathways.* ]]; then
+            local pathway_name="${key#pathways.}"
+            rsd::io::info "  ${pathway_name}  ->  ${R_INI_remote[$key]}"
+            has_pathways=1
+        fi
+    done
+    if [[ $has_pathways -eq 0 ]]; then
+        rsd::io::info "  (none)"
+    fi
+
+    rsd::io::blank
+    rsd::io::info "Config: $(rsd::c::remote::_ini_path)"
+}
+
+# Remove a host alias or pathway by name.
+# Intent: Clean removal of a registered alias or pathway from remote.ini.
+#
+# @param string $1 The name to remove.
+# @return int 0 on success, 2 on bad usage, 10 if name not found.
+function rsd::c::remote::remove() {
+    local name="$1"
+
+    if [[ -z "$name" ]]; then
+        rsd::io::error "Usage: rsd remote remove <name>"
+        return 2
+    fi
+
+    rsd::c::remote::_load_ini
+
+    local found=0
+
+    if [[ -n "${R_INI_remote[hosts.${name}]:-}" ]]; then
+        rsd::io::info "Removing host alias '${name}' (was: ${R_INI_remote[hosts.${name}]})."
+        unset "R_INI_remote[hosts.${name}]"
+        found=1
+    fi
+
+    if [[ -n "${R_INI_remote[pathways.${name}]:-}" ]]; then
+        rsd::io::info "Removing pathway '${name}' (was: ${R_INI_remote[pathways.${name}]})."
+        unset "R_INI_remote[pathways.${name}]"
+        found=1
+    fi
+
+    if [[ $found -eq 0 ]]; then
+        rsd::io::error "No alias or pathway named '${name}' found."
+        return 10
+    fi
+
+    if ! rsd::c::remote::_save_ini; then
+        rsd::io::error "Failed to write remote.ini."
+        return 13
+    fi
+
+    rsd::io::ok "'${name}' removed."
+}
+
 # Route actions dynamically
 function rsd::c::remote::command() {
     local action="$1"
     shift
     case "$action" in
+        alias)      rsd::c::remote::alias "$@" ;;
+        pathway)    rsd::c::remote::pathway "$@" ;;
+        list)       rsd::c::remote::list "$@" ;;
+        remove)     rsd::c::remote::remove "$@" ;;
         check)      rsd::c::remote::check "$@" ;;
         install)    rsd::c::remote::install "$@" ;;
         verify)     rsd::c::remote::verify "$@" ;;
