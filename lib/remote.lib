@@ -10,7 +10,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_REMOTE_LIB=1
-RSD_REMOTE_LIB_VERSION="0.1.4"
+RSD_REMOTE_LIB_VERSION="0.1.5"
 
 # Load structured IO messaging
 [[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
@@ -309,10 +309,11 @@ function rsd::l::remote::prompt_user() {
         return 1
     fi
     
-    # Prompt the user on stderr and read from /dev/tty
-    echo -n "$prompt_msg " >&2
+    # Prompt the user directly on /dev/tty to bypass pipe buffering
+    # from recipe engine's stderr prefix formatter.
+    echo -n "$prompt_msg " > /dev/tty
     if { read -n 1 -r reply < /dev/tty; } 2>/dev/null; then
-        echo >&2 # line break
+        echo > /dev/tty # line break
         if [[ -z "$reply" || "$reply" =~ ^[Yy]$ || "$reply" == $'\n' ]]; then
             return 0
         fi
