@@ -161,14 +161,19 @@ _run_io() {
     [[ "$output" == *"Invalid timezone"* ]]
 }
 
-@test "validate_env succeeds for valid timezone on systemd host" {
+@test "validate_env succeeds and reports method for valid timezone" {
     RSD_TZ_TARGET="UTC"
 
     rsd::l::tz::is_supported() { return 0; }
+    rsd::l::tz::get_method() {
+        declare -n _ref="$1"
+        _ref="timedatectl"
+    }
     rsd::l::tz::is_valid() { return 0; }
 
     _run_io rsd::r::timezone_set::validate_env
     [ "$status" -eq 0 ]
+    [[ "$output" == *"Timezone method: timedatectl"* ]]
     [[ "$output" == *"valid"* ]]
 }
 

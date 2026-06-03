@@ -6,21 +6,24 @@
 #
 # PURPOSE
 # -------
-# Configures the system timezone on a systemd-based Linux server via
-# timedatectl. Works on Ubuntu, Debian, Arch, Fedora, RHEL, openSUSE —
-# any distribution running systemd.
+# Configures the system timezone on any Linux server. Supports three
+# methods, auto-detected by timezone.lib:
+#   timedatectl  — systemd-based hosts (Ubuntu ≥15.04, Debian ≥8, etc.)
+#   debconf      — Debian-family pre-systemd (dpkg-reconfigure tzdata)
+#   posix        — Universal fallback (ln -sf zoneinfo + /etc/timezone)
 #
 # WHAT THIS RECIPE DOES
 # ---------------------
 #  1. Task: validate_env
 #     Pre-check: none (always runs).
-#     Apply: Verifies systemd is running, timedatectl is available,
-#     and the requested timezone is valid against the target's tz database.
+#     Apply: Detects timezone management method, verifies it is
+#     available, and validates the requested timezone against the
+#     target's tz database.
 #
 #  2. Task: apply (recovery: forward)
 #     Pre-check: Current timezone already matches the target timezone.
-#     Apply: Calls timedatectl set-timezone via sudo to change the
-#     system timezone.
+#     Apply: Sets the timezone using the detected method
+#     (timedatectl / dpkg-reconfigure / ln -sf) via sudo.
 #
 #  3. Task: verify
 #     Pre-check: none (always runs).
@@ -94,11 +97,15 @@ function rsd::r::timezone_set::register() {
 function rsd::r::timezone_set::validate_env() {
     rsd::io::status "Validating environment..."
 
-    # Platform gate: systemd + timedatectl must be available
+    # Platform gate: at least one timezone method must be available
     if ! rsd::l::tz::is_supported; then
         return 1
     fi
-    rsd::io::ok "systemd and timedatectl are available."
+
+    # Report detected method for transparency
+    local method=""
+    rsd::l::tz::get_method method
+    rsd::io::ok "Timezone method: ${method}"
 
     # Validate the requested timezone against the target's tz database
     if ! rsd::l::tz::is_valid "$RSD_TZ_TARGET"; then
@@ -124,7 +131,7 @@ function rsd::r::timezone_set::apply() {
     rsd::io::status "Setting timezone to '${RSD_TZ_TARGET}'..."
 
     if ! rsd::l::tz::set "$RSD_TZ_TARGET"; then
-        rsd::io::error "timedatectl set-timezone failed."
+        rsd::io::error "Failed to set timezone to '${RSD_TZ_TARGET}'."
         return 1
     fi
 

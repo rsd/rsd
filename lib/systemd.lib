@@ -38,13 +38,16 @@ if [[ "$RSD_SYSTEMD_LIB" == "1" ]]; then
     return 0
 fi
 RSD_SYSTEMD_LIB=1
-RSD_SYSTEMD_LIB_VERSION="0.2.0"
+RSD_SYSTEMD_LIB_VERSION="0.3.0"
 
 # Load target-aware dispatch primitives
 [[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
 
 # Load structured IO messaging
 [[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
+
+# Load host identification for distro version comparisons
+[[ "$RSD_HOST_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/host.lib)"
 
 # ==============================================================================
 # Scope Management
@@ -186,6 +189,129 @@ function rsd::l::systemd::validate_unit_refs() {
         fi
     done
     return 0
+}
+
+# ==============================================================================
+# Distro Adoption Registry
+# ==============================================================================
+# Static lookup table mapping distro ID (as reported by /etc/os-release ID=)
+# to the first version that shipped systemd as the default init system.
+#
+# Values:
+#   "<version>" — systemd adopted from this version onward.
+#   "0"         — rolling distro, always has systemd (Arch, Tumbleweed).
+#   ""          — never adopted systemd (Alpine/OpenRC).
+#
+# Used by check_distro_support() for enriched diagnostics and pre-flight
+# validation against saved host profiles (hosts.ini).
+
+declare -gA RSD_SYSTEMD_ADOPTION=(
+    ["ubuntu"]="15.04"
+    ["debian"]="8"
+    ["fedora"]="15"
+    ["rhel"]="7"
+    ["centos"]="7"
+    ["rocky"]="8"
+    ["almalinux"]="8"
+    ["arch"]="0"
+    ["manjaro"]="0"
+    ["opensuse-leap"]="42.1"
+    ["opensuse-tumbleweed"]="0"
+    ["sles"]="12"
+    ["alpine"]=""
+)
+
+# Check if a distro version supports systemd based on the adoption registry.
+# Pure lookup — does not probe the target host. Use is_systemd() for runtime
+# detection; use this for diagnostics and pre-flight planning.
+#
+# @param string  $1 Distro ID (lowercase, as in /etc/os-release ID=).
+# @param string  $2 Version string (e.g., "7", "14.04", "rolling").
+# @param string& $3 Optional nameref for the adoption version ("never", "0", or version string).
+# @return int 0 if supported, 1 if not supported, 2 if distro is unknown.
+function rsd::l::systemd::check_distro_support() {
+    local distro="$1"
+    local version="$2"
+    local _out_var="${3:-}"
+
+    # Unknown distro — not in registry
+    if [[ ! -v RSD_SYSTEMD_ADOPTION["$distro"] ]]; then
+        if [[ -n "$_out_var" ]]; then
+            declare -n _r_adopt="$_out_var"
+            _r_adopt="unknown"
+        fi
+        return 2
+    fi
+
+    local adoption="${RSD_SYSTEMD_ADOPTION[$distro]}"
+
+    # Empty string means never adopted systemd
+    if [[ -z "$adoption" ]]; then
+        if [[ -n "$_out_var" ]]; then
+            declare -n _r_adopt="$_out_var"
+            _r_adopt="never"
+        fi
+        return 1
+    fi
+
+    # "0" means rolling distro — always has systemd
+    if [[ "$adoption" == "0" ]]; then
+        if [[ -n "$_out_var" ]]; then
+            declare -n _r_adopt="$_out_var"
+            _r_adopt="0"
+        fi
+        return 0
+    fi
+
+    # Version comparison via host.lib
+    if [[ -n "$_out_var" ]]; then
+        declare -n _r_adopt="$_out_var"
+        _r_adopt="$adoption"
+    fi
+
+    if rsd::l::host::version_gte "$version" "$adoption"; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Emit a human-readable diagnostic about systemd support for a distro.
+# Intent: Enriched error messages when is_systemd() fails, telling the
+# user exactly why and what to expect.
+#
+# @param string $1 Distro ID.
+# @param string $2 Version string.
+# @return int Same as check_distro_support (0/1/2).
+function rsd::l::systemd::diagnose_support() {
+    local distro="$1"
+    local version="$2"
+    local adoption_ver=""
+    local rc=0
+
+    rsd::l::systemd::check_distro_support "$distro" "$version" adoption_ver || rc=$?
+
+    case $rc in
+        0)
+            if [[ "$adoption_ver" == "0" ]]; then
+                rsd::io::ok "${distro} (rolling) — systemd is always available."
+            else
+                rsd::io::ok "${distro} ${version} supports systemd (adopted in version ${adoption_ver})."
+            fi
+            ;;
+        1)
+            if [[ "$adoption_ver" == "never" ]]; then
+                rsd::io::warn "${distro} does not use systemd (uses OpenRC)."
+            else
+                rsd::io::warn "${distro} ${version} pre-dates systemd adoption (adopted in ${distro} ${adoption_ver})."
+            fi
+            ;;
+        2)
+            rsd::io::info "${distro} is not in the systemd adoption registry. Use runtime detection."
+            ;;
+    esac
+
+    return $rc
 }
 
 # ==============================================================================

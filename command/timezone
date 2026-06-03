@@ -12,7 +12,7 @@ fi
 [[ "$RSD_TIMEZONE_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/timezone.lib)"
 
 RSD_C_TIMEZONE_SHORT_DESC="Timezone Management"
-RSD_C_TIMEZONE_VERSION="0.1.0"
+RSD_C_TIMEZONE_VERSION="0.2.0"
 
 # Timezone command is remote-aware (Mode A) to query/set on remote targets
 RSD_C_TIMEZONE_REMOTE_AWARE=1
@@ -47,6 +47,9 @@ function rsd::c::timezone::show() {
 
     rsd::l::tz::get_ntp_status ntp_status
 
+    local method=""
+    rsd::l::tz::get_method method
+
     local current_time
     current_time=$(rsd::l::target::exec date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null)
 
@@ -54,6 +57,7 @@ function rsd::c::timezone::show() {
     rsd::io::info "Timezone:          ${current_tz}"
     rsd::io::info "Local time:        ${current_time}"
     rsd::io::info "NTP synchronized:  ${ntp_status:-unknown}"
+    rsd::io::info "Method:            ${method}"
     rsd::io::blank
 }
 

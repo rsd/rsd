@@ -4,19 +4,27 @@
 # Timezone Management Library
 # ==============================================================================
 #
-# Target-aware primitives for querying and configuring the system timezone
-# via timedatectl (systemd). All operations route through
-# rsd::l::target::exec or rsd::l::target::exec_sudo, so they work
-# transparently on both local and remote targets.
+# Target-aware primitives for querying and configuring the system timezone.
+# Uses a tiered method detection strategy:
 #
-# timedatectl is available on every systemd-based distribution:
-#   Ubuntu, Debian, Arch Linux, Fedora, RHEL, openSUSE.
-# Non-systemd systems (Alpine/OpenRC) are NOT supported by this library.
+#   Method "timedatectl": systemd-based hosts (Ubuntu ≥15.04, Debian ≥8, etc.)
+#     → timedatectl set-timezone / timedatectl show
+#
+#   Method "debconf": Debian-family pre-systemd hosts (Debian ≤7, Ubuntu ≤14.04)
+#     → /etc/timezone + dpkg-reconfigure -f noninteractive tzdata
+#
+#   Method "posix": Universal POSIX fallback (any Linux)
+#     → ln -sf /usr/share/zoneinfo/<tz> /etc/localtime + /etc/timezone
+#
+# The method is auto-detected on first use via _detect_method() and cached.
+# All operations route through rsd::l::target::exec or exec_sudo for
+# transparent local/remote operation.
 #
 # Dependencies:
 #   - target.lib  (loaded automatically by the RSD framework)
 #   - io.lib      (loaded for structured messaging)
-#   - systemd.lib (for is_systemd platform gate)
+#   - systemd.lib (for is_systemd gate and adoption registry)
+#   - host.lib    (for distro identification in diagnostics)
 #
 # namespace rsd::l::tz::
 #
@@ -33,7 +41,7 @@ if [[ "$RSD_TIMEZONE_LIB" == "1" ]]; then
     return 0
 fi
 RSD_TIMEZONE_LIB=1
-RSD_TIMEZONE_LIB_VERSION="0.1.0"
+RSD_TIMEZONE_LIB_VERSION="0.2.0"
 
 # Load target-aware dispatch primitives
 [[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
@@ -41,30 +49,75 @@ RSD_TIMEZONE_LIB_VERSION="0.1.0"
 # Load structured IO messaging
 [[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
 
-# Load systemd for platform gating
+# Load systemd for platform gating and adoption diagnostics
 [[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
+
+# ==============================================================================
+# Method Detection
+# ==============================================================================
+# Tiered detection: timedatectl → debconf → posix.
+# The detected method is cached in RSD_TZ_METHOD for the session.
+
+declare -g RSD_TZ_METHOD=""
+
+# Detect the best available timezone management method on the target.
+# Caches the result in RSD_TZ_METHOD. Subsequent calls are no-ops.
+#
+# @return int 0 on success (method detected).
+function rsd::l::tz::_detect_method() {
+    [[ -n "$RSD_TZ_METHOD" ]] && return 0
+
+    # Tier 1: systemd + timedatectl (modern distros)
+    if rsd::l::systemd::is_systemd 2>/dev/null && rsd::l::target::has_bin timedatectl; then
+        RSD_TZ_METHOD="timedatectl"
+        return 0
+    fi
+
+    # Tier 2: dpkg-reconfigure (Debian-family, pre-systemd)
+    if rsd::l::target::has_bin dpkg-reconfigure; then
+        RSD_TZ_METHOD="debconf"
+        return 0
+    fi
+
+    # Tier 3: POSIX fallback (any Linux with /usr/share/zoneinfo)
+    if rsd::l::target::exec test -d /usr/share/zoneinfo 2>/dev/null; then
+        RSD_TZ_METHOD="posix"
+        return 0
+    fi
+
+    RSD_TZ_METHOD=""
+    return 1
+}
 
 # ==============================================================================
 # Platform Gate
 # ==============================================================================
 
-# Verify the target host supports timedatectl (systemd + binary present).
-# Callers should invoke this before any mutation to fail-fast with a clear
-# diagnostic rather than a cryptic "command not found".
+# Verify the target host supports timezone management via any method.
+# Emits enriched diagnostics using the systemd adoption registry when
+# timedatectl is unavailable.
 #
-# @return int 0 if supported, 1 if not.
+# @return int 0 if any method is available, 1 if not.
 function rsd::l::tz::is_supported() {
-    if ! rsd::l::systemd::is_systemd; then
-        rsd::io::error "Target host is not running systemd. timedatectl is unavailable."
-        return 1
+    if rsd::l::tz::_detect_method; then
+        return 0
     fi
 
-    if ! rsd::l::target::has_bin timedatectl; then
-        rsd::io::error "timedatectl binary not found on target host."
-        return 1
-    fi
+    rsd::io::error "No timezone management method available on the target."
+    rsd::io::info  "Requires: timedatectl (systemd), dpkg-reconfigure (Debian), or /usr/share/zoneinfo (POSIX)."
+    return 1
+}
 
-    return 0
+# Return the detected timezone management method.
+# Intent: Allow callers (recipes, commands) to log which method is in use.
+#
+# @param string& $1 nameref output variable for the method string.
+# @return int 0 on success.
+function rsd::l::tz::get_method() {
+    local _out_var="$1"
+    declare -n _r_method="$_out_var"
+    rsd::l::tz::_detect_method
+    _r_method="$RSD_TZ_METHOD"
 }
 
 # ==============================================================================
@@ -72,14 +125,34 @@ function rsd::l::tz::is_supported() {
 # ==============================================================================
 
 # Read the current system timezone from the target host.
-# Uses the machine-readable timedatectl show interface.
+# Tries: timedatectl → /etc/timezone → readlink /etc/localtime.
 #
 # @param string& $1 nameref output variable for the timezone string.
 # @return int 0 on success, 1 on failure.
 function rsd::l::tz::get_current() {
     local _out_var="$1"
     declare -n _r_tz="$_out_var"
-    _r_tz=$(rsd::l::target::exec timedatectl show -p Timezone --value 2>/dev/null)
+
+    rsd::l::tz::_detect_method
+
+    case "$RSD_TZ_METHOD" in
+        timedatectl)
+            _r_tz=$(rsd::l::target::exec timedatectl show -p Timezone --value 2>/dev/null)
+            ;;
+        debconf|posix)
+            # Try /etc/timezone first (Debian-family canonical source)
+            _r_tz=$(rsd::l::target::exec cat /etc/timezone 2>/dev/null) || true
+            bash::trim _r_tz
+
+            # Fallback: resolve /etc/localtime symlink
+            if [[ -z "$_r_tz" ]]; then
+                _r_tz=$(rsd::l::target::exec readlink -f /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||') || true
+            fi
+            ;;
+        *)
+            _r_tz=""
+            ;;
+    esac
 
     if [[ -z "$_r_tz" ]]; then
         rsd::io::error "Failed to read current timezone from target."
@@ -88,18 +161,26 @@ function rsd::l::tz::get_current() {
 }
 
 # Check if NTP synchronization is active on the target host.
+# Only available with timedatectl; returns "unknown" for other methods.
 #
-# @param string& $1 nameref output variable ("yes" or "no").
+# @param string& $1 nameref output variable ("yes", "no", or "unknown").
 # @return int 0 on success.
 function rsd::l::tz::get_ntp_status() {
     local _out_var="$1"
     declare -n _r_ntp="$_out_var"
-    _r_ntp=$(rsd::l::target::exec timedatectl show -p NTPSynchronized --value 2>/dev/null)
+
+    rsd::l::tz::_detect_method
+
+    if [[ "$RSD_TZ_METHOD" == "timedatectl" ]]; then
+        _r_ntp=$(rsd::l::target::exec timedatectl show -p NTPSynchronized --value 2>/dev/null)
+    else
+        _r_ntp="unknown"
+    fi
 }
 
 # Validate a timezone name against the target host's tz database.
-# Queries the target's own timedatectl list-timezones, which is always
-# authoritative for that host's installed tzdata version.
+# timedatectl: uses list-timezones for a clean authoritative list.
+# fallback: checks if /usr/share/zoneinfo/<tz> exists as a file.
 #
 # @param string $1 The timezone name to validate (e.g., "America/Sao_Paulo").
 # @return int 0 if valid, 1 if invalid.
@@ -110,10 +191,18 @@ function rsd::l::tz::is_valid() {
         return 1
     fi
 
-    rsd::l::target::exec timedatectl list-timezones 2>/dev/null | grep -qx "$tz"
+    rsd::l::tz::_detect_method
+
+    if [[ "$RSD_TZ_METHOD" == "timedatectl" ]]; then
+        rsd::l::target::exec timedatectl list-timezones 2>/dev/null | grep -qx "$tz"
+    else
+        # POSIX fallback: verify the zoneinfo file exists on the target
+        rsd::l::target::exec test -f "/usr/share/zoneinfo/${tz}" 2>/dev/null
+    fi
 }
 
 # List all valid timezone names from the target host.
+# timedatectl: clean output. Fallback: parse /usr/share/zoneinfo.
 # Optionally filters by a prefix pattern (e.g., "America", "Europe").
 #
 # @param string $1 Optional filter prefix (grep pattern).
@@ -121,10 +210,35 @@ function rsd::l::tz::is_valid() {
 function rsd::l::tz::list() {
     local filter="${1:-}"
 
-    if [[ -n "$filter" ]]; then
-        rsd::l::target::exec timedatectl list-timezones 2>/dev/null | grep -i "$filter"
+    rsd::l::tz::_detect_method
+
+    local output=""
+    if [[ "$RSD_TZ_METHOD" == "timedatectl" ]]; then
+        output=$(rsd::l::target::exec timedatectl list-timezones 2>/dev/null)
     else
-        rsd::l::target::exec timedatectl list-timezones 2>/dev/null
+        # Fallback: parse zone.tab if available (canonical IANA source)
+        output=$(rsd::l::target::exec sh -c '
+            if [ -f /usr/share/zoneinfo/zone.tab ]; then
+                awk "/^[^#]/ {print \$3}" /usr/share/zoneinfo/zone.tab | sort
+            else
+                find /usr/share/zoneinfo -type f \
+                    -not -path "*/posix/*" \
+                    -not -path "*/right/*" \
+                    -not -name "*.tab" \
+                    -not -name "*.list" \
+                    -not -name "posixrules" \
+                    2>/dev/null \
+                    | sed "s|/usr/share/zoneinfo/||" \
+                    | grep "/" \
+                    | sort
+            fi
+        ' 2>/dev/null)
+    fi
+
+    if [[ -n "$filter" ]]; then
+        echo "$output" | grep -i "$filter"
+    else
+        echo "$output"
     fi
 }
 
@@ -133,11 +247,12 @@ function rsd::l::tz::list() {
 # ==============================================================================
 
 # Set the system timezone on the target host.
-# Requires elevated privileges (timedatectl set-timezone modifies
-# /etc/localtime and /etc/timezone).
+# timedatectl: uses set-timezone (requires sudo).
+# debconf: writes /etc/timezone + dpkg-reconfigure tzdata (requires sudo).
+# posix: symlinks /etc/localtime + writes /etc/timezone (requires sudo).
 #
 # @param string $1 The timezone name (e.g., "America/Sao_Paulo").
-# @return int 0 on success, 1 on failure.
+# @return int 0 on success, 1 on failure, 2 on bad usage.
 function rsd::l::tz::set() {
     local tz="$1"
 
@@ -146,5 +261,25 @@ function rsd::l::tz::set() {
         return 2
     fi
 
-    rsd::l::target::exec_sudo "" timedatectl set-timezone "$tz"
+    rsd::l::tz::_detect_method
+
+    case "$RSD_TZ_METHOD" in
+        timedatectl)
+            rsd::l::target::exec_sudo "" timedatectl set-timezone "$tz"
+            ;;
+        debconf)
+            # Write /etc/timezone then reconfigure tzdata non-interactively
+            rsd::l::target::exec_sudo "" sh -c "echo '${tz}' > /etc/timezone"
+            rsd::l::target::exec_sudo "" dpkg-reconfigure -f noninteractive tzdata
+            ;;
+        posix)
+            # Universal POSIX: symlink + /etc/timezone
+            rsd::l::target::exec_sudo "" ln -sf "/usr/share/zoneinfo/${tz}" /etc/localtime
+            rsd::l::target::exec_sudo "" sh -c "echo '${tz}' > /etc/timezone"
+            ;;
+        *)
+            rsd::io::error "No timezone method detected. Cannot set timezone."
+            return 1
+            ;;
+    esac
 }
