@@ -121,7 +121,10 @@ _run_io() {
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"CALLED_SSH: user= host=hostA port="* ]]
-    [[ "$output" == *"payload=(sh -c echo 'remote-sudo-pass' | sudo -S -p '' -u root --  'gpg' 'check')"* ]]
+    # The sh -c argument is printf '%q' escaped to prevent SSH transport
+    # from splitting on the unquoted pipe character.
+    [[ "$output" == *"payload=(sh -c echo\\ \\'remote-sudo-pass\\'"* ]]
+    [[ "$output" == *"sudo\\ -S"* ]]
 
     unset RSD_MOCK_SUDO_PASSWORD
 }
