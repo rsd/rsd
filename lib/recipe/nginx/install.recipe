@@ -75,38 +75,8 @@ declare -g RSD_NGINX_DEFAULT_SITE="${RSD_NGINX_SITES_ENABLED}/default"
 #
 # @return int 0 on success.
 # @return exit 2 on platform mismatch.
-function rsd::l::r::nginx_install::resolve_platform() {
-    [[ -n "${RSD_NGINX_PLATFORM_OK:-}" ]] && return 0
-
-    local host_alias="localhost"
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        host_alias="${RSD_REMOTE_TARGET#@}"
-    fi
-
-    local distro="" family="" version=""
-    rsd::l::host::get_property "$host_alias" "family" family
-    rsd::l::host::get_property "$host_alias" "distro" distro
-    rsd::l::host::get_property "$host_alias" "version" version
-
-    if [[ "$family" != "debian" || "$distro" != "ubuntu" ]]; then
-        rsd::io::error "This recipe requires Ubuntu. Detected: family=$family, distro=$distro."
-        exit 2
-    fi
-
-    if ! rsd::l::host::version_gte "$version" "26.04"; then
-        rsd::io::error "This recipe requires Ubuntu 26.04+. Detected version: $version."
-        exit 2
-    fi
-
-    declare -g RSD_NGINX_PLATFORM_OK=1
-}
-
-# ==============================================================================
-# Recipe Registration
-# ==============================================================================
-
 function rsd::r::nginx_install::register() {
-    rsd::l::r::nginx_install::resolve_platform
+    rsd::l::r::require_platform "debian" "ubuntu" "26.04"
 
     rsd::r::register_task "nginx_install::install_packages"
     rsd::r::register_task "nginx_install::configure_defaults" "rollback"
@@ -152,10 +122,7 @@ function rsd::r::nginx_install::configure_defaults() {
     fi
 
     # Backup original
-    if ! rsd::l::target::exec_sudo "" cp "$RSD_NGINX_CONF" "${RSD_NGINX_CONF}.rsd.bak"; then
-        rsd::io::error "Failed to create backup of nginx.conf."
-        return 1
-    fi
+    rsd::l::r::backup "$RSD_NGINX_CONF" || return 1
 
     # --- server_tokens off ---
     # Prevents Nginx from disclosing its version in response headers and error pages.
@@ -218,9 +185,7 @@ function rsd::r::nginx_install::configure_defaults() {
 }
 
 function rsd::r::nginx_install::configure_defaults::rollback() {
-    if rsd::l::target::file_exists "${RSD_NGINX_CONF}.rsd.bak"; then
-        rsd::l::target::exec_sudo "" mv "${RSD_NGINX_CONF}.rsd.bak" "$RSD_NGINX_CONF"
-    fi
+    rsd::l::r::restore_backup "$RSD_NGINX_CONF"
 }
 
 # ==============================================================================
@@ -228,8 +193,6 @@ function rsd::r::nginx_install::configure_defaults::rollback() {
 # ==============================================================================
 
 function rsd::r::nginx_install::restart_service() {
-    rsd::io::status "Restarting Nginx service..."
-
     # Validate config before restart to avoid downtime from syntax errors
     if ! rsd::l::target::exec_sudo "" nginx -t 2>/dev/null; then
         rsd::io::error "Nginx configuration test failed. Not restarting."
@@ -237,17 +200,7 @@ function rsd::r::nginx_install::restart_service() {
         return 1
     fi
 
-    rsd::l::systemd::restart "nginx.service"
-    rsd::l::systemd::enable "nginx.service" 0
-
-    # Brief sanity check
-    if ! rsd::l::systemd::is_active "nginx.service"; then
-        rsd::io::error "Nginx failed to start after restart."
-        rsd::io::info "Check: rsd systemd logs nginx.service"
-        return 1
-    fi
-
-    rsd::io::ok "Nginx restarted and enabled."
+    rsd::l::r::restart_and_enable "nginx.service"
 }
 
 # ==============================================================================

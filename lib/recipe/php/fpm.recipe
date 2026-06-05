@@ -116,40 +116,8 @@ function rsd::l::r::php_fpm::init_constants() {
 #
 # @return int 0 on success.
 # @return exit 2 on platform mismatch.
-function rsd::l::r::php_fpm::resolve_platform() {
-    # Return cached if already resolved
-    [[ -n "${RSD_PHP_FPM_PLATFORM_OK:-}" ]] && return 0
-
-    local host_alias="localhost"
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        host_alias="${RSD_REMOTE_TARGET#@}"
-    fi
-
-    local distro="" family="" version=""
-    rsd::l::host::get_property "$host_alias" "family" family
-    rsd::l::host::get_property "$host_alias" "distro" distro
-    rsd::l::host::get_property "$host_alias" "version" version
-
-    if [[ "$family" != "debian" || "$distro" != "ubuntu" ]]; then
-        rsd::io::error "This recipe requires Ubuntu. Detected: family=$family, distro=$distro."
-        exit 2
-    fi
-
-    if ! rsd::l::host::version_gte "$version" "26.04"; then
-        rsd::io::error "This recipe requires Ubuntu 26.04+. Detected version: $version."
-        exit 2
-    fi
-
-    declare -g RSD_PHP_FPM_PLATFORM_OK=1
-}
-
-# ==============================================================================
-# Recipe Registration
-# ==============================================================================
-
 function rsd::r::php_fpm::register() {
-    # Platform guard — exits early with code 2 if not Ubuntu 26.04+
-    rsd::l::r::php_fpm::resolve_platform
+    rsd::l::r::require_platform "debian" "ubuntu" "26.04"
 
     # Resolve PHP version from options or default
     RSD_PHP_VERSION="${RSD_COMMAND_ARGS[php-version]:-8.5}"
@@ -268,10 +236,7 @@ function rsd::r::php_fpm::configure_pool() {
     fi
 
     # Backup original
-    if ! rsd::l::target::exec_sudo "" cp "$RSD_PHP_FPM_CONF" "${RSD_PHP_FPM_CONF}.rsd.bak"; then
-        rsd::io::error "Failed to create backup of pool config."
-        return 1
-    fi
+    rsd::l::r::backup "$RSD_PHP_FPM_CONF" || return 1
 
     # Ensure listen directive uses the Unix socket
     rsd::l::target::exec_sudo "" sed -i \
@@ -298,9 +263,7 @@ function rsd::r::php_fpm::configure_pool() {
 }
 
 function rsd::r::php_fpm::configure_pool::rollback() {
-    if rsd::l::target::file_exists "${RSD_PHP_FPM_CONF}.rsd.bak"; then
-        rsd::l::target::exec_sudo "" mv "${RSD_PHP_FPM_CONF}.rsd.bak" "$RSD_PHP_FPM_CONF"
-    fi
+    rsd::l::r::restore_backup "$RSD_PHP_FPM_CONF"
 }
 
 # ==============================================================================
@@ -324,10 +287,7 @@ function rsd::r::php_fpm::harden_php_ini() {
     fi
 
     # Backup original
-    if ! rsd::l::target::exec_sudo "" cp "$RSD_PHP_FPM_INI" "${RSD_PHP_FPM_INI}.rsd.bak"; then
-        rsd::io::error "Failed to create backup of php.ini."
-        return 1
-    fi
+    rsd::l::r::backup "$RSD_PHP_FPM_INI" || return 1
 
     # expose_php — prevents X-Powered-By header from leaking PHP version
     rsd::l::target::exec_sudo "" sed -i \
@@ -348,9 +308,7 @@ function rsd::r::php_fpm::harden_php_ini() {
 }
 
 function rsd::r::php_fpm::harden_php_ini::rollback() {
-    if rsd::l::target::file_exists "${RSD_PHP_FPM_INI}.rsd.bak"; then
-        rsd::l::target::exec_sudo "" mv "${RSD_PHP_FPM_INI}.rsd.bak" "$RSD_PHP_FPM_INI"
-    fi
+    rsd::l::r::restore_backup "$RSD_PHP_FPM_INI"
 }
 
 # ==============================================================================
@@ -358,19 +316,7 @@ function rsd::r::php_fpm::harden_php_ini::rollback() {
 # ==============================================================================
 
 function rsd::r::php_fpm::restart_service() {
-    rsd::io::status "Restarting PHP-FPM service..."
-
-    rsd::l::systemd::restart "$RSD_PHP_FPM_SERVICE"
-    rsd::l::systemd::enable "$RSD_PHP_FPM_SERVICE" 0
-
-    # Brief sanity check
-    if ! rsd::l::systemd::is_active "$RSD_PHP_FPM_SERVICE"; then
-        rsd::io::error "PHP-FPM failed to start after restart."
-        rsd::io::info "Check: rsd systemd logs $RSD_PHP_FPM_SERVICE"
-        return 1
-    fi
-
-    rsd::io::ok "PHP-FPM restarted and enabled."
+    rsd::l::r::restart_and_enable "$RSD_PHP_FPM_SERVICE"
 }
 
 # ==============================================================================

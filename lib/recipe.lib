@@ -17,7 +17,7 @@ if [[ "$RSD_RECIPE_LIB" == "1" ]]; then
     return 0
 fi
 RSD_RECIPE_LIB=1
-RSD_RECIPE_LIB_VERSION="0.4.0"
+RSD_RECIPE_LIB_VERSION="0.5.0"
 
 # Load target-aware dispatch primitives
 [[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
@@ -243,6 +243,160 @@ function rsd::l::r::install_pkg() {
     local package="$1"
     source "$(rsd::get_libdir_file command/install)"
     rsd::c::install::command "$package"
+}
+
+# Resolve the target host alias for host.lib property lookups.
+# Eliminates the 4-line localhost/remote branching boilerplate that appears
+# in every recipe that queries host properties.
+#
+# @param string& $1 nameref: receives the host alias.
+function rsd::l::r::resolve_host_alias() {
+    declare -n _rha_out="$1"
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        _rha_out="${RSD_REMOTE_TARGET#@}"
+    else
+        _rha_out="localhost"
+    fi
+}
+
+# Require binaries on the target — fail with exit code 3 if any are missing.
+# Replaces the per-binary if/has_bin/error/return boilerplate in recipes.
+#
+# @param string $@ Binary names to validate.
+# @return 0 if all found, 3 on first missing binary.
+function rsd::l::r::require_bins() {
+    local bin
+    for bin in "$@"; do
+        if ! rsd::l::target::has_bin "$bin"; then
+            rsd::io::error "'$bin' is required but not found on the target."
+            return 3
+        fi
+    done
+}
+
+# Auto-install a binary if missing on the target, or fail.
+# Replaces the has_bin → install_pkg → error triple.
+# Supports bin=pkg syntax for when the binary name differs from
+# the package name (e.g., "fd=fd-find" on Debian).
+#
+# @param string $@ Binary names or "bin=pkg" pairs.
+# @return 0 if all satisfied, 3 on install failure.
+function rsd::l::r::ensure_bins() {
+    local spec bin pkg
+    for spec in "$@"; do
+        if [[ "$spec" == *"="* ]]; then
+            bin="${spec%%=*}"
+            pkg="${spec#*=}"
+        else
+            bin="$spec"
+            pkg="$spec"
+        fi
+        if ! rsd::l::target::has_bin "$bin"; then
+            rsd::io::status "'$bin' not found. Installing '$pkg'..."
+            if ! rsd::l::r::install_pkg "$pkg"; then
+                rsd::io::error "Failed to install '$pkg'."
+                return 3
+            fi
+        fi
+    done
+}
+
+# Warn about an optional binary that is preferred but not required.
+#
+# @param string $1 Binary name.
+# @param string $2 Warning message if missing.
+function rsd::l::r::prefer_bin() {
+    if ! rsd::l::target::has_bin "$1"; then
+        rsd::io::warn "$2"
+    fi
+}
+
+# Guard: require a specific distro/family/version on the target.
+# Exits with code 2 on mismatch. Caches results globally to avoid
+# redundant SSH queries when multiple guards or tasks run in sequence.
+#
+# @param string $1 Required family (e.g., "debian"). Use "*" for any.
+# @param string $2 Required distro (e.g., "ubuntu"). Use "*" for any.
+# @param string $3 Minimum version (e.g., "26.04"). Use "*" for any.
+# @return 0 on match, exits 2 on mismatch.
+function rsd::l::r::require_platform() {
+    local req_family="$1"
+    local req_distro="$2"
+    local req_version="$3"
+
+    [[ "$RSD_HOST_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/host.lib)"
+
+    # Cache on first call
+    if [[ -z "${RSD_PLATFORM_FAMILY:-}" ]]; then
+        local host_alias=""
+        rsd::l::r::resolve_host_alias host_alias
+
+        declare -g RSD_PLATFORM_FAMILY="" RSD_PLATFORM_DISTRO="" RSD_PLATFORM_VERSION=""
+        rsd::l::host::get_property "$host_alias" "family" RSD_PLATFORM_FAMILY
+        rsd::l::host::get_property "$host_alias" "distro" RSD_PLATFORM_DISTRO
+        rsd::l::host::get_property "$host_alias" "version" RSD_PLATFORM_VERSION
+    fi
+
+    if [[ "$req_family" != "*" && "$RSD_PLATFORM_FAMILY" != "$req_family" ]]; then
+        rsd::io::error "This recipe requires family=$req_family. Detected: $RSD_PLATFORM_FAMILY."
+        exit 2
+    fi
+
+    if [[ "$req_distro" != "*" && "$RSD_PLATFORM_DISTRO" != "$req_distro" ]]; then
+        rsd::io::error "This recipe requires $req_distro. Detected: $RSD_PLATFORM_DISTRO."
+        exit 2
+    fi
+
+    if [[ "$req_version" != "*" ]]; then
+        if ! rsd::l::host::version_gte "$RSD_PLATFORM_VERSION" "$req_version"; then
+            rsd::io::error "This recipe requires ${req_distro} ${req_version}+. Detected: $RSD_PLATFORM_VERSION."
+            exit 2
+        fi
+    fi
+}
+
+# Create a .rsd.bak backup of a target file (sudo).
+# Standardizes the backup ceremony used before modifying system config files.
+#
+# @param string $1 Absolute file path to back up.
+# @return 0 on success, 1 on failure.
+function rsd::l::r::backup() {
+    if ! rsd::l::target::exec_sudo "" cp "$1" "${1}.rsd.bak"; then
+        rsd::io::error "Failed to create backup of $1."
+        return 1
+    fi
+}
+
+# Restore a file from its .rsd.bak backup (sudo).
+# Intended for use in ::rollback functions.
+#
+# @param string $1 Absolute file path to restore.
+function rsd::l::r::restore_backup() {
+    if rsd::l::target::file_exists "${1}.rsd.bak"; then
+        rsd::l::target::exec_sudo "" mv "${1}.rsd.bak" "$1"
+    fi
+}
+
+# Restart, enable, and verify a systemd service.
+# Combines the 3-step ceremony into a single defensive call.
+#
+# @param string $1 Service name (e.g., "nginx.service").
+# @return 0 on success, 1 if the service fails to start.
+function rsd::l::r::restart_and_enable() {
+    local service="$1"
+
+    [[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
+
+    rsd::io::status "Restarting $service..."
+    rsd::l::systemd::restart "$service"
+    rsd::l::systemd::enable "$service" 0
+
+    if ! rsd::l::systemd::is_active "$service"; then
+        rsd::io::error "$service failed to start after restart."
+        rsd::io::info "Check: rsd systemd logs $service"
+        return 1
+    fi
+    rsd::io::ok "$service restarted and enabled."
 }
 
 # Finds all *.recipe files recursively under a base directory.

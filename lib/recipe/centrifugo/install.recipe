@@ -109,10 +109,8 @@ declare -g RSD_CENTRIFUGO_TAILSCALE_IP=""
 function rsd::l::r::centrifugo_install::resolve_platform() {
     [[ -n "${RSD_CENTRIFUGO_PLATFORM_OK:-}" ]] && return 0
 
-    local host_alias="localhost"
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        host_alias="${RSD_REMOTE_TARGET#@}"
-    fi
+    local host_alias=""
+    rsd::l::r::resolve_host_alias host_alias
 
     local distro="" family="" version="" arch=""
     rsd::l::host::get_property "$host_alias" "family" family
@@ -206,32 +204,9 @@ function rsd::r::centrifugo_install::install_dependencies::pre_check() {
 
 function rsd::r::centrifugo_install::install_dependencies() {
     rsd::io::status "Checking required dependencies..."
-
-    if ! rsd::l::target::has_bin curl; then
-        rsd::io::error "curl is required but not found on the target."
-        rsd::io::info  "Install: sudo apt-get install -y curl"
-        return 3
-    fi
-
-    if ! rsd::l::target::has_bin tar; then
-        rsd::io::error "tar is required but not found on the target."
-        rsd::io::info  "Install: sudo apt-get install -y tar"
-        return 3
-    fi
-
-    if ! rsd::l::target::has_bin jq; then
-        rsd::io::status "jq not found. Installing..."
-        if ! rsd::l::r::install_pkg jq; then
-            rsd::io::error "Failed to install jq."
-            return 3
-        fi
-    fi
-
-    # openssl is preferred for key generation but not strictly required
-    if ! rsd::l::target::has_bin openssl; then
-        rsd::io::warn "openssl not found. Will use /dev/urandom for key generation."
-    fi
-
+    rsd::l::r::require_bins curl tar
+    rsd::l::r::ensure_bins jq
+    rsd::l::r::prefer_bin openssl "openssl not found. Will use /dev/urandom for key generation."
     rsd::io::ok "All dependencies satisfied."
 }
 
@@ -471,16 +446,7 @@ function rsd::r::centrifugo_install::generate_config() {
 
     # --- Write config file ---
     rsd::l::target::exec_sudo "" mkdir -p "$RSD_CENTRIFUGO_CONFIG_DIR"
-
-    # Stage through temp file for safe SSH transport
-    local tmpfile=""
-    tmpfile=$(rsd::l::target::mktemp "rsd-cfgcfg.XXXXXX") || return 14
-
-    printf '%s\n' "$config_json" | rsd::l::target::exec tee "$tmpfile" >/dev/null
-
-    rsd::l::target::exec_sudo "" mv "$tmpfile" "$RSD_CENTRIFUGO_CONFIG"
-    rsd::l::target::exec_sudo "" chown "root:${RSD_CENTRIFUGO_USER}" "$RSD_CENTRIFUGO_CONFIG"
-    rsd::l::target::exec_sudo "" chmod 0640 "$RSD_CENTRIFUGO_CONFIG"
+    rsd::l::target::write_file "$config_json" "$RSD_CENTRIFUGO_CONFIG" "0640" "root:${RSD_CENTRIFUGO_USER}"
 
     rsd::io::ok "Configuration written: $RSD_CENTRIFUGO_CONFIG"
     rsd::io::blank
@@ -617,21 +583,11 @@ proxy_read_timeout      3600s;
 proxy_send_timeout      3600s;
 proxy_socket_keepalive  on;'
 
-        local snip_tmp=""
-        snip_tmp=$(rsd::l::target::mktemp "rsd-wsproxy.XXXXXX") || return 14
-        printf '%s\n' "$ws_snippet" | rsd::l::target::exec tee "$snip_tmp" >/dev/null
-        rsd::l::target::exec_sudo "" mv "$snip_tmp" "/etc/nginx/snippets/proxy-websocket.conf"
-        rsd::l::target::exec_sudo "" chmod 0644 "/etc/nginx/snippets/proxy-websocket.conf"
+        rsd::l::target::write_file "$ws_snippet" "/etc/nginx/snippets/proxy-websocket.conf"
     fi
 
     # Stage through temp file
-    local tmpfile=""
-    tmpfile=$(rsd::l::target::mktemp "rsd-ngxcfg.XXXXXX") || return 14
-
-    printf '%s' "$vhost" | rsd::l::target::exec tee "$tmpfile" >/dev/null
-
-    rsd::l::target::exec_sudo "" mv "$tmpfile" "$RSD_CENTRIFUGO_NGINX_VHOST"
-    rsd::l::target::exec_sudo "" chmod 0644 "$RSD_CENTRIFUGO_NGINX_VHOST"
+    rsd::l::target::write_file "$vhost" "$RSD_CENTRIFUGO_NGINX_VHOST"
 
     # Create symlink in sites-enabled
     if ! rsd::l::target::file_exists "$RSD_CENTRIFUGO_NGINX_ENABLED"; then
@@ -686,13 +642,7 @@ function rsd::r::centrifugo_install::tune_kernel() {
     sysctl_content+="# Reduce TIME_WAIT duration to free sockets faster"$'\n'
     sysctl_content+="net.ipv4.tcp_fin_timeout = 15"$'\n'
 
-    local tmpfile=""
-    tmpfile=$(rsd::l::target::mktemp "rsd-sysctl.XXXXXX") || return 14
-
-    printf '%s' "$sysctl_content" | rsd::l::target::exec tee "$tmpfile" >/dev/null
-
-    rsd::l::target::exec_sudo "" mv "$tmpfile" "$RSD_CENTRIFUGO_SYSCTL"
-    rsd::l::target::exec_sudo "" chmod 0644 "$RSD_CENTRIFUGO_SYSCTL"
+    rsd::l::target::write_file "$sysctl_content" "$RSD_CENTRIFUGO_SYSCTL"
 
     # Apply immediately
     if ! rsd::l::target::exec_sudo "" sysctl --system &>/dev/null; then
@@ -710,13 +660,7 @@ function rsd::r::centrifugo_install::tune_kernel() {
     override_content+="[Service]"$'\n'
     override_content+="LimitNOFILE=65536"$'\n'
 
-    local tmpoverride=""
-    tmpoverride=$(rsd::l::target::mktemp "rsd-ngxovr.XXXXXX") || return 14
-
-    printf '%s' "$override_content" | rsd::l::target::exec tee "$tmpoverride" >/dev/null
-
-    rsd::l::target::exec_sudo "" mv "$tmpoverride" "${RSD_CENTRIFUGO_NGINX_OVERRIDE_DIR}/override.conf"
-    rsd::l::target::exec_sudo "" chmod 0644 "${RSD_CENTRIFUGO_NGINX_OVERRIDE_DIR}/override.conf"
+    rsd::l::target::write_file "$override_content" "${RSD_CENTRIFUGO_NGINX_OVERRIDE_DIR}/override.conf"
 
     rsd::l::systemd::daemon_reload
 

@@ -16,7 +16,7 @@ if [[ "$RSD_TARGET_LIB" == "1" ]]; then
     return 0
 fi
 RSD_TARGET_LIB=1
-RSD_TARGET_LIB_VERSION="0.5.0"
+RSD_TARGET_LIB_VERSION="0.6.0"
 
 # Lazy-load remote.lib — exec and exec_sudo delegate to rsd::l::remote::execute
 [[ "$RSD_REMOTE_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/remote.lib)"
@@ -294,6 +294,35 @@ function rsd::l::target::fetch_and_exec() {
     rsd::l::target::exec rm -f "$tmpfile"
 
     return $rc
+}
+
+# Write content to a target file atomically via temp staging.
+# Handles the mktemp → tee → mv → chmod ceremony in one call.
+# Uses sudo for the mv/chmod/chown since the destination is typically
+# a root-owned system path (e.g., /etc/nginx/).
+#
+# @param string $1 Content to write.
+# @param string $2 Destination path on target.
+# @param string $3 Permissions (e.g., "0644", "0640"). Default "0644".
+# @param string $4 Optional: "owner:group" for chown (e.g., "root:centrifugo").
+# @return 0 on success, 14 on mktemp failure.
+function rsd::l::target::write_file() {
+    local content="$1"
+    local dest="$2"
+    local mode="${3:-0644}"
+    local ownership="${4:-}"
+
+    local tmpfile=""
+    tmpfile=$(rsd::l::target::mktemp "rsd-write.XXXXXX") || return 14
+
+    printf '%s\n' "$content" | rsd::l::target::exec tee "$tmpfile" > /dev/null
+
+    rsd::l::target::exec_sudo "" mv "$tmpfile" "$dest"
+    rsd::l::target::exec_sudo "" chmod "$mode" "$dest"
+
+    if [[ -n "$ownership" ]]; then
+        rsd::l::target::exec_sudo "" chown "$ownership" "$dest"
+    fi
 }
 
 # ==============================================================================

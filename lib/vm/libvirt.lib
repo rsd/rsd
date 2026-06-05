@@ -19,7 +19,7 @@ if [[ "$RSD_VM_LIBVIRT_LIB" == "1" ]]; then
     return 0
 fi
 RSD_VM_LIBVIRT_LIB=1
-RSD_VM_LIBVIRT_LIB_VERSION="0.1.0"
+RSD_VM_LIBVIRT_LIB_VERSION="0.2.0"
 
 # Load structured IO messaging
 [[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
@@ -250,12 +250,15 @@ function rsd::l::vm::libvirt::create() {
 
     local vm_name="$1"
     local os_spec="$2"
+    local conn_uri="${8:-qemu:///session}"
+
+    # Preflight: verify libvirt daemon is reachable
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local ram="${3:-2G}"
     local vcpus="${4:-2}"
     local disk_size="${5:-20G}"
     local username="${6:-rsd}"
     local key_file="${7:-$HOME/.ssh/id_ed25519.pub}"
-    local conn_uri="${8:-qemu:///session}"
     local bridge="${9:-}"
     local do_bootstrap="${10:-true}"
 
@@ -387,6 +390,7 @@ function rsd::l::vm::libvirt::destroy() {
 
     local vm_name="$1"
     local conn_uri="${2:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local -a args=()
     rsd::l::vm::libvirt::_conn_args "$conn_uri" args
 
@@ -444,6 +448,7 @@ function rsd::l::vm::libvirt::start() {
 
     local vm_name="$1"
     local conn_uri="${2:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local -a args=()
     rsd::l::vm::libvirt::_conn_args "$conn_uri" args
 
@@ -477,6 +482,7 @@ function rsd::l::vm::libvirt::stop() {
 
     local vm_name="$1"
     local conn_uri="${2:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local -a args=()
     rsd::l::vm::libvirt::_conn_args "$conn_uri" args
 
@@ -510,6 +516,7 @@ function rsd::l::vm::libvirt::kill() {
 
     local vm_name="$1"
     local conn_uri="${2:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local -a args=()
     rsd::l::vm::libvirt::_conn_args "$conn_uri" args
 
@@ -533,6 +540,7 @@ function rsd::l::vm::libvirt::pause() {
 
     local vm_name="$1"
     local conn_uri="${2:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local -a args=()
     rsd::l::vm::libvirt::_conn_args "$conn_uri" args
 
@@ -554,6 +562,7 @@ function rsd::l::vm::libvirt::resume() {
 
     local vm_name="$1"
     local conn_uri="${2:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local -a args=()
     rsd::l::vm::libvirt::_conn_args "$conn_uri" args
 
@@ -664,6 +673,7 @@ function rsd::l::vm::libvirt::ssh() {
 
     local vm_name="$1"
     local conn_uri="${2:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local username="${3:-rsd}"
 
     if ! rsd::l::vm::libvirt::_domain_exists "$vm_name" "$conn_uri"; then
@@ -700,6 +710,7 @@ function rsd::l::vm::libvirt::console() {
 
     local vm_name="$1"
     local conn_uri="${2:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local -a args=()
     rsd::l::vm::libvirt::_conn_args "$conn_uri" args
 
@@ -720,6 +731,7 @@ function rsd::l::vm::libvirt::list() {
     rsd::check_binaries_or_fail virsh
 
     local conn_uri="${1:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local -a args=()
     rsd::l::vm::libvirt::_conn_args "$conn_uri" args
 
@@ -763,6 +775,7 @@ function rsd::l::vm::libvirt::status() {
 
     local vm_name="$1"
     local conn_uri="${2:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local -a args=()
     rsd::l::vm::libvirt::_conn_args "$conn_uri" args
 
@@ -835,6 +848,7 @@ function rsd::l::vm::libvirt::snapshot() {
     local vm_name="$1"
     local snap_name="$2"
     local conn_uri="${3:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local -a args=()
     rsd::l::vm::libvirt::_conn_args "$conn_uri" args
 
@@ -866,6 +880,7 @@ function rsd::l::vm::libvirt::rollback() {
     local vm_name="$1"
     local snap_name="$2"
     local conn_uri="${3:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local -a args=()
     rsd::l::vm::libvirt::_conn_args "$conn_uri" args
 
@@ -889,6 +904,7 @@ function rsd::l::vm::libvirt::commit() {
     local vm_name="$1"
     local snap_name="${2:-}"
     local conn_uri="${3:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local -a args=()
     rsd::l::vm::libvirt::_conn_args "$conn_uri" args
 
@@ -915,6 +931,7 @@ function rsd::l::vm::libvirt::list_snapshots() {
 
     local vm_name="$1"
     local conn_uri="${2:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local -a args=()
     rsd::l::vm::libvirt::_conn_args "$conn_uri" args
 
@@ -949,6 +966,7 @@ function rsd::l::vm::libvirt::delete_snapshot() {
     local vm_name="$1"
     local snap_name="$2"
     local conn_uri="${3:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
     local -a args=()
     rsd::l::vm::libvirt::_conn_args "$conn_uri" args
 
