@@ -165,3 +165,141 @@ _frame() {
     line_count=$(echo "$output" | grep -c '│')
     [ "$line_count" -eq 3 ]
 }
+
+# ==============================================================================
+# Origin Tag Computation — compute_tag
+# ==============================================================================
+
+@test "compute_tag defaults to [rsd] for local execution" {
+    unset RSD_IO_ORIGIN
+    rsd::l::io::compute_tag
+
+    [ "$RSD_IO_TAG" = "[rsd]" ]
+}
+
+@test "compute_tag uses [rsd@host] when RSD_IO_ORIGIN is set" {
+    RSD_IO_ORIGIN="flow"
+    rsd::l::io::compute_tag
+
+    [ "$RSD_IO_TAG" = "[rsd@flow]" ]
+    unset RSD_IO_ORIGIN
+}
+
+@test "compute_tag supports multi-hop chain via RSD_IO_ORIGIN" {
+    RSD_IO_ORIGIN="gw→flow"
+    rsd::l::io::compute_tag
+
+    [ "$RSD_IO_TAG" = "[rsd@gw→flow]" ]
+    unset RSD_IO_ORIGIN
+}
+
+@test "compute_tag ignores RSD_REMOTE_TARGET (local orchestrator stays [rsd])" {
+    unset RSD_IO_ORIGIN
+    RSD_REMOTE_TARGET="@flow"
+    rsd::l::io::compute_tag
+
+    [ "$RSD_IO_TAG" = "[rsd]" ]
+    unset RSD_REMOTE_TARGET
+}
+
+@test "compute_tag with RSD_IO_ORIGIN takes precedence even if RSD_REMOTE_TARGET is set" {
+    RSD_IO_ORIGIN="flow"
+    RSD_REMOTE_TARGET="@flow"
+    rsd::l::io::compute_tag
+
+    [ "$RSD_IO_TAG" = "[rsd@flow]" ]
+    unset RSD_IO_ORIGIN RSD_REMOTE_TARGET
+}
+
+# ==============================================================================
+# Semantic Emitters — tag presence in output
+# ==============================================================================
+
+@test "rsd::io::info includes origin tag in output" {
+    RSD_IO_TAG="[rsd]"
+    run bash -c 'source "'"${BATS_TEST_DIRNAME}"'/../../lib/io.lib" && rsd::io::info "test message" 7>&1'
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[rsd]"* ]]
+    [[ "$output" == *"test message"* ]]
+}
+
+@test "rsd::io::info shows remote tag when RSD_IO_ORIGIN is set" {
+    RSD_IO_ORIGIN="flow"
+    run bash -c '
+        export RSD_ON=1 RSD_DEBUG=0 RSD_MODE=devel RSD_IO_ORIGIN=flow
+        source "'"${BATS_TEST_DIRNAME}"'/../../lib/io.lib"
+        rsd::io::info "remote message" 7>&1
+    '
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[rsd@flow]"* ]]
+    [[ "$output" == *"remote message"* ]]
+    unset RSD_IO_ORIGIN
+}
+
+# ==============================================================================
+# Debug Message Dedup
+# ==============================================================================
+
+@test "debug dedup suppresses consecutive identical messages" {
+    run bash -c '
+        export RSD_ON=1 RSD_DEBUG=10 RSD_MODE=devel _RSD_DEBUG_LAST_MSG=""
+        declare -ga RSD_LIBRARY_SEARCH_PATH=("'"${BATS_TEST_DIRNAME}"'/../../")
+        source "'"${BATS_TEST_DIRNAME}"'/../../lib/rsd.lib"
+        rsd::debug "same message" 1
+        rsd::debug "same message" 1
+        rsd::debug "same message" 1
+    '
+
+    [ "$status" -eq 0 ]
+    local msg_count
+    msg_count=$(echo "$output" | grep -c "same message")
+    [ "$msg_count" -eq 1 ]
+}
+
+@test "debug dedup allows different messages through" {
+    run bash -c '
+        export RSD_ON=1 RSD_DEBUG=10 RSD_MODE=devel _RSD_DEBUG_LAST_MSG=""
+        declare -ga RSD_LIBRARY_SEARCH_PATH=("'"${BATS_TEST_DIRNAME}"'/../../")
+        source "'"${BATS_TEST_DIRNAME}"'/../../lib/rsd.lib"
+        rsd::debug "message A" 1
+        rsd::debug "message B" 1
+        rsd::debug "message A" 1
+    '
+
+    [ "$status" -eq 0 ]
+    local a_count b_count
+    a_count=$(echo "$output" | grep -c "message A")
+    b_count=$(echo "$output" | grep -c "message B")
+    [ "$a_count" -eq 2 ]
+    [ "$b_count" -eq 1 ]
+}
+
+@test "debug messages include [rsd] prefix" {
+    run bash -c '
+        export RSD_ON=1 RSD_DEBUG=10 RSD_MODE=devel _RSD_DEBUG_LAST_MSG=""
+        declare -ga RSD_LIBRARY_SEARCH_PATH=("'"${BATS_TEST_DIRNAME}"'/../../")
+        source "'"${BATS_TEST_DIRNAME}"'/../../lib/rsd.lib"
+        rsd::debug "test prefix" 1
+    '
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[rsd]"* ]]
+    [[ "$output" == *"test prefix"* ]]
+}
+
+@test "debug messages use RSD_IO_TAG when available" {
+    run bash -c '
+        export RSD_ON=1 RSD_DEBUG=10 RSD_MODE=devel _RSD_DEBUG_LAST_MSG=""
+        export RSD_IO_TAG="[rsd@flow]"
+        declare -ga RSD_LIBRARY_SEARCH_PATH=("'"${BATS_TEST_DIRNAME}"'/../../")
+        source "'"${BATS_TEST_DIRNAME}"'/../../lib/rsd.lib"
+        rsd::debug "remote debug" 1
+    '
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[rsd@flow]"* ]]
+    [[ "$output" == *"remote debug"* ]]
+}
+

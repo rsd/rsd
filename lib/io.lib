@@ -19,7 +19,7 @@ fi
 
 [[ "$RSD_IO_LIB" == "1" ]] && return 0 2>/dev/null
 
-RSD_IO_VERSION='0.1.0'
+RSD_IO_VERSION='0.2.0'
 
 # ---------------------------------------------------------------------------
 # Terminal Capability Detection
@@ -97,26 +97,22 @@ exec 7>&2
 declare -g RSD_IO_TAG=""
 
 # Build the origin tag from environment context.
-# Called once at load time and can be re-invoked if RSD_REMOTE_TARGET changes.
+# Called once at load time. The tag is derived SOLELY from RSD_IO_ORIGIN,
+# which is only set when this rsd instance is a remote delegated worker.
+# The local orchestrator always identifies as [rsd].
+#
+# RSD_IO_ORIGIN values:
+#   (unset)       → local execution → [rsd]
+#   "flow"        → single hop      → [rsd@flow]
+#   "gw→flow"     → multi-hop       → [rsd@gw→flow]
 #
 # @return void — sets RSD_IO_TAG global
 function rsd::l::io::compute_tag() {
     local origin="${RSD_IO_ORIGIN:-}"
-    local self=""
 
-    # Determine the local identity
-    if [[ -n "${RSD_REMOTE_TARGET:-}" ]]; then
-        # Strip the @ prefix and any user@ portion for display
-        self="${RSD_REMOTE_TARGET#@}"
-        self="${self##*@}"
-    fi
-
-    if [[ -n "$origin" && -n "$self" ]]; then
-        # Multi-hop: parent origin → current self
-        RSD_IO_TAG="[${origin}→${self}]"
-    elif [[ -n "$self" ]]; then
-        # Single remote hop
-        RSD_IO_TAG="[rsd@${self}]"
+    if [[ -n "$origin" ]]; then
+        # Remote delegated execution — origin carries the full identity chain
+        RSD_IO_TAG="[rsd@${origin}]"
     else
         # Local execution
         RSD_IO_TAG="[rsd]"
@@ -373,7 +369,15 @@ function rsd::io::read_secret() {
     local prompt="$1"
     declare -n __secret_out="$2"
 
-    printf "[rsd]          ▸ %s: " "$prompt" > /dev/tty
+    local _tag="${RSD_IO_TAG:-[rsd]}"
+    local _tag_len=${#_tag}
+    local _pad=""
+    local _target_width=14
+    if [[ $_tag_len -lt $_target_width ]]; then
+        printf -v _pad '%*s' $(( _target_width - _tag_len )) ''
+    fi
+
+    printf "%s%s ▸ %s: " "$_tag" "$_pad" "$prompt" > /dev/tty
     read -r -s __secret_out < /dev/tty
     echo "" > /dev/tty
 
@@ -393,13 +397,21 @@ function rsd::io::read_secret_confirm() {
     local prompt="$1"
     declare -n __secret_confirm_out="$2"
 
+    local _tag="${RSD_IO_TAG:-[rsd]}"
+    local _tag_len=${#_tag}
+    local _pad=""
+    local _target_width=14
+    if [[ $_tag_len -lt $_target_width ]]; then
+        printf -v _pad '%*s' $(( _target_width - _tag_len )) ''
+    fi
+
     local pw1="" pw2=""
 
-    printf "[rsd]          ▸ %s: " "$prompt" > /dev/tty
+    printf "%s%s ▸ %s: " "$_tag" "$_pad" "$prompt" > /dev/tty
     read -r -s pw1 < /dev/tty
     echo "" > /dev/tty
 
-    printf "[rsd]          ▸ Confirm %s: " "$prompt" > /dev/tty
+    printf "%s%s ▸ Confirm %s: " "$_tag" "$_pad" "$prompt" > /dev/tty
     read -r -s pw2 < /dev/tty
     echo "" > /dev/tty
 

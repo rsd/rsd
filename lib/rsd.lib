@@ -13,7 +13,7 @@ fi
 
 # _prefix rsd::
 
-RSD_RSDLIB_VERSION='0.3.0'
+RSD_RSDLIB_VERSION='0.4.0'
 
 # used globals
 RSD_LIBRARY_LOAD=
@@ -324,7 +324,11 @@ function rsd::version_gt() {
 	test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1";
 }
 
-# Debug to STDOUT
+# Debug dedup: suppresses consecutive identical debug messages.
+# Declared in main rsd script too, but redeclared here for standalone sourcing.
+[[ ! -v _RSD_DEBUG_LAST_MSG ]] && declare -g _RSD_DEBUG_LAST_MSG=""
+
+# Debug to STDERR with origin tag prefix and consecutive dedup.
 # Arguments:
 #   $1 - The message to be displayed
 #   $2 - The debug level (default 1)
@@ -337,7 +341,12 @@ function rsd::debug() {
 		level=$1
 	fi
 	if (( RSD_DEBUG >= level )); then
-		echo "$level: $msg" >&2
+		local full_msg="$level: $msg"
+		if [[ "$full_msg" != "$_RSD_DEBUG_LAST_MSG" ]]; then
+			local prefix="${RSD_IO_TAG:-[rsd]}"
+			echo "$prefix $full_msg" >&2
+			_RSD_DEBUG_LAST_MSG="$full_msg"
+		fi
 	fi
 }
 
@@ -350,7 +359,12 @@ function rsd::debug2() {
 	shift
 
 	if (( RSD_DEBUG >= level )); then
-		echo "$level:" "$@" >&2
+		local full_msg="$level: $*"
+		if [[ "$full_msg" != "$_RSD_DEBUG_LAST_MSG" ]]; then
+			local prefix="${RSD_IO_TAG:-[rsd]}"
+			echo "$prefix $full_msg" >&2
+			_RSD_DEBUG_LAST_MSG="$full_msg"
+		fi
 	fi
 }
 

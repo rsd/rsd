@@ -81,7 +81,7 @@
 
 shopt -s extglob
 
-RSD_VERSION='1.23.0'
+RSD_VERSION='1.24.0'
 VERSION=$RSD_VERSION
 
 RSD_ON=1
@@ -89,6 +89,9 @@ RSD_ON=1
 # Initial Debug level.  It will be replaced by command line arguments later on.
 # Set to 1 to debug stages before command line argument has a chance to kick in
 RSD_DEBUG=0
+
+# Debug dedup: suppresses consecutive identical debug messages
+_RSD_DEBUG_LAST_MSG=""
 
 # TESTING: PASSTHRU is on by default for testing
 RSD_PASS_THRU=1
@@ -305,7 +308,11 @@ function rsd::debug() {
 		level=$1
 	fi
 	if (( RSD_DEBUG >= level )); then
-		echo "$level: $msg" >&2
+		local full_msg="$level: $msg"
+		if [[ "$full_msg" != "$_RSD_DEBUG_LAST_MSG" ]]; then
+			echo "[rsd] $full_msg" >&2
+			_RSD_DEBUG_LAST_MSG="$full_msg"
+		fi
 	fi
 }
 
@@ -318,7 +325,11 @@ function rsd::debug2() {
 	shift
 
 	if (( RSD_DEBUG >= level )); then
-		echo "$level:" "$@" >&2
+		local full_msg="$level: $*"
+		if [[ "$full_msg" != "$_RSD_DEBUG_LAST_MSG" ]]; then
+			echo "[rsd] $full_msg" >&2
+			_RSD_DEBUG_LAST_MSG="$full_msg"
+		fi
 	fi
 }
 
@@ -926,12 +937,9 @@ if [[ "${RSD_ARGS[command]}" ]]; then
     if [[ "${RSD_ARGS[command]}" =~ ^@ || "${RSD_ARGS[command]}" =~ .@. ]]; then
         RSD_REMOTE_TARGET="${RSD_ARGS[command]}"
 
-        # Recompute IO origin tag now that the remote target is known.
-        # io.lib was sourced earlier (line ~909) before the target was parsed,
-        # so the tag was frozen as [rsd]. Update it to [rsd@<host>].
-        if bash::is_function rsd::l::io::compute_tag; then
-            rsd::l::io::compute_tag
-        fi
+        # NOTE: The local orchestrator keeps its [rsd] tag. The remote
+        # delegated process receives RSD_IO_ORIGIN in its environment,
+        # which triggers [rsd@<host>] tagging on the remote side.
 
         # real command is the first unprocessed argument
         if [[ ${#RSD_ARGS_UNPROCESSED[@]} -eq 0 ]]; then
@@ -986,7 +994,17 @@ if [[ "${RSD_ARGS[command]}" ]]; then
                 source "$(rsd::get_libdir_file lib/remote.lib)"
                 rsd_bin="rsd"
                 rsd::l::remote::bootstrap_check "$RSD_REMOTE_TARGET" rsd_bin || exit $?
-                rsd::l::remote::execute "$RSD_REMOTE_TARGET" "$rsd_bin" "$RSD_COMMAND" "${RSD_ARGS_UNPROCESSED[@]}"
+
+                # Compute the origin identity for the remote delegated process.
+                # This propagates via RSD_IO_ORIGIN so the remote rsd tags
+                # its output as [rsd@<host>] instead of [rsd].
+                local _remote_host="${RSD_REMOTE_TARGET#@}"
+                _remote_host="${_remote_host##*@}"
+                local _origin_chain="${RSD_IO_ORIGIN:+${RSD_IO_ORIGIN}→}${_remote_host}"
+
+                rsd::l::remote::execute "$RSD_REMOTE_TARGET" \
+                    "env" "RSD_IO_ORIGIN=${_origin_chain}" \
+                    "$rsd_bin" "--delegated" "$RSD_COMMAND" "${RSD_ARGS_UNPROCESSED[@]}"
                 exit $?
             fi
         else

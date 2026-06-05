@@ -466,7 +466,7 @@ function rsd::r::timescaledb_restore::summary() {
     if [[ "$RSD_RST_ROLE_TYPE" == "role" && -n "$RSD_RST_DB_PASSWORD" && -n "$RSD_RST_ROLE_NAME" ]]; then
         if type keepassxc-cli >/dev/null 2>&1; then
             local save_choice=""
-            read -r -p "[rsd]          ▸ Save password for '${RSD_RST_ROLE_NAME}' to vault? [y/N] " save_choice
+            read -r -p "${RSD_IO_TAG:-[rsd]}          ▸ Save password for '${RSD_RST_ROLE_NAME}' to vault? [y/N] " save_choice
             if [[ "$save_choice" =~ ^[Yy]$ ]]; then
                 [[ "$RSD_KPX_LIB" != "1" ]] && source "$RSD_BASE/lib/kpx.lib"
                 local vault_path="PostgreSQL/${RSD_RST_DB_NAME}"

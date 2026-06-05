@@ -629,7 +629,7 @@ function rsd::r::letsencrypt_install::verify_ssl() {
 
     # 3. Renewal dry run
     rsd::io::status "Testing renewal (dry run)..."
-    if rsd::l::target::exec_sudo "" certbot renew --dry-run 2>&1; then
+    if rsd::l::target::exec_sudo "" certbot renew --dry-run --non-interactive 2>&1; then
         rsd::io::ok "Renewal dry run: OK"
     else
         rsd::io::warn "Renewal dry run failed. Check certbot logs."
