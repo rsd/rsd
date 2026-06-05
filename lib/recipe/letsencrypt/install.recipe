@@ -314,7 +314,8 @@ function rsd::r::letsencrypt_install::open_firewall() {
 # ==============================================================================
 
 function rsd::r::letsencrypt_install::provision_certificate::pre_check() {
-    rsd::l::target::file_exists "${RSD_LE_CERT_DIR}/fullchain.pem"
+    # /etc/letsencrypt/live/ is 0700 root:root — requires sudo to traverse
+    rsd::l::target::exec_sudo "" test -f "${RSD_LE_CERT_DIR}/fullchain.pem"
 }
 
 function rsd::r::letsencrypt_install::provision_certificate() {
@@ -334,7 +335,7 @@ function rsd::r::letsencrypt_install::provision_certificate() {
     fi
 
     # Verify the cert was actually created
-    if ! rsd::l::target::file_exists "${RSD_LE_CERT_DIR}/fullchain.pem"; then
+    if ! rsd::l::target::exec_sudo "" test -f "${RSD_LE_CERT_DIR}/fullchain.pem"; then
         rsd::io::error "Certificate files not found after certbot succeeded."
         return 1
     fi
@@ -578,7 +579,8 @@ proxy_socket_keepalive  on;'
 # ==============================================================================
 
 function rsd::r::letsencrypt_install::install_deploy_hook::pre_check() {
-    rsd::l::target::file_exists "$RSD_LE_DEPLOY_HOOK"
+    # /etc/letsencrypt/ is 0700 root:root — requires sudo to traverse
+    rsd::l::target::exec_sudo "" test -f "$RSD_LE_DEPLOY_HOOK"
 }
 
 function rsd::r::letsencrypt_install::install_deploy_hook() {
