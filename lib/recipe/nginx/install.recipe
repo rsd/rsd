@@ -282,9 +282,9 @@ function rsd::r::nginx_install::validate_install() {
         return 1
     fi
 
-    # 4. Worker process user
+    # 4. Worker process user — extract first column from ps output
     local worker_user=""
-    worker_user=$(rsd::l::target::exec sh -c "'ps aux | grep \"nginx: worker\" | grep -v grep | head -1 | awk \"{print \\$1}\"'" 2>/dev/null)
+    worker_user=$(rsd::l::target::exec sh -c "ps aux | grep 'nginx: worker' | grep -v grep | head -1 | awk '{print \$1}'" 2>/dev/null)
     bash::trim worker_user
     if [[ -n "$worker_user" ]]; then
         rsd::io::info "Worker user: $worker_user"
@@ -295,7 +295,7 @@ function rsd::r::nginx_install::validate_install() {
     rsd::io::blank
     rsd::io::info "Config:        $RSD_NGINX_CONF"
     rsd::io::info "Sites:         $RSD_NGINX_SITES_ENABLED/"
-    rsd::io::info "Worker user:   www-data (matches PHP-FPM)"
+    rsd::io::info "Worker user:   ${worker_user:-unknown}"
     rsd::io::blank
     rsd::io::info "Next steps:"
     rsd::io::info "  1. Create server blocks in /etc/nginx/sites-available/"
