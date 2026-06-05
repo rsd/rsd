@@ -341,7 +341,10 @@ function rsd::r::centrifugo_install::create_user() {
 # readable only by root and the centrifugo service user.
 
 function rsd::r::centrifugo_install::generate_config::pre_check() {
-    rsd::l::target::file_exists "$RSD_CENTRIFUGO_CONFIG"
+    rsd::l::target::file_exists "$RSD_CENTRIFUGO_CONFIG" || return 1
+    # Verify the config is actually valid, not a leftover broken file
+    rsd::l::target::exec "$RSD_CENTRIFUGO_BIN" checkconfig \
+        --config "$RSD_CENTRIFUGO_CONFIG" &>/dev/null
 }
 
 function rsd::r::centrifugo_install::generate_config() {
@@ -674,7 +677,7 @@ function rsd::r::centrifugo_install::tune_kernel() {
     rsd::l::target::exec_sudo "" chmod 0644 "$RSD_CENTRIFUGO_SYSCTL"
 
     # Apply immediately
-    if ! rsd::l::target::exec_sudo "" sysctl --system 2>/dev/null; then
+    if ! rsd::l::target::exec_sudo "" sysctl --system &>/dev/null; then
         rsd::io::warn "sysctl --system failed. Parameters may not be applied until reboot."
     fi
 
@@ -784,10 +787,8 @@ function rsd::r::centrifugo_install::validate_install() {
     rsd::io::blank
     rsd::io::info "Next steps:"
     if [[ "${RSD_COMMAND_ARGS[skip-nginx]}" != "1" ]]; then
-        rsd::io::info "  1. Obtain SSL certificate:"
-        rsd::io::info "     sudo certbot certonly --nginx -d ${RSD_CENTRIFUGO_SERVER_NAME}"
-        rsd::io::info "  2. Uncomment SSL lines in ${RSD_CENTRIFUGO_NGINX_VHOST}"
-        rsd::io::info "  3. Reload Nginx: rsd systemd reload nginx.service"
+        rsd::io::info "  1. Provision SSL certificate:"
+        rsd::io::info "     rsd @target recipe run letsencrypt/install --domain ${RSD_CENTRIFUGO_SERVER_NAME} --email admin@example.com"
     fi
     rsd::io::info "  • Configure your backend to publish via:"
     rsd::io::info "    POST http://127.0.0.1:${RSD_CENTRIFUGO_INTERNAL_PORT}/api"
