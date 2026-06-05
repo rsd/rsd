@@ -1,0 +1,919 @@
+#!/usr/bin/env bash
+
+# Libvirt/KVM VM backend driver.
+# namespace rsd::l::vm::libvirt::
+#
+# Implements the VM driver contract for libvirt (QEMU/KVM) using virsh
+# and virt-install. Supports session (rootless) and system (bridged) modes.
+
+# @see docs/vm.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+if [[ "$RSD_VM_LIBVIRT_LIB" == "1" ]]; then
+    return 0
+fi
+RSD_VM_LIBVIRT_LIB=1
+RSD_VM_LIBVIRT_LIB_VERSION="0.1.0"
+
+# Load structured IO messaging
+[[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
+
+# Load parent VM dispatcher (provides config, validation, image registry)
+[[ "$RSD_VM_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/vm.lib)"
+
+# ==============================================================================
+# Internal Helpers
+# ==============================================================================
+
+# Build the virsh connection argument array.
+# Appends --connect <uri> if the connection URI is non-default.
+#
+# @param string $1 Connection URI (e.g., qemu:///session).
+# @param array& $2 nameref: array to append --connect args to.
+# @return void
+function rsd::l::vm::libvirt::_conn_args() {
+    local uri="$1"
+    local _out_arr="$2"; declare -n _r_arr="$_out_arr"
+
+    if [[ -n "$uri" ]]; then
+        _r_arr+=("--connect" "$uri")
+    fi
+}
+
+# Check if a VM domain exists in libvirt.
+#
+# @param string $1 VM name.
+# @param string $2 Connection URI.
+# @return int 0 if exists, 1 if not.
+function rsd::l::vm::libvirt::_domain_exists() {
+    local name="$1"
+    local uri="$2"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$uri" args
+
+    virsh "${args[@]}" dominfo "$name" &>/dev/null
+}
+
+# Query the current state of a VM domain.
+#
+# @param string  $1 VM name.
+# @param string  $2 Connection URI.
+# @param string& $3 nameref: resolved state string.
+# @return int 0 on success, 1 if domain not found.
+function rsd::l::vm::libvirt::_domain_state() {
+    local name="$1"
+    local uri="$2"
+    local _out_state="$3"; declare -n _r_state="$_out_state"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$uri" args
+
+    local info
+    info=$(virsh "${args[@]}" domstate "$name" 2>/dev/null) || return 1
+    bash::trim info
+    _r_state="$info"
+}
+
+# ==============================================================================
+# Image Download & Caching
+# ==============================================================================
+
+# Download a cloud image to the local cache.
+# Skips download if the file already exists and caching is enabled.
+#
+# @param string  $1 Download URL.
+# @param string  $2 Distro name (for cache filename).
+# @param string  $3 Version string (for cache filename).
+# @param string& $4 nameref: resolved local path to the cached image.
+# @return int 0 on success, 1 on download failure.
+function rsd::l::vm::libvirt::download_image() {
+    rsd::check_binaries_or_fail curl
+
+    local url="$1"
+    local distro="$2"
+    local version="$3"
+    local _out_path="$4"; declare -n _r_path="$_out_path"
+
+    local cache_dir
+    cache_dir=$(rsd::l::vm::cache_dir)
+    local filename
+    filename=$(rsd::l::vm::cache_filename "$distro" "$version" "$url")
+    _r_path="${cache_dir}/${filename}"
+
+    # Check cache
+    if rsd::l::vm::cache_enabled && [[ -f "$_r_path" ]]; then
+        rsd::io::info "Using cached image: $_r_path"
+        return 0
+    fi
+
+    # Ensure cache directory exists
+    mkdir -p "$cache_dir"
+
+    rsd::io::status "Downloading cloud image: $url"
+    rsd::io::info "Destination: $_r_path"
+
+    if ! curl -fSL --progress-bar "$url" -o "$_r_path"; then
+        rsd::io::error "Failed to download cloud image from: $url"
+        rm -f "$_r_path"
+        return 1
+    fi
+
+    rsd::io::ok "Image downloaded: $filename"
+    return 0
+}
+
+# ==============================================================================
+# Cloud-Init ISO Generation
+# ==============================================================================
+
+# Generate a NoCloud seed ISO for cloud-init first-boot provisioning.
+#
+# @param string  $1 VM name (used as hostname).
+# @param string  $2 Username.
+# @param string  $3 SSH public key content.
+# @param string  $4 Output ISO path.
+# @return int 0 on success, 1 on failure.
+function rsd::l::vm::libvirt::cloud_init_iso() {
+    rsd::check_binaries_or_fail genisoimage
+
+    local vm_name="$1"
+    local username="$2"
+    local ssh_key="$3"
+    local iso_path="$4"
+
+    local instance_id="rsd-${vm_name}"
+
+    # Create temp directory for cloud-init files
+    local ci_dir
+    ci_dir=$(mktemp -d -t "rsd-ci.XXXXXX")
+    if [[ -z "$ci_dir" ]]; then
+        rsd::io::error "Failed to create temp directory for cloud-init."
+        return 14
+    fi
+
+    # Render templates
+    local userdata_tpl metdata_tpl
+    userdata_tpl="$(rsd::get_libdir_file data/vm/cloud-init/user-data.yaml)"
+    metdata_tpl="$(rsd::get_libdir_file data/vm/cloud-init/meta-data.yaml)"
+
+    if ! rsd::l::vm::render_template "$userdata_tpl" "${ci_dir}/user-data" \
+            "$vm_name" "$username" "$ssh_key" "$instance_id"; then
+        rm -rf "$ci_dir"
+        return 1
+    fi
+
+    if ! rsd::l::vm::render_template "$metdata_tpl" "${ci_dir}/meta-data" \
+            "$vm_name" "" "" "$instance_id"; then
+        rm -rf "$ci_dir"
+        return 1
+    fi
+
+    # Generate ISO
+    if ! genisoimage -output "$iso_path" -volid cidata -joliet -rock \
+            "${ci_dir}/user-data" "${ci_dir}/meta-data" &>/dev/null; then
+        rsd::io::error "Failed to generate cloud-init ISO."
+        rm -rf "$ci_dir"
+        return 1
+    fi
+
+    rm -rf "$ci_dir"
+    rsd::io::ok "Cloud-init ISO generated: $(basename "$iso_path")"
+    return 0
+}
+
+# ==============================================================================
+# Lifecycle Operations
+# ==============================================================================
+
+# Create a new VM from a cloud image.
+#
+# @param string $1 VM name.
+# @param string $2 OS spec (e.g., "ubuntu-26.04").
+# @param string $3 RAM size (e.g., "2G").
+# @param string $4 vCPU count.
+# @param string $5 Disk size (e.g., "20G").
+# @param string $6 Default user.
+# @param string $7 SSH public key file path.
+# @param string $8 Connection URI.
+# @param string $9 Bridge interface (optional, empty for user-mode NAT).
+# @param string $10 "true" to bootstrap RSD in guest after boot, "false" to skip.
+# @return int 0 on success, non-zero on failure.
+function rsd::l::vm::libvirt::create() {
+    rsd::check_binaries_or_fail virsh virt-install qemu-system-x86_64 genisoimage curl
+
+    local vm_name="$1"
+    local os_spec="$2"
+    local ram="${3:-2G}"
+    local vcpus="${4:-2}"
+    local disk_size="${5:-20G}"
+    local username="${6:-rsd}"
+    local key_file="${7:-$HOME/.ssh/id_ed25519.pub}"
+    local conn_uri="${8:-qemu:///session}"
+    local bridge="${9:-}"
+    local do_bootstrap="${10:-true}"
+
+    # Validate VM name
+    rsd::l::vm::validate_name "$vm_name" || return $?
+
+    # Check if domain already exists
+    if rsd::l::vm::libvirt::_domain_exists "$vm_name" "$conn_uri"; then
+        rsd::io::error "VM '$vm_name' already exists. Use 'rsd vm destroy $vm_name' first."
+        return 1
+    fi
+
+    # Read SSH public key
+    key_file="${key_file/#\~/$HOME}"
+    if [[ ! -f "$key_file" ]]; then
+        rsd::io::error "SSH public key not found: $key_file"
+        rsd::io::info "Generate one with: ssh-keygen -t ed25519"
+        return 1
+    fi
+    local ssh_key
+    ssh_key=$(cat "$key_file")
+
+    # Resolve image URL
+    local distro version image_url
+    rsd::l::vm::resolve_image "$os_spec" distro version image_url || return $?
+
+    # Download/cache the cloud image
+    local cached_image
+    rsd::l::vm::libvirt::download_image "$image_url" "$distro" "$version" cached_image || return $?
+
+    # Determine storage directory based on connection mode
+    local storage_dir
+    if [[ "$conn_uri" == "qemu:///system" ]]; then
+        storage_dir="/var/lib/libvirt/images"
+    else
+        storage_dir="$HOME/.local/share/libvirt/images"
+        mkdir -p "$storage_dir"
+    fi
+
+    # Create VM disk as a qcow2 copy of the base image
+    local vm_disk="${storage_dir}/${vm_name}.qcow2"
+    rsd::io::status "Creating VM disk: $(basename "$vm_disk") (${disk_size})"
+
+    rsd::check_binaries_or_fail qemu-img
+    if ! qemu-img create -f qcow2 -b "$cached_image" -F qcow2 "$vm_disk" "$disk_size" &>/dev/null; then
+        rsd::io::error "Failed to create VM disk image."
+        return 1
+    fi
+
+    # Generate cloud-init ISO
+    local ci_iso="${storage_dir}/${vm_name}-cidata.iso"
+    rsd::l::vm::libvirt::cloud_init_iso "$vm_name" "$username" "$ssh_key" "$ci_iso" || return $?
+
+    # Build virt-install command
+    local -a vi_args=()
+    vi_args+=("--connect" "$conn_uri")
+    vi_args+=("--name" "$vm_name")
+    vi_args+=("--memory" "${ram%[Gg]}")
+    # Normalize ram: strip G/g suffix, convert to MiB if needed
+    local ram_val="${ram%[Gg]}"
+    if [[ "$ram" == *[Gg] ]]; then
+        ram_val=$((ram_val * 1024))
+    fi
+    vi_args=()
+    vi_args+=("--connect" "$conn_uri")
+    vi_args+=("--name" "$vm_name")
+    vi_args+=("--memory" "$ram_val")
+    vi_args+=("--vcpus" "$vcpus")
+    vi_args+=("--disk" "path=${vm_disk},format=qcow2")
+    vi_args+=("--disk" "path=${ci_iso},device=cdrom")
+    vi_args+=("--os-variant" "detect=on,name=generic")
+    vi_args+=("--import")
+    vi_args+=("--noautoconsole")
+    vi_args+=("--graphics" "none")
+    vi_args+=("--serial" "pty")
+    vi_args+=("--console" "pty,target_type=serial")
+
+    # Network configuration
+    if [[ -n "$bridge" ]]; then
+        vi_args+=("--network" "bridge=${bridge}")
+    else
+        if [[ "$conn_uri" == "qemu:///system" ]]; then
+            vi_args+=("--network" "default")
+        else
+            vi_args+=("--network" "user")
+        fi
+    fi
+
+    # RSD metadata tag for safe enumeration
+    vi_args+=("--metadata" "description=rsd:managed")
+
+    rsd::io::status "Creating VM '$vm_name' (${os_spec}, ${ram} RAM, ${vcpus} vCPUs, ${disk_size} disk)..."
+
+    if ! virt-install "${vi_args[@]}" 2>/dev/null; then
+        rsd::io::error "virt-install failed."
+        # Attempt cleanup of generated artifacts
+        rm -f "$vm_disk" "$ci_iso" 2>/dev/null
+        return 1
+    fi
+
+    rsd::io::ok "VM '$vm_name' created and booting."
+    rsd::io::info "User: $username"
+    rsd::io::info "Connection: $conn_uri"
+    rsd::io::info "Disk: $vm_disk"
+
+    # Wait for SSH readiness
+    rsd::io::status "Waiting for VM to become SSH-ready..."
+    if rsd::l::vm::libvirt::wait_for_ready "$vm_name" "$conn_uri" "$username" 120; then
+        local guest_ip=""
+        rsd::l::vm::libvirt::get_ip "$vm_name" "$conn_uri" guest_ip
+        rsd::io::ok "VM is ready. IP: ${guest_ip:-unknown}"
+        rsd::io::info "SSH: ssh ${username}@${guest_ip}"
+        rsd::io::info "RSD: rsd @virsh://${vm_name} <command>"
+    else
+        rsd::io::warn "VM booted but SSH is not yet reachable. Cloud-init may still be running."
+        rsd::io::info "Try: rsd vm ssh $vm_name"
+    fi
+
+    return 0
+}
+
+# Destroy a VM and remove all associated storage.
+#
+# @param string $1 VM name.
+# @param string $2 Connection URI.
+# @return int 0 on success.
+function rsd::l::vm::libvirt::destroy() {
+    rsd::check_binaries_or_fail virsh
+
+    local vm_name="$1"
+    local conn_uri="${2:-qemu:///session}"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    if ! rsd::l::vm::libvirt::_domain_exists "$vm_name" "$conn_uri"; then
+        rsd::io::error "VM '$vm_name' does not exist."
+        return 1
+    fi
+
+    # Force stop if running
+    local state=""
+    rsd::l::vm::libvirt::_domain_state "$vm_name" "$conn_uri" state
+    if [[ "$state" == "running" || "$state" == "paused" ]]; then
+        rsd::io::status "Stopping VM '$vm_name'..."
+        virsh "${args[@]}" destroy "$vm_name" &>/dev/null || true
+    fi
+
+    # Remove all snapshots first
+    local -a snaps
+    IFS=$'\n' read -r -d '' -a snaps < <(virsh "${args[@]}" snapshot-list "$vm_name" --name 2>/dev/null && printf '\0') || true
+    local snap
+    for snap in "${snaps[@]}"; do
+        [[ -z "$snap" ]] && continue
+        bash::trim snap
+        [[ -z "$snap" ]] && continue
+        virsh "${args[@]}" snapshot-delete "$vm_name" "$snap" &>/dev/null || true
+    done
+
+    # Identify storage volumes before undefining
+    local storage_dir
+    if [[ "$conn_uri" == "qemu:///system" ]]; then
+        storage_dir="/var/lib/libvirt/images"
+    else
+        storage_dir="$HOME/.local/share/libvirt/images"
+    fi
+
+    # Undefine domain and remove storage
+    rsd::io::status "Removing VM '$vm_name' and associated storage..."
+    virsh "${args[@]}" undefine "$vm_name" --remove-all-storage &>/dev/null 2>&1 || \
+        virsh "${args[@]}" undefine "$vm_name" &>/dev/null
+
+    # Clean up cloud-init ISO (not tracked as libvirt storage)
+    local ci_iso="${storage_dir}/${vm_name}-cidata.iso"
+    [[ -f "$ci_iso" ]] && rm -f "$ci_iso"
+
+    rsd::io::ok "VM '$vm_name' destroyed."
+}
+
+# Start a stopped VM.
+#
+# @param string $1 VM name.
+# @param string $2 Connection URI.
+# @return int 0 on success.
+function rsd::l::vm::libvirt::start() {
+    rsd::check_binaries_or_fail virsh
+
+    local vm_name="$1"
+    local conn_uri="${2:-qemu:///session}"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    if ! rsd::l::vm::libvirt::_domain_exists "$vm_name" "$conn_uri"; then
+        rsd::io::error "VM '$vm_name' does not exist."
+        return 1
+    fi
+
+    local state=""
+    rsd::l::vm::libvirt::_domain_state "$vm_name" "$conn_uri" state
+    if [[ "$state" == "running" ]]; then
+        rsd::io::info "VM '$vm_name' is already running."
+        return 0
+    fi
+
+    rsd::io::status "Starting VM '$vm_name'..."
+    if ! virsh "${args[@]}" start "$vm_name" &>/dev/null; then
+        rsd::io::error "Failed to start VM '$vm_name'."
+        return 1
+    fi
+    rsd::io::ok "VM '$vm_name' started."
+}
+
+# Graceful ACPI shutdown of a VM.
+#
+# @param string $1 VM name.
+# @param string $2 Connection URI.
+# @return int 0 on success.
+function rsd::l::vm::libvirt::stop() {
+    rsd::check_binaries_or_fail virsh
+
+    local vm_name="$1"
+    local conn_uri="${2:-qemu:///session}"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    if ! rsd::l::vm::libvirt::_domain_exists "$vm_name" "$conn_uri"; then
+        rsd::io::error "VM '$vm_name' does not exist."
+        return 1
+    fi
+
+    local state=""
+    rsd::l::vm::libvirt::_domain_state "$vm_name" "$conn_uri" state
+    if [[ "$state" != "running" ]]; then
+        rsd::io::info "VM '$vm_name' is not running (state: $state)."
+        return 0
+    fi
+
+    rsd::io::status "Sending ACPI shutdown to '$vm_name'..."
+    if ! virsh "${args[@]}" shutdown "$vm_name" &>/dev/null; then
+        rsd::io::error "Failed to send shutdown signal to '$vm_name'."
+        return 1
+    fi
+    rsd::io::ok "Shutdown signal sent to '$vm_name'."
+}
+
+# Force power off a VM.
+#
+# @param string $1 VM name.
+# @param string $2 Connection URI.
+# @return int 0 on success.
+function rsd::l::vm::libvirt::kill() {
+    rsd::check_binaries_or_fail virsh
+
+    local vm_name="$1"
+    local conn_uri="${2:-qemu:///session}"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    if ! rsd::l::vm::libvirt::_domain_exists "$vm_name" "$conn_uri"; then
+        rsd::io::error "VM '$vm_name' does not exist."
+        return 1
+    fi
+
+    rsd::io::status "Force stopping VM '$vm_name'..."
+    virsh "${args[@]}" destroy "$vm_name" &>/dev/null || true
+    rsd::io::ok "VM '$vm_name' force-stopped."
+}
+
+# Pause (freeze) a VM.
+#
+# @param string $1 VM name.
+# @param string $2 Connection URI.
+# @return int 0 on success.
+function rsd::l::vm::libvirt::pause() {
+    rsd::check_binaries_or_fail virsh
+
+    local vm_name="$1"
+    local conn_uri="${2:-qemu:///session}"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    rsd::io::status "Pausing VM '$vm_name'..."
+    if ! virsh "${args[@]}" suspend "$vm_name" &>/dev/null; then
+        rsd::io::error "Failed to pause VM '$vm_name'."
+        return 1
+    fi
+    rsd::io::ok "VM '$vm_name' paused."
+}
+
+# Resume a paused VM.
+#
+# @param string $1 VM name.
+# @param string $2 Connection URI.
+# @return int 0 on success.
+function rsd::l::vm::libvirt::resume() {
+    rsd::check_binaries_or_fail virsh
+
+    local vm_name="$1"
+    local conn_uri="${2:-qemu:///session}"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    rsd::io::status "Resuming VM '$vm_name'..."
+    if ! virsh "${args[@]}" resume "$vm_name" &>/dev/null; then
+        rsd::io::error "Failed to resume VM '$vm_name'."
+        return 1
+    fi
+    rsd::io::ok "VM '$vm_name' resumed."
+}
+
+# ==============================================================================
+# Networking / SSH
+# ==============================================================================
+
+# Resolve the guest IP address of a running VM.
+# Parses virsh domifaddr output to extract the first IPv4 address.
+#
+# @param string  $1 VM name.
+# @param string  $2 Connection URI.
+# @param string& $3 nameref: resolved IP address.
+# @return int 0 if IP found, 1 if not.
+function rsd::l::vm::libvirt::get_ip() {
+    rsd::check_binaries_or_fail virsh
+
+    local vm_name="$1"
+    local conn_uri="${2:-qemu:///session}"
+    local _out_ip="$3"; declare -n _r_ip="$_out_ip"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    _r_ip=""
+
+    # Try default source first (works with system mode / bridge)
+    local output
+    output=$(virsh "${args[@]}" domifaddr "$vm_name" 2>/dev/null)
+
+    # Try --source agent (requires qemu-guest-agent in VM)
+    if [[ -z "$output" ]] || ! echo "$output" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'; then
+        output=$(virsh "${args[@]}" domifaddr "$vm_name" --source agent 2>/dev/null) || true
+    fi
+
+    # Try --source lease (DHCPv4 leases from dnsmasq)
+    if [[ -z "$output" ]] || ! echo "$output" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'; then
+        output=$(virsh "${args[@]}" domifaddr "$vm_name" --source lease 2>/dev/null) || true
+    fi
+
+    if [[ -z "$output" ]]; then
+        return 1
+    fi
+
+    # Parse first IPv4 address from output
+    # Format: " vnet0      52:54:00:xx:xx:xx    ipv4     192.168.122.x/24"
+    local ip
+    ip=$(echo "$output" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+
+    if [[ -z "$ip" ]]; then
+        return 1
+    fi
+
+    _r_ip="$ip"
+    return 0
+}
+
+# Wait until a VM is SSH-reachable.
+# Polls every 3 seconds up to the timeout.
+#
+# @param string $1 VM name.
+# @param string $2 Connection URI.
+# @param string $3 SSH username.
+# @param int    $4 Timeout in seconds (default: 120).
+# @return int 0 if SSH is reachable, 1 if timeout.
+function rsd::l::vm::libvirt::wait_for_ready() {
+    rsd::check_binaries_or_fail virsh ssh
+
+    local vm_name="$1"
+    local conn_uri="${2:-qemu:///session}"
+    local username="${3:-rsd}"
+    local timeout="${4:-120}"
+
+    local elapsed=0
+    local guest_ip=""
+
+    while (( elapsed < timeout )); do
+        if rsd::l::vm::libvirt::get_ip "$vm_name" "$conn_uri" guest_ip; then
+            # Try SSH connection with short timeout
+            if ssh -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                    -o LogLevel=ERROR "${username}@${guest_ip}" "true" &>/dev/null; then
+                return 0
+            fi
+        fi
+        sleep 3
+        elapsed=$((elapsed + 3))
+    done
+
+    return 1
+}
+
+# SSH into a running VM.
+# Resolves guest IP and opens an interactive SSH session.
+#
+# @param string $1 VM name.
+# @param string $2 Connection URI.
+# @param string $3 SSH username.
+# @return int Exit code of the SSH session.
+function rsd::l::vm::libvirt::ssh() {
+    rsd::check_binaries_or_fail virsh ssh
+
+    local vm_name="$1"
+    local conn_uri="${2:-qemu:///session}"
+    local username="${3:-rsd}"
+
+    if ! rsd::l::vm::libvirt::_domain_exists "$vm_name" "$conn_uri"; then
+        rsd::io::error "VM '$vm_name' does not exist."
+        return 1
+    fi
+
+    local state=""
+    rsd::l::vm::libvirt::_domain_state "$vm_name" "$conn_uri" state
+    if [[ "$state" != "running" ]]; then
+        rsd::io::error "VM '$vm_name' is not running (state: $state). Start it first: rsd vm start $vm_name"
+        return 1
+    fi
+
+    local guest_ip=""
+    if ! rsd::l::vm::libvirt::get_ip "$vm_name" "$conn_uri" guest_ip; then
+        rsd::io::error "Could not resolve guest IP for '$vm_name'."
+        rsd::io::info "The VM may still be booting. Try again in a few seconds."
+        return 1
+    fi
+
+    rsd::io::info "Connecting to ${username}@${guest_ip} ..."
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR "${username}@${guest_ip}"
+}
+
+# Attach to the serial console of a VM.
+#
+# @param string $1 VM name.
+# @param string $2 Connection URI.
+# @return int Exit code of virsh console.
+function rsd::l::vm::libvirt::console() {
+    rsd::check_binaries_or_fail virsh
+
+    local vm_name="$1"
+    local conn_uri="${2:-qemu:///session}"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    rsd::io::info "Attaching to console of '$vm_name'. Use Ctrl+] to detach."
+    virsh "${args[@]}" console "$vm_name"
+}
+
+# ==============================================================================
+# Information & Enumeration
+# ==============================================================================
+
+# List all RSD-managed VMs.
+# Filters by the rsd:managed metadata tag.
+#
+# @param string $1 Connection URI.
+# @return stdout Formatted VM list.
+function rsd::l::vm::libvirt::list() {
+    rsd::check_binaries_or_fail virsh
+
+    local conn_uri="${1:-qemu:///session}"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    rsd::io::blank
+    rsd::io::info "RSD-Managed VMs (${conn_uri}):"
+    rsd::io::blank
+
+    # Get all domains (running + inactive)
+    local -a all_domains
+    IFS=$'\n' read -r -d '' -a all_domains < <(virsh "${args[@]}" list --all --name 2>/dev/null && printf '\0') || true
+
+    local found=0
+    local domain state desc
+    for domain in "${all_domains[@]}"; do
+        [[ -z "$domain" ]] && continue
+        bash::trim domain
+        [[ -z "$domain" ]] && continue
+
+        # Check for rsd:managed tag in description
+        desc=$(virsh "${args[@]}" desc "$domain" 2>/dev/null) || true
+        if [[ "$desc" == *"rsd:managed"* ]]; then
+            rsd::l::vm::libvirt::_domain_state "$domain" "$conn_uri" state
+            rsd::io::info "  ${domain}  [${state}]"
+            found=1
+        fi
+    done
+
+    if [[ $found -eq 0 ]]; then
+        rsd::io::info "  (no RSD-managed VMs found)"
+    fi
+    rsd::io::blank
+}
+
+# Display detailed status of a VM.
+#
+# @param string $1 VM name.
+# @param string $2 Connection URI.
+# @return stdout Formatted VM status.
+function rsd::l::vm::libvirt::status() {
+    rsd::check_binaries_or_fail virsh
+
+    local vm_name="$1"
+    local conn_uri="${2:-qemu:///session}"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    if ! rsd::l::vm::libvirt::_domain_exists "$vm_name" "$conn_uri"; then
+        rsd::io::error "VM '$vm_name' does not exist."
+        return 1
+    fi
+
+    rsd::io::blank
+    rsd::io::banner "VM Status: $vm_name"
+    rsd::io::blank
+
+    # State
+    local state=""
+    rsd::l::vm::libvirt::_domain_state "$vm_name" "$conn_uri" state
+    rsd::io::info "State:      $state"
+
+    # IP (if running)
+    if [[ "$state" == "running" ]]; then
+        local guest_ip=""
+        if rsd::l::vm::libvirt::get_ip "$vm_name" "$conn_uri" guest_ip; then
+            rsd::io::info "IP:         $guest_ip"
+        else
+            rsd::io::info "IP:         (resolving...)"
+        fi
+    fi
+
+    # Domain info
+    local dominfo
+    dominfo=$(virsh "${args[@]}" dominfo "$vm_name" 2>/dev/null) || true
+    local line key val
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^([^:]+):[[:space:]]*(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            val="${BASH_REMATCH[2]}"
+            bash::trim key
+            bash::trim val
+            case "$key" in
+                "Max memory")   rsd::io::info "Memory:     $val" ;;
+                "CPU(s)")       rsd::io::info "vCPUs:      $val" ;;
+                "Autostart")    rsd::io::info "Autostart:  $val" ;;
+            esac
+        fi
+    done <<< "$dominfo"
+
+    # Connection
+    rsd::io::info "Connection: $conn_uri"
+
+    # Snapshot count
+    local snap_count
+    snap_count=$(virsh "${args[@]}" snapshot-list "$vm_name" --name 2>/dev/null | grep -c -v '^$' || echo 0)
+    rsd::io::info "Snapshots:  $snap_count"
+
+    rsd::io::blank
+}
+
+# ==============================================================================
+# Snapshot Operations
+# ==============================================================================
+
+# Create a named snapshot of a VM.
+#
+# @param string $1 VM name.
+# @param string $2 Snapshot name.
+# @param string $3 Connection URI.
+# @return int 0 on success.
+function rsd::l::vm::libvirt::snapshot() {
+    rsd::check_binaries_or_fail virsh
+
+    local vm_name="$1"
+    local snap_name="$2"
+    local conn_uri="${3:-qemu:///session}"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    if ! rsd::l::vm::libvirt::_domain_exists "$vm_name" "$conn_uri"; then
+        rsd::io::error "VM '$vm_name' does not exist."
+        return 1
+    fi
+
+    rsd::l::vm::sanitize_snapshot_name snap_name
+
+    rsd::io::status "Creating snapshot '$snap_name' of '$vm_name'..."
+    if ! virsh "${args[@]}" snapshot-create-as "$vm_name" "$snap_name" \
+            --description "RSD snapshot: $snap_name" &>/dev/null; then
+        rsd::io::error "Failed to create snapshot '$snap_name'."
+        return 1
+    fi
+    rsd::io::ok "Snapshot '$snap_name' created."
+}
+
+# Revert a VM to a named snapshot.
+#
+# @param string $1 VM name.
+# @param string $2 Snapshot name.
+# @param string $3 Connection URI.
+# @return int 0 on success.
+function rsd::l::vm::libvirt::rollback() {
+    rsd::check_binaries_or_fail virsh
+
+    local vm_name="$1"
+    local snap_name="$2"
+    local conn_uri="${3:-qemu:///session}"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    rsd::io::status "Reverting '$vm_name' to snapshot '$snap_name'..."
+    if ! virsh "${args[@]}" snapshot-revert "$vm_name" "$snap_name" &>/dev/null; then
+        rsd::io::error "Failed to revert to snapshot '$snap_name'."
+        return 1
+    fi
+    rsd::io::ok "VM '$vm_name' reverted to '$snap_name'."
+}
+
+# Merge a snapshot into the base image (flatten).
+#
+# @param string $1 VM name.
+# @param string $2 Snapshot name (optional — deletes the named snap, merging down).
+# @param string $3 Connection URI.
+# @return int 0 on success.
+function rsd::l::vm::libvirt::commit() {
+    rsd::check_binaries_or_fail virsh
+
+    local vm_name="$1"
+    local snap_name="${2:-}"
+    local conn_uri="${3:-qemu:///session}"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    if [[ -n "$snap_name" ]]; then
+        rsd::io::status "Committing snapshot '$snap_name' of '$vm_name'..."
+        if ! virsh "${args[@]}" snapshot-delete "$vm_name" "$snap_name" --metadata &>/dev/null; then
+            rsd::io::error "Failed to commit snapshot '$snap_name'."
+            return 1
+        fi
+        rsd::io::ok "Snapshot '$snap_name' committed."
+    else
+        rsd::io::error "Snapshot name required. Usage: rsd vm commit <name> --snap <tag>"
+        return 2
+    fi
+}
+
+# List all snapshots for a VM.
+#
+# @param string $1 VM name.
+# @param string $2 Connection URI.
+# @return stdout Snapshot list.
+function rsd::l::vm::libvirt::list_snapshots() {
+    rsd::check_binaries_or_fail virsh
+
+    local vm_name="$1"
+    local conn_uri="${2:-qemu:///session}"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    if ! rsd::l::vm::libvirt::_domain_exists "$vm_name" "$conn_uri"; then
+        rsd::io::error "VM '$vm_name' does not exist."
+        return 1
+    fi
+
+    rsd::io::blank
+    rsd::io::info "Snapshots for '$vm_name':"
+    rsd::io::blank
+
+    local output
+    output=$(virsh "${args[@]}" snapshot-list "$vm_name" 2>/dev/null) || true
+    if [[ -z "$output" ]] || [[ $(echo "$output" | wc -l) -le 2 ]]; then
+        rsd::io::info "  (no snapshots)"
+    else
+        echo "$output"
+    fi
+    rsd::io::blank
+}
+
+# Delete a named snapshot.
+#
+# @param string $1 VM name.
+# @param string $2 Snapshot name.
+# @param string $3 Connection URI.
+# @return int 0 on success.
+function rsd::l::vm::libvirt::delete_snapshot() {
+    rsd::check_binaries_or_fail virsh
+
+    local vm_name="$1"
+    local snap_name="$2"
+    local conn_uri="${3:-qemu:///session}"
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    rsd::io::status "Deleting snapshot '$snap_name' from '$vm_name'..."
+    if ! virsh "${args[@]}" snapshot-delete "$vm_name" "$snap_name" &>/dev/null; then
+        rsd::io::error "Failed to delete snapshot '$snap_name'."
+        return 1
+    fi
+    rsd::io::ok "Snapshot '$snap_name' deleted."
+}

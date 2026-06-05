@@ -120,8 +120,9 @@ function rsd::r::letsencrypt_install::register() {
         RSD_LE_VHOST_NAME="${RSD_COMMAND_ARGS[vhost]}"
     else
         # Attempt to find vhost by domain on the target
+        # Note: /etc/nginx/sites-available/ is world-readable, no sudo needed
         local detected=""
-        detected=$(rsd::l::target::exec_sudo "" \
+        detected=$(rsd::l::target::exec \
             grep -rlF "$RSD_LE_DOMAIN" /etc/nginx/sites-available/ \
             | head -n1)
         bash::trim detected

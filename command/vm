@@ -1,0 +1,410 @@
+#!/usr/bin/env bash
+
+# VM lifecycle management command module.
+# Provides a unified CLI for creating, managing, and connecting to
+# virtual machines through pluggable backend drivers.
+
+# @see docs/vm.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Lazy-load VM library
+[[ "$RSD_VM_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/vm.lib)"
+
+RSD_C_VM_SHORT_DESC="Virtual Machine Lifecycle Management"
+RSD_C_VM_VERSION="0.1.0"
+
+# ==============================================================================
+# Help
+# ==============================================================================
+
+function rsd::c::vm::help() {
+    echo -e "\n\tVM Command Help:\n"
+    echo -e "\t\tUsage:"
+    echo -e "\t\t\trsd vm <action> [options]\n"
+    echo -e "\t\tLifecycle:"
+    echo -e "\t\t\tcreate <name> [options]    Create a VM from a cloud image"
+    echo -e "\t\t\tdestroy <name>             Remove VM and all storage"
+    echo -e "\t\t\tstart <name>               Power on a stopped VM"
+    echo -e "\t\t\tstop <name>                Graceful ACPI shutdown"
+    echo -e "\t\t\tkill <name>                Force power off"
+    echo -e "\t\t\tpause <name>               Freeze VM state"
+    echo -e "\t\t\tresume <name>              Unfreeze VM state\n"
+    echo -e "\t\tConnect:"
+    echo -e "\t\t\tssh <name>                 SSH into the VM"
+    echo -e "\t\t\tconsole <name>             Attach serial console\n"
+    echo -e "\t\tSnapshots:"
+    echo -e "\t\t\tsnapshot <name> [--name t] Take a named snapshot"
+    echo -e "\t\t\trollback <name> --to <t>   Revert to a named snapshot"
+    echo -e "\t\t\tcommit <name> --snap <t>   Merge snapshot into base"
+    echo -e "\t\t\tsnapshots <name>           List all snapshots"
+    echo -e "\t\t\tdelete-snap <name> <snap>  Delete a snapshot\n"
+    echo -e "\t\tInfo:"
+    echo -e "\t\t\tlist                       List all RSD-managed VMs"
+    echo -e "\t\t\tstatus <name>              Detailed VM status"
+    echo -e "\t\t\timages                     List available cloud images\n"
+    echo -e "\t\tCreate Options:"
+    echo -e "\t\t\t--os <distro-ver>          OS image (default: ubuntu-26.04)"
+    echo -e "\t\t\t--ram <size>               Memory (default: 2G)"
+    echo -e "\t\t\t--vcpus <n>                Virtual CPUs (default: 2)"
+    echo -e "\t\t\t--disk <size>              Disk size (default: 20G)"
+    echo -e "\t\t\t--user <name>              Guest user (default: rsd)"
+    echo -e "\t\t\t--key <path>               SSH public key file"
+    echo -e "\t\t\t--session                  Rootless mode (default)"
+    echo -e "\t\t\t--system                   System mode (bridge networking)"
+    echo -e "\t\t\t--bridge <iface>           Bridge interface (system mode)"
+    echo -e "\t\t\t--driver <name>            VM backend driver (default: libvirt)"
+    echo -e "\t\t\t--no-bootstrap             Skip RSD install in guest"
+}
+
+# ==============================================================================
+# Option Parsing Helpers
+# ==============================================================================
+
+# Parse create-specific options from the command arguments.
+# Sets variables in the caller's scope via nameref.
+#
+# @param array $@ Raw command arguments after the VM name.
+# @return void (sets variables via globals declared in the caller).
+function rsd::c::vm::_parse_create_opts() {
+    # Defaults from config
+    RSD_VM_OPT_OS=$(rsd::l::vm::config "defaults.os" "ubuntu-26.04")
+    RSD_VM_OPT_RAM=$(rsd::l::vm::config "defaults.ram" "2G")
+    RSD_VM_OPT_VCPUS=$(rsd::l::vm::config "defaults.vcpus" "2")
+    RSD_VM_OPT_DISK=$(rsd::l::vm::config "defaults.disk" "20G")
+    RSD_VM_OPT_USER=$(rsd::l::vm::config "defaults.user" "rsd")
+    RSD_VM_OPT_KEY=$(rsd::l::vm::config "defaults.key" "$HOME/.ssh/id_ed25519.pub")
+    RSD_VM_OPT_SYSTEM=0
+    RSD_VM_OPT_BRIDGE=""
+    RSD_VM_OPT_DRIVER=""
+    RSD_VM_OPT_BOOTSTRAP=$(rsd::l::vm::config "defaults.bootstrap" "true")
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --os)           RSD_VM_OPT_OS="$2"; shift ;;
+            --ram)          RSD_VM_OPT_RAM="$2"; shift ;;
+            --vcpus)        RSD_VM_OPT_VCPUS="$2"; shift ;;
+            --disk)         RSD_VM_OPT_DISK="$2"; shift ;;
+            --user)         RSD_VM_OPT_USER="$2"; shift ;;
+            --key)          RSD_VM_OPT_KEY="$2"; shift ;;
+            --session)      RSD_VM_OPT_SYSTEM=0 ;;
+            --system)       RSD_VM_OPT_SYSTEM=1 ;;
+            --bridge)       RSD_VM_OPT_BRIDGE="$2"; RSD_VM_OPT_SYSTEM=1; shift ;;
+            --driver)       RSD_VM_OPT_DRIVER="$2"; shift ;;
+            --no-bootstrap) RSD_VM_OPT_BOOTSTRAP="false" ;;
+            *)              ;; # Ignore unknown options for forward compat
+        esac
+        shift
+    done
+}
+
+# Resolve connection URI from current option state.
+# Must be called after _parse_create_opts.
+#
+# @param string& $1 nameref: resolved connection URI.
+# @return void
+function rsd::c::vm::_resolve_conn() {
+    local _out_uri="$1"; declare -n _r_uri="$_out_uri"
+    rsd::l::vm::resolve_connection "$RSD_VM_OPT_SYSTEM" _r_uri
+}
+
+# ==============================================================================
+# Actions
+# ==============================================================================
+
+function rsd::c::vm::create() {
+    local vm_name="$1"
+    if [[ -z "$vm_name" ]]; then
+        rsd::io::error "Usage: rsd vm create <name> [options]"
+        return 2
+    fi
+    shift
+
+    rsd::c::vm::_parse_create_opts "$@"
+
+    # Load driver
+    rsd::l::vm::load_driver "$RSD_VM_OPT_DRIVER" || return $?
+
+    # Resolve connection
+    local conn_uri=""
+    rsd::c::vm::_resolve_conn conn_uri
+
+    rsd::l::vm::dispatch "create" \
+        "$vm_name" \
+        "$RSD_VM_OPT_OS" \
+        "$RSD_VM_OPT_RAM" \
+        "$RSD_VM_OPT_VCPUS" \
+        "$RSD_VM_OPT_DISK" \
+        "$RSD_VM_OPT_USER" \
+        "$RSD_VM_OPT_KEY" \
+        "$conn_uri" \
+        "$RSD_VM_OPT_BRIDGE" \
+        "$RSD_VM_OPT_BOOTSTRAP"
+}
+
+function rsd::c::vm::destroy() {
+    local vm_name="$1"
+    if [[ -z "$vm_name" ]]; then
+        rsd::io::error "Usage: rsd vm destroy <name>"
+        return 2
+    fi
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::l::vm::dispatch "destroy" "$vm_name" "$conn_uri"
+}
+
+function rsd::c::vm::start() {
+    local vm_name="$1"
+    if [[ -z "$vm_name" ]]; then
+        rsd::io::error "Usage: rsd vm start <name>"
+        return 2
+    fi
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::l::vm::dispatch "start" "$vm_name" "$conn_uri"
+}
+
+function rsd::c::vm::stop() {
+    local vm_name="$1"
+    if [[ -z "$vm_name" ]]; then
+        rsd::io::error "Usage: rsd vm stop <name>"
+        return 2
+    fi
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::l::vm::dispatch "stop" "$vm_name" "$conn_uri"
+}
+
+function rsd::c::vm::kill() {
+    local vm_name="$1"
+    if [[ -z "$vm_name" ]]; then
+        rsd::io::error "Usage: rsd vm kill <name>"
+        return 2
+    fi
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::l::vm::dispatch "kill" "$vm_name" "$conn_uri"
+}
+
+function rsd::c::vm::pause() {
+    local vm_name="$1"
+    if [[ -z "$vm_name" ]]; then
+        rsd::io::error "Usage: rsd vm pause <name>"
+        return 2
+    fi
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::l::vm::dispatch "pause" "$vm_name" "$conn_uri"
+}
+
+function rsd::c::vm::resume() {
+    local vm_name="$1"
+    if [[ -z "$vm_name" ]]; then
+        rsd::io::error "Usage: rsd vm resume <name>"
+        return 2
+    fi
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::l::vm::dispatch "resume" "$vm_name" "$conn_uri"
+}
+
+function rsd::c::vm::ssh() {
+    local vm_name="$1"
+    if [[ -z "$vm_name" ]]; then
+        rsd::io::error "Usage: rsd vm ssh <name>"
+        return 2
+    fi
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection 0 conn_uri
+    local username
+    username=$(rsd::l::vm::config "defaults.user" "rsd")
+    rsd::l::vm::dispatch "ssh" "$vm_name" "$conn_uri" "$username"
+}
+
+function rsd::c::vm::console() {
+    local vm_name="$1"
+    if [[ -z "$vm_name" ]]; then
+        rsd::io::error "Usage: rsd vm console <name>"
+        return 2
+    fi
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::l::vm::dispatch "console" "$vm_name" "$conn_uri"
+}
+
+function rsd::c::vm::snapshot() {
+    local vm_name="$1"
+    if [[ -z "$vm_name" ]]; then
+        rsd::io::error "Usage: rsd vm snapshot <name> [--name <tag>]"
+        return 2
+    fi
+    shift
+
+    local snap_name=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name) snap_name="$2"; shift ;;
+        esac
+        shift
+    done
+
+    if [[ -z "$snap_name" ]]; then
+        # Auto-generate timestamp-based name
+        snap_name="snap-$(date +%Y%m%d-%H%M%S)"
+    fi
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::l::vm::dispatch "snapshot" "$vm_name" "$snap_name" "$conn_uri"
+}
+
+function rsd::c::vm::rollback() {
+    local vm_name="$1"
+    if [[ -z "$vm_name" ]]; then
+        rsd::io::error "Usage: rsd vm rollback <name> --to <tag>"
+        return 2
+    fi
+    shift
+
+    local snap_name=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --to) snap_name="$2"; shift ;;
+        esac
+        shift
+    done
+
+    if [[ -z "$snap_name" ]]; then
+        rsd::io::error "Missing --to <snapshot_name>. Usage: rsd vm rollback <name> --to <tag>"
+        return 2
+    fi
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::l::vm::dispatch "rollback" "$vm_name" "$snap_name" "$conn_uri"
+}
+
+function rsd::c::vm::commit() {
+    local vm_name="$1"
+    if [[ -z "$vm_name" ]]; then
+        rsd::io::error "Usage: rsd vm commit <name> --snap <tag>"
+        return 2
+    fi
+    shift
+
+    local snap_name=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --snap) snap_name="$2"; shift ;;
+        esac
+        shift
+    done
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::l::vm::dispatch "commit" "$vm_name" "$snap_name" "$conn_uri"
+}
+
+function rsd::c::vm::snapshots() {
+    local vm_name="$1"
+    if [[ -z "$vm_name" ]]; then
+        rsd::io::error "Usage: rsd vm snapshots <name>"
+        return 2
+    fi
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::l::vm::dispatch "list_snapshots" "$vm_name" "$conn_uri"
+}
+
+function rsd::c::vm::delete_snap() {
+    local vm_name="$1"
+    local snap_name="$2"
+    if [[ -z "$vm_name" || -z "$snap_name" ]]; then
+        rsd::io::error "Usage: rsd vm delete-snap <name> <snapshot>"
+        return 2
+    fi
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::l::vm::dispatch "delete_snapshot" "$vm_name" "$snap_name" "$conn_uri"
+}
+
+function rsd::c::vm::list() {
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::l::vm::dispatch "list" "$conn_uri"
+}
+
+function rsd::c::vm::status() {
+    local vm_name="$1"
+    if [[ -z "$vm_name" ]]; then
+        rsd::io::error "Usage: rsd vm status <name>"
+        return 2
+    fi
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::l::vm::dispatch "status" "$vm_name" "$conn_uri"
+}
+
+function rsd::c::vm::images() {
+    rsd::l::vm::list_images
+}
+
+# ==============================================================================
+# Action Router
+# ==============================================================================
+
+function rsd::c::vm::command() {
+    local action="$1"
+    shift 2>/dev/null || true
+    case "$action" in
+        create)      rsd::c::vm::create "$@" ;;
+        destroy)     rsd::c::vm::destroy "$@" ;;
+        start)       rsd::c::vm::start "$@" ;;
+        stop)        rsd::c::vm::stop "$@" ;;
+        kill)        rsd::c::vm::kill "$@" ;;
+        pause)       rsd::c::vm::pause "$@" ;;
+        resume)      rsd::c::vm::resume "$@" ;;
+        ssh)         rsd::c::vm::ssh "$@" ;;
+        console)     rsd::c::vm::console "$@" ;;
+        snapshot)    rsd::c::vm::snapshot "$@" ;;
+        rollback)    rsd::c::vm::rollback "$@" ;;
+        commit)      rsd::c::vm::commit "$@" ;;
+        snapshots)   rsd::c::vm::snapshots "$@" ;;
+        delete-snap) rsd::c::vm::delete_snap "$@" ;;
+        list)        rsd::c::vm::list "$@" ;;
+        status)      rsd::c::vm::status "$@" ;;
+        images)      rsd::c::vm::images "$@" ;;
+        *)           rsd::c::vm::help ;;
+    esac
+}
