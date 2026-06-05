@@ -230,7 +230,8 @@ function rsd::r::centrifugo_install::download_binary::pre_check() {
 function rsd::r::centrifugo_install::download_binary() {
     rsd::io::status "Fetching latest Centrifugo release URL from GitHub..."
 
-    # Query GitHub API for the latest release download URL
+    # Query GitHub API on the remote target, capture raw JSON locally.
+    # Parse locally with grep/sed to avoid jq-over-SSH quoting nightmares.
     local api_response=""
     api_response=$(rsd::l::target::exec curl -fsSL \
         "https://api.github.com/repos/centrifugal/centrifugo/releases/latest" 2>/dev/null)
@@ -240,17 +241,23 @@ function rsd::r::centrifugo_install::download_binary() {
         return 1
     fi
 
+    # Extract download URL and tag from raw JSON locally (no jq needed here).
+    # The grep pattern matches the browser_download_url line containing our target asset.
     local download_url=""
-    download_url=$(echo "$api_response" | rsd::l::target::exec jq -r \
-        '.assets[] | select(.name | test("linux_amd64.tar.gz$")) | .browser_download_url' 2>/dev/null)
+    download_url=$(echo "$api_response" | grep -o '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*linux_amd64\.tar\.gz"' \
+        | head -n1 | sed 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"//;s/"$//')
+    bash::trim download_url
+
+    local release_version=""
+    release_version=$(echo "$api_response" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | head -n1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"//;s/"$//')
+    bash::trim release_version
 
     if [[ -z "$download_url" ]]; then
         rsd::io::error "Could not find linux_amd64.tar.gz asset in the latest release."
         return 1
     fi
 
-    local release_version=""
-    release_version=$(echo "$api_response" | rsd::l::target::exec jq -r '.tag_name' 2>/dev/null)
     rsd::io::info "Latest release: ${release_version:-unknown}"
     rsd::io::info "URL: $download_url"
 
@@ -391,17 +398,23 @@ function rsd::r::centrifugo_install::generate_config() {
     # We choose Tailscale IP when available for direct mesh access.
 
     # --- Build allowed_origins array ---
+    # Built locally in pure bash to avoid SSH stdin piping issues
     local origins_json="[]"
     if [[ -n "$RSD_CENTRIFUGO_ORIGINS" ]]; then
-        # Convert comma-separated list to JSON array via jq
-        origins_json=$(echo "$RSD_CENTRIFUGO_ORIGINS" | rsd::l::target::exec jq -R \
-            'split(",") | map(gsub("^\\s+|\\s+$"; ""))' 2>/dev/null)
-        if [[ -z "$origins_json" ]]; then
-            origins_json="[]"
-        fi
+        local -a origin_parts
+        IFS=',' read -ra origin_parts <<< "$RSD_CENTRIFUGO_ORIGINS"
+        local json_items=""
+        local origin
+        for origin in "${origin_parts[@]}"; do
+            bash::trim origin
+            [[ -z "$origin" ]] && continue
+            [[ -n "$json_items" ]] && json_items+=","
+            json_items+="\"${origin}\""
+        done
+        origins_json="[${json_items}]"
     fi
 
-    # --- Build JSON config via jq ---
+    # --- Build JSON config via jq (Centrifugo v6 nested structure) ---
     local config_json=""
     config_json=$(rsd::l::target::exec jq -n \
         --arg token_hmac "$token_hmac_secret" \
@@ -414,12 +427,20 @@ function rsd::r::centrifugo_install::generate_config() {
         --arg internal_port "$RSD_CENTRIFUGO_INTERNAL_PORT" \
         --argjson origins "$origins_json" \
         '{
-            token_hmac_secret_key: $token_hmac,
-            api_key: $api_key,
-            admin: true,
-            admin_password: $admin_pw,
-            admin_secret: $admin_sec,
-            allowed_origins: $origins,
+            client: {
+                token: {
+                    hmac_secret_key: $token_hmac
+                },
+                allowed_origins: $origins
+            },
+            admin: {
+                enabled: true,
+                password: $admin_pw,
+                secret: $admin_sec
+            },
+            http_api: {
+                key: $api_key
+            },
             http_server: {
                 address: $client_addr,
                 port: $client_port,

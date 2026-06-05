@@ -15,6 +15,10 @@
 # Usage:
 #   rsd systemd status <unit>
 #   rsd systemd logs <unit> [-n 50] [--since "1 hour ago"]
+#   rsd systemd start <unit>
+#   rsd systemd stop <unit>
+#   rsd systemd restart <unit>
+#   rsd systemd reload <unit>
 #   rsd systemd create <unit> --exec <cmd> [options]
 #   rsd systemd enable <unit>
 #   rsd systemd disable <unit>
@@ -40,7 +44,7 @@ fi
 [[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
 
 RSD_C_SYSTEMD_SHORT_DESC="Systemd Service Management"
-RSD_C_SYSTEMD_VERSION="0.3.0"
+RSD_C_SYSTEMD_VERSION="0.4.0"
 
 # Command is remote-aware (Mode A — local orchestration)
 RSD_C_SYSTEMD_REMOTE_AWARE=1
@@ -165,6 +169,10 @@ function rsd::c::systemd::help() {
     echo -e "\t\tActions:"
     echo -e "\t\t\tstatus <unit>              Show unit status"
     echo -e "\t\t\tlogs <unit> [-n N]         Fetch journal logs"
+    echo -e "\t\t\tstart <unit>               Start a unit"
+    echo -e "\t\t\tstop <unit>                Stop a unit"
+    echo -e "\t\t\trestart <unit>             Restart a unit"
+    echo -e "\t\t\treload <unit>              Reload a unit's configuration (SIGHUP)"
     echo -e "\t\t\tcreate <unit> [options]    Create a service or timer unit file"
     echo -e "\t\t\tenable <unit>              Enable and start a unit"
     echo -e "\t\t\tdisable <unit>             Disable a unit"
@@ -656,6 +664,147 @@ function rsd::l::c::systemd::create_timer() {
     rsd::io::info "  Path: ${dest}"
     rsd::io::info "  Activates: ${companion}"
 
+    return 0
+}
+
+# ==============================================================================
+# Action: stop
+# ==============================================================================
+
+# Stop a running systemd unit.
+#
+# @param string $1 Unit name.
+# @return int 0 on success, 2 on validation failure.
+function rsd::c::systemd::stop() {
+    rsd::l::c::systemd::apply_scope "${RSD_COMMAND_ARGS[user]:-}"
+
+    local unit="$1"
+
+    if [[ -z "$unit" ]]; then
+        rsd::io::error "Usage: rsd systemd [--user] stop <unit>"
+        return 2
+    fi
+
+    if ! rsd::l::systemd::validate_unit_name "$unit"; then
+        return 2
+    fi
+
+    local scope_label
+    scope_label=$(rsd::l::c::systemd::scope_label)
+    rsd::io::status "Stopping (${scope_label}): ${unit}"
+
+    if ! rsd::l::systemd::stop "$unit"; then
+        rsd::io::error "Failed to stop '${unit}'."
+        return 10
+    fi
+
+    rsd::io::ok "Unit '${unit}' stopped (${scope_label})."
+    return 0
+}
+
+# ==============================================================================
+# Action: start
+# ==============================================================================
+
+# Start a systemd unit.
+#
+# @param string $1 Unit name.
+# @return int 0 on success, 2 on validation failure.
+function rsd::c::systemd::start() {
+    rsd::l::c::systemd::apply_scope "${RSD_COMMAND_ARGS[user]:-}"
+
+    local unit="$1"
+
+    if [[ -z "$unit" ]]; then
+        rsd::io::error "Usage: rsd systemd [--user] start <unit>"
+        return 2
+    fi
+
+    if ! rsd::l::systemd::validate_unit_name "$unit"; then
+        return 2
+    fi
+
+    local scope_label
+    scope_label=$(rsd::l::c::systemd::scope_label)
+    rsd::io::status "Starting (${scope_label}): ${unit}"
+
+    if ! rsd::l::systemd::start "$unit"; then
+        rsd::io::error "Failed to start '${unit}'."
+        return 10
+    fi
+
+    rsd::io::ok "Unit '${unit}' started (${scope_label})."
+    return 0
+}
+
+# ==============================================================================
+# Action: restart
+# ==============================================================================
+
+# Restart a systemd unit.
+#
+# @param string $1 Unit name.
+# @return int 0 on success, 2 on validation failure.
+function rsd::c::systemd::restart() {
+    rsd::l::c::systemd::apply_scope "${RSD_COMMAND_ARGS[user]:-}"
+
+    local unit="$1"
+
+    if [[ -z "$unit" ]]; then
+        rsd::io::error "Usage: rsd systemd [--user] restart <unit>"
+        return 2
+    fi
+
+    if ! rsd::l::systemd::validate_unit_name "$unit"; then
+        return 2
+    fi
+
+    local scope_label
+    scope_label=$(rsd::l::c::systemd::scope_label)
+    rsd::io::status "Restarting (${scope_label}): ${unit}"
+
+    if ! rsd::l::systemd::restart "$unit"; then
+        rsd::io::error "Failed to restart '${unit}'."
+        return 10
+    fi
+
+    rsd::io::ok "Unit '${unit}' restarted (${scope_label})."
+    return 0
+}
+
+# ==============================================================================
+# Action: reload
+# ==============================================================================
+
+# Reload a systemd unit's configuration (sends SIGHUP).
+# Not all services support reload — check the unit's documentation.
+#
+# @param string $1 Unit name.
+# @return int 0 on success, 2 on validation failure.
+function rsd::c::systemd::reload() {
+    rsd::l::c::systemd::apply_scope "${RSD_COMMAND_ARGS[user]:-}"
+
+    local unit="$1"
+
+    if [[ -z "$unit" ]]; then
+        rsd::io::error "Usage: rsd systemd [--user] reload <unit>"
+        return 2
+    fi
+
+    if ! rsd::l::systemd::validate_unit_name "$unit"; then
+        return 2
+    fi
+
+    local scope_label
+    scope_label=$(rsd::l::c::systemd::scope_label)
+    rsd::io::status "Reloading (${scope_label}): ${unit}"
+
+    if ! rsd::l::systemd::reload "$unit"; then
+        rsd::io::error "Failed to reload '${unit}'."
+        return 10
+    fi
+
+    rsd::io::ok "Unit '${unit}' reloaded (${scope_label})."
     return 0
 }
 
