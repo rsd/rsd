@@ -206,6 +206,7 @@ rsd vm delete-snap test-vm clean-base
 
 ```bash
 rsd vm stop test-vm          # Graceful ACPI shutdown
+rsd vm reboot test-vm        # Graceful ACPI reboot
 rsd vm start test-vm         # Power on
 rsd vm pause test-vm         # Freeze VM state
 rsd vm resume test-vm        # Resume frozen VM
@@ -292,6 +293,103 @@ permissions needed. libvirt's system QEMU can read from any path.
 | "network not found" (system mode) | Default network inactive | `sudo virsh net-start default` |
 | Download fails | Bad URL or no network | `rsd vm images` to verify, `curl -I <url>` to test |
 | Permission denied on disk (system) | Not in `libvirt` group | `sudo usermod -aG libvirt $USER` then re-login |
+| VM has no internet (system mode) | FORWARD chain drops traffic | See "Tailscale / Firewall + libvirt" below |
+
+### Tailscale / Firewall + libvirt NAT
+
+**Symptom:** VM boots, gets an IP on `192.168.122.0/24`, SSH from host works,
+but the VM cannot reach the internet (`ping 8.8.8.8` → 100% packet loss).
+
+**Root cause:** libvirt's default network relies on three iptables components:
+
+1. **NAT masquerade** — rewrites VM source IPs to the host's outbound IP.
+2. **FORWARD ACCEPT rules** — allows packets from `virbr0` to traverse the
+   host's forwarding path.
+3. **DHCP/DNS** — `dnsmasq` on `virbr0` for guest DHCP and DNS.
+
+Tailscale (and other VPN/firewall tools) set the FORWARD chain's default
+policy to `DROP` and insert their own `ts-forward` rule as the first entry.
+When libvirt starts the `default` network, it inserts its FORWARD rules
+**after** Tailscale's catch-all. On some configurations (especially Arch
+with `iptables-nft`), libvirt's rules get lost entirely after a network
+restart, leaving only Tailscale's `ts-forward` — which doesn't know about
+`virbr0` and drops everything.
+
+**Diagnosis:**
+
+```bash
+# Check FORWARD chain — look for policy and virbr0 rules
+sudo iptables -L FORWARD -n -v | head -10
+
+# Expected output with the problem:
+# Chain FORWARD (policy DROP)
+# target     prot opt source               destination
+# ts-forward  all  --  0.0.0.0/0            0.0.0.0/0
+# (no virbr0 rules at all)
+
+# Verify NAT masquerade exists (this usually survives):
+sudo nft list ruleset | grep masquerade
+```
+
+**Manual fix (immediate, non-persistent):**
+
+```bash
+sudo iptables -I FORWARD 1 -i virbr0 -o virbr0 -j ACCEPT
+sudo iptables -I FORWARD 1 -s 192.168.122.0/24 -i virbr0 -j ACCEPT
+sudo iptables -I FORWARD 1 -d 192.168.122.0/24 -o virbr0 \
+  -m state --state RELATED,ESTABLISHED -j ACCEPT
+```
+
+These rules insert at the top of the FORWARD chain, before `ts-forward`,
+and allow:
+- VM-to-VM traffic within the bridge (`virbr0` → `virbr0`)
+- Outbound VM traffic to the internet (`192.168.122.0/24` → any)
+- Return traffic from the internet back to VMs (ESTABLISHED/RELATED)
+
+**Persistent fix (survives reboots and network restarts):**
+
+Create a libvirt network hook that re-inserts the rules whenever the
+`default` network starts:
+
+```bash
+sudo mkdir -p /etc/libvirt/hooks
+sudo tee /etc/libvirt/hooks/network << 'EOF'
+#!/usr/bin/env bash
+# Libvirt network hook: fix FORWARD chain for NAT when Tailscale is active.
+# Args: $1=network_name $2=action $3=sub-action
+#
+# Only act on the 'default' network 'started' event.
+
+NETWORK="$1"
+ACTION="$2"
+SUBNET="192.168.122.0/24"
+BRIDGE="virbr0"
+
+if [[ "$NETWORK" == "default" && "$ACTION" == "started" ]]; then
+    # Insert before any ts-forward or DROP policy
+    iptables -I FORWARD 1 -i "$BRIDGE" -o "$BRIDGE" -j ACCEPT
+    iptables -I FORWARD 1 -s "$SUBNET" -i "$BRIDGE" -j ACCEPT
+    iptables -I FORWARD 1 -d "$SUBNET" -o "$BRIDGE" \
+      -m state --state RELATED,ESTABLISHED -j ACCEPT
+fi
+EOF
+sudo chmod +x /etc/libvirt/hooks/network
+
+# Restart libvirtd to pick up the hook
+sudo systemctl restart libvirtd
+
+# Restart the network to trigger the hook
+sudo virsh net-destroy default
+sudo virsh net-start default
+```
+
+After this, the FORWARD rules are automatically re-applied whenever the
+default network starts — including after host reboots, `virsh net-destroy`,
+or `systemctl restart libvirtd`.
+
+> **Note:** This only affects `--system` mode. The `--session` mode uses
+> QEMU's built-in user-mode NAT (SLIRP), which doesn't go through the
+> host's FORWARD chain at all.
 
 ---
 
