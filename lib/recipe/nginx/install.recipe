@@ -93,6 +93,9 @@ function rsd::r::nginx_install::install_packages::pre_check() {
 }
 
 function rsd::r::nginx_install::install_packages() {
+    rsd::io::status "Updating package index..."
+    rsd::l::apt::update
+
     rsd::io::status "Installing Nginx from Ubuntu repositories..."
 
     if ! rsd::l::apt::install nginx; then
