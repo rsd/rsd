@@ -152,3 +152,86 @@ _run_engine() {
     [[ "$output" == *"top_level"* ]]
     [[ "$output" == *"sub/nested"* ]]
 }
+
+# ==============================================================================
+# resolve_host_alias
+# ==============================================================================
+
+@test "resolve_host_alias returns localhost when no remote target" {
+    unset RSD_REMOTE_TARGET
+    local alias=""
+    rsd::l::r::resolve_host_alias alias
+    [ "$alias" = "localhost" ]
+}
+
+@test "resolve_host_alias strips @ prefix from remote target" {
+    export RSD_REMOTE_TARGET="@myserver"
+    local alias=""
+    rsd::l::r::resolve_host_alias alias
+    [ "$alias" = "myserver" ]
+    unset RSD_REMOTE_TARGET
+}
+
+# ==============================================================================
+# require_bins
+# ==============================================================================
+
+@test "require_bins succeeds when all binaries exist" {
+    run rsd::l::r::require_bins bash cat
+    [ "$status" -eq 0 ]
+}
+
+@test "require_bins fails with exit 3 on missing binary" {
+    _run_require_bins_missing() { rsd::l::r::require_bins __rsd_nonexistent_bin__ 7>&1; }
+    run _run_require_bins_missing
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"__rsd_nonexistent_bin__"* ]]
+    [[ "$output" == *"required"* ]]
+}
+
+# ==============================================================================
+# ensure_bins
+# ==============================================================================
+
+@test "ensure_bins succeeds for already-present binaries (no install)" {
+    run rsd::l::r::ensure_bins bash
+    [ "$status" -eq 0 ]
+}
+
+@test "ensure_bins supports bin=pkg syntax and detects existing binary" {
+    run rsd::l::r::ensure_bins "bash=bash"
+    [ "$status" -eq 0 ]
+}
+
+# ==============================================================================
+# prefer_bin
+# ==============================================================================
+
+@test "prefer_bin emits no warning for existing binary" {
+    run rsd::l::r::prefer_bin bash "bash is missing" 7>&1
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"bash is missing"* ]]
+}
+
+@test "prefer_bin emits warning for missing binary" {
+    _run_prefer_missing() { rsd::l::r::prefer_bin __rsd_nonexistent__ "custom warning msg" 7>&1; }
+    run _run_prefer_missing
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"custom warning msg"* ]]
+}
+
+# ==============================================================================
+# require_platform — mock host.lib
+# ==============================================================================
+
+@test "require_platform passes with matching family/distro/version" {
+    # Inject cached values to bypass actual SSH queries
+    export RSD_PLATFORM_FAMILY="debian"
+    export RSD_PLATFORM_DISTRO="ubuntu"
+    export RSD_PLATFORM_VERSION="26.04"
+
+    run rsd::l::r::require_platform "debian" "ubuntu" "26.04"
+    [ "$status" -eq 0 ]
+
+    unset RSD_PLATFORM_FAMILY RSD_PLATFORM_DISTRO RSD_PLATFORM_VERSION
+}

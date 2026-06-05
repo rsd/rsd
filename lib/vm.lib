@@ -16,7 +16,7 @@ if [[ "$RSD_VM_LIB" == "1" ]]; then
     return 0
 fi
 RSD_VM_LIB=1
-RSD_VM_LIB_VERSION="0.1.0"
+RSD_VM_LIB_VERSION="0.2.0"
 
 # Load structured IO messaging
 [[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
@@ -232,6 +232,8 @@ function rsd::l::vm::cache_dir() {
     dir=$(rsd::l::vm::config "cache.dir" "$HOME/.local/share/rsd/vm/cache")
     # Expand ~ to $HOME
     dir="${dir/#\~/$HOME}"
+    # Strip trailing slash to prevent double-slash in paths
+    dir="${dir%/}"
     echo "$dir"
 }
 

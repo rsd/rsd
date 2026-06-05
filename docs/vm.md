@@ -65,14 +65,35 @@ This will:
 | `--session` | User-mode NAT (SLIRP) | No sudo | Quick testing, no bridge setup |
 | `--system` | Bridge (`virbr0`) | `libvirt` group | Production-like, reliable IP discovery |
 
-For `--system` mode, ensure the default virtual network is active:
+For `--system` mode, ensure the default virtual network is active.
+
+### What is the default network?
+
+When using `--system` mode, libvirt manages a **virtual bridge** (`virbr0`) that
+creates an isolated subnet (typically `192.168.122.0/24`) with its own DHCP
+server and NAT. This is what gives your VMs a reachable IP address.
+
+On Arch Linux, this network exists but is **not active** by default after
+installing libvirt. You need to start it once:
 
 ```bash
+# Check current state
 virsh net-list --all
-# If 'default' is inactive:
+
+# Expected output if inactive:
+#  Name      State      Autostart   Persistent
+# -----------------------------------------------
+#  default   inactive   no          yes
+
+# Start the network
 sudo virsh net-start default
+
+# Optional: auto-start on boot so you don't have to do this again
 sudo virsh net-autostart default
 ```
+
+With `--session` mode, this is not needed — QEMU handles networking itself
+via user-mode NAT (SLIRP), which doesn't require any virtual bridge.
 
 ---
 

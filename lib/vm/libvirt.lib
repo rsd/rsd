@@ -352,7 +352,7 @@ function rsd::l::vm::libvirt::create() {
 
     rsd::io::status "Creating VM '$vm_name' (${os_spec}, ${ram} RAM, ${vcpus} vCPUs, ${disk_size} disk)..."
 
-    if ! virt-install "${vi_args[@]}" 2>/dev/null; then
+    if ! virt-install "${vi_args[@]}" &>/dev/null; then
         rsd::io::error "virt-install failed."
         # Attempt cleanup of generated artifacts
         rm -f "$vm_disk" "$ci_iso" 2>/dev/null

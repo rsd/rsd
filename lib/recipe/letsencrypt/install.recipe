@@ -209,11 +209,7 @@ location ^~ /.well-known/acme-challenge/ {
     allow all;
 }' "$RSD_LE_WEBROOT"
 
-    local tmpfile=""
-    tmpfile=$(rsd::l::target::mktemp "rsd-acme.XXXXXX") || return 14
-    printf '%s\n' "$acme_snippet" | rsd::l::target::exec tee "$tmpfile" >/dev/null
-    rsd::l::target::exec_sudo "" mv "$tmpfile" "${RSD_LE_SNIPPETS_DIR}/acme-challenge.conf"
-    rsd::l::target::exec_sudo "" chmod 0644 "${RSD_LE_SNIPPETS_DIR}/acme-challenge.conf"
+    rsd::l::target::write_file "$acme_snippet" "${RSD_LE_SNIPPETS_DIR}/acme-challenge.conf"
 
     # 3. Inject ACME include into existing vhost (HTTP block only)
     # Read current vhost, add the include line if missing.
@@ -245,11 +241,7 @@ location ^~ /.well-known/acme-challenge/ {
         fi
 
         # Write modified vhost back via temp file
-        local tmpfile=""
-        tmpfile=$(rsd::l::target::mktemp "rsd-vhost-acme.XXXXXX") || return 14
-        printf '%s' "$modified_vhost" | rsd::l::target::exec tee "$tmpfile" >/dev/null
-        rsd::l::target::exec_sudo "" mv "$tmpfile" "$RSD_LE_VHOST_PATH"
-        rsd::l::target::exec_sudo "" chmod 0644 "$RSD_LE_VHOST_PATH"
+        rsd::l::target::write_file "$modified_vhost" "$RSD_LE_VHOST_PATH"
 
         # Verify nginx still loads cleanly
         if ! rsd::l::target::exec_sudo "" nginx -t 2>&1; then
@@ -378,11 +370,7 @@ ssl_stapling_verify on;
 # HSTS — tell browsers to always use HTTPS (1 year)
 add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;'
 
-    local tmpfile=""
-    tmpfile=$(rsd::l::target::mktemp "rsd-sslsnip.XXXXXX") || return 14
-    printf '%s\n' "$ssl_snippet" | rsd::l::target::exec tee "$tmpfile" >/dev/null
-    rsd::l::target::exec_sudo "" mv "$tmpfile" "${RSD_LE_SNIPPETS_DIR}/ssl-params.conf"
-    rsd::l::target::exec_sudo "" chmod 0644 "${RSD_LE_SNIPPETS_DIR}/ssl-params.conf"
+    rsd::l::target::write_file "$ssl_snippet" "${RSD_LE_SNIPPETS_DIR}/ssl-params.conf"
 
     rsd::io::ok "SSL parameters snippet deployed: ${RSD_LE_SNIPPETS_DIR}/ssl-params.conf"
 }
@@ -525,11 +513,7 @@ function rsd::r::letsencrypt_install::upgrade_vhost() {
     vhost+="}"$'\n'
 
     # Write the new vhost
-    local tmpfile=""
-    tmpfile=$(rsd::l::target::mktemp "rsd-vhost.XXXXXX") || return 14
-    printf '%s' "$vhost" | rsd::l::target::exec tee "$tmpfile" >/dev/null
-    rsd::l::target::exec_sudo "" mv "$tmpfile" "$RSD_LE_VHOST_PATH"
-    rsd::l::target::exec_sudo "" chmod 0644 "$RSD_LE_VHOST_PATH"
+    rsd::l::target::write_file "$vhost" "$RSD_LE_VHOST_PATH"
 
     # Test and reload
     if ! rsd::l::target::exec_sudo "" nginx -t 2>&1; then
@@ -565,11 +549,7 @@ proxy_read_timeout      3600s;
 proxy_send_timeout      3600s;
 proxy_socket_keepalive  on;'
 
-    local tmpfile=""
-    tmpfile=$(rsd::l::target::mktemp "rsd-wsproxy.XXXXXX") || return 14
-    printf '%s\n' "$ws_snippet" | rsd::l::target::exec tee "$tmpfile" >/dev/null
-    rsd::l::target::exec_sudo "" mv "$tmpfile" "${RSD_LE_SNIPPETS_DIR}/proxy-websocket.conf"
-    rsd::l::target::exec_sudo "" chmod 0644 "${RSD_LE_SNIPPETS_DIR}/proxy-websocket.conf"
+    rsd::l::target::write_file "$ws_snippet" "${RSD_LE_SNIPPETS_DIR}/proxy-websocket.conf"
 
     rsd::io::ok "WebSocket proxy snippet deployed."
 }
@@ -594,11 +574,7 @@ nginx -t && systemctl reload nginx'
 
     rsd::l::target::exec_sudo "" mkdir -p "$(dirname "$RSD_LE_DEPLOY_HOOK")"
 
-    local tmpfile=""
-    tmpfile=$(rsd::l::target::mktemp "rsd-hook.XXXXXX") || return 14
-    printf '%s\n' "$hook_script" | rsd::l::target::exec tee "$tmpfile" >/dev/null
-    rsd::l::target::exec_sudo "" mv "$tmpfile" "$RSD_LE_DEPLOY_HOOK"
-    rsd::l::target::exec_sudo "" chmod 0755 "$RSD_LE_DEPLOY_HOOK"
+    rsd::l::target::write_file "$hook_script" "$RSD_LE_DEPLOY_HOOK" "0755"
 
     rsd::io::ok "Deploy hook installed: ${RSD_LE_DEPLOY_HOOK}"
 }

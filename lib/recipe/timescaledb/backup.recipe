@@ -183,10 +183,7 @@ function rsd::r::timescaledb_backup::validate_env() {
     fi
 
     # pg_dump available?
-    if ! rsd::l::target::has_bin pg_dump; then
-        rsd::io::error "pg_dump not found on the target."
-        return 1
-    fi
+    rsd::l::r::require_bins pg_dump || return 3
 
     # ── Connection check ─────────────────────────────────────────────────
     rsd::l::pg::verify_connection || return 1

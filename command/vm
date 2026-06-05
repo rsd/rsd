@@ -17,7 +17,7 @@ fi
 [[ "$RSD_VM_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/vm.lib)"
 
 RSD_C_VM_SHORT_DESC="Virtual Machine Lifecycle Management"
-RSD_C_VM_VERSION="0.1.0"
+RSD_C_VM_VERSION="0.2.0"
 
 # ==============================================================================
 # Help
@@ -105,12 +105,13 @@ function rsd::c::vm::_parse_create_opts() {
 
 # Resolve connection URI from current option state.
 # Must be called after _parse_create_opts.
+# Passes the caller's variable name directly to resolve_connection
+# to avoid intermediate nameref collisions.
 #
-# @param string& $1 nameref: resolved connection URI.
+# @param string $1 Variable name to write the URI into.
 # @return void
 function rsd::c::vm::_resolve_conn() {
-    local _out_uri="$1"; declare -n _r_uri="$_out_uri"
-    rsd::l::vm::resolve_connection "$RSD_VM_OPT_SYSTEM" _r_uri
+    rsd::l::vm::resolve_connection "$RSD_VM_OPT_SYSTEM" "$1"
 }
 
 # ==============================================================================

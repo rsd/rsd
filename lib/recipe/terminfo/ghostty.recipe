@@ -112,7 +112,8 @@ function rsd::l::r::terminfo::resolve_platform() {
         return 0
     fi
 
-    local host_alias="${RSD_REMOTE_TARGET#@}"
+    local host_alias=""
+    rsd::l::r::resolve_host_alias host_alias
     rsd::l::host::get_property "$host_alias" "family" _r_fam
     rsd::l::host::get_property "$host_alias" "distro" _r_dist
     rsd::l::host::get_property "$host_alias" "version" _r_ver

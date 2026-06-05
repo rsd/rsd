@@ -119,10 +119,8 @@ function rsd::l::r::tsdb::resolve_platform() {
         return 0
     fi
 
-    local host_alias="localhost"
-    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
-        host_alias="${RSD_REMOTE_TARGET#@}"
-    fi
+    local host_alias=""
+    rsd::l::r::resolve_host_alias host_alias
 
     local distro="" family="" version=""
     rsd::l::host::get_property "$host_alias" "family" family
@@ -130,15 +128,7 @@ function rsd::l::r::tsdb::resolve_platform() {
     rsd::l::host::get_property "$host_alias" "version" version
 
     # Platform guards
-    if [[ "$family" != "debian" || "$distro" != "ubuntu" ]]; then
-        rsd::io::error "This recipe requires Ubuntu. Detected: family=$family, distro=$distro."
-        exit 2
-    fi
-
-    if ! rsd::l::host::version_gte "$version" "26.04"; then
-        rsd::io::error "This recipe requires Ubuntu 26.04+. Detected version: $version."
-        exit 2
-    fi
+    rsd::l::r::require_platform "debian" "ubuntu" "26.04"
 
     # Resolve codename — for Ubuntu 26.04 this is "resolute"
     # 3-tier fallback: hosts.ini → /etc/os-release → lsb_release
@@ -419,10 +409,7 @@ function rsd::r::timescaledb_install::configure_preload() {
     fi
 
     # Backup before modifying
-    if ! rsd::l::target::exec_sudo "" cp "$RSD_TSDB_PG_CONF" "${RSD_TSDB_PG_CONF}.rsd.bak"; then
-        rsd::io::error "Failed to create backup of postgresql.conf"
-        return 1
-    fi
+    rsd::l::r::backup "$RSD_TSDB_PG_CONF" || return 1
 
     # Replace or append shared_preload_libraries
     local preload_value="'timescaledb,pg_stat_statements'"
@@ -448,9 +435,7 @@ function rsd::r::timescaledb_install::configure_preload() {
 }
 
 function rsd::r::timescaledb_install::configure_preload::rollback() {
-    if rsd::l::target::file_exists "${RSD_TSDB_PG_CONF}.rsd.bak"; then
-        rsd::l::target::exec_sudo "" mv "${RSD_TSDB_PG_CONF}.rsd.bak" "$RSD_TSDB_PG_CONF"
-    fi
+    rsd::l::r::restore_backup "$RSD_TSDB_PG_CONF"
 }
 
 # ==============================================================================
@@ -503,19 +488,7 @@ function rsd::r::timescaledb_install::disable_telemetry::rollback() {
 # ==============================================================================
 
 function rsd::r::timescaledb_install::restart_service() {
-    rsd::io::status "Restarting PostgreSQL service..."
-
-    rsd::l::systemd::restart "postgresql.service"
-    rsd::l::systemd::enable "postgresql.service" 0
-
-    # Brief sanity check — is it running?
-    if ! rsd::l::systemd::is_active "postgresql.service"; then
-        rsd::io::error "PostgreSQL failed to start after restart."
-        rsd::io::info "Check: rsd systemd logs postgresql.service"
-        return 1
-    fi
-
-    rsd::io::ok "PostgreSQL restarted and enabled."
+    rsd::l::r::restart_and_enable "postgresql.service"
 }
 
 # ==============================================================================
