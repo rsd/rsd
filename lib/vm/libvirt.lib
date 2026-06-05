@@ -19,7 +19,7 @@ if [[ "$RSD_VM_LIBVIRT_LIB" == "1" ]]; then
     return 0
 fi
 RSD_VM_LIBVIRT_LIB=1
-RSD_VM_LIBVIRT_LIB_VERSION="0.3.0"
+RSD_VM_LIBVIRT_LIB_VERSION="0.4.0"
 
 # Load structured IO messaging
 [[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
@@ -119,6 +119,27 @@ function rsd::l::vm::libvirt::_domain_state() {
     info=$(virsh "${args[@]}" domstate "$name" 2>/dev/null) || return 1
     bash::trim info
     _r_state="$info"
+}
+
+# Auto-discover which connection URI a VM domain belongs to.
+# Probes qemu:///system first (more common for RSD VMs), then qemu:///session.
+#
+# @param string  $1 VM name.
+# @param string& $2 nameref: resolved connection URI.
+# @return int 0 if found, 1 if not found on either connection.
+function rsd::l::vm::libvirt::find_domain() {
+    local name="$1"
+    local _out_uri="$2"; declare -n _r_found_uri="$_out_uri"
+
+    local uri
+    for uri in "qemu:///system" "qemu:///session"; do
+        if virsh --connect "$uri" dominfo "$name" &>/dev/null; then
+            _r_found_uri="$uri"
+            return 0
+        fi
+    done
+
+    return 1
 }
 
 # ==============================================================================
@@ -453,22 +474,21 @@ function rsd::l::vm::libvirt::create() {
     local cached_image
     rsd::l::vm::libvirt::download_image "$image_url" "$distro" "$version" cached_image || return $?
 
-    # Determine storage directory based on connection mode
-    local storage_dir
-    if [[ "$conn_uri" == "qemu:///system" ]]; then
-        storage_dir="/var/lib/libvirt/images"
-    else
-        storage_dir="$HOME/.local/share/libvirt/images"
-        mkdir -p "$storage_dir"
-    fi
+    # Storage directory — always user-writable.
+    # libvirt's system QEMU can read from any path, so there's no need
+    # to write to /var/lib/libvirt/images/ (which requires root).
+    local storage_dir="$HOME/.local/share/rsd/vm/disks"
+    mkdir -p "$storage_dir"
 
     # Create VM disk as a qcow2 copy of the base image
     local vm_disk="${storage_dir}/${vm_name}.qcow2"
     rsd::io::status "Creating VM disk: $(basename "$vm_disk") (${disk_size})"
 
     rsd::check_binaries_or_fail qemu-img
-    if ! qemu-img create -f qcow2 -b "$cached_image" -F qcow2 "$vm_disk" "$disk_size" &>/dev/null; then
+    local qemu_err
+    if ! qemu_err=$(qemu-img create -f qcow2 -b "$cached_image" -F qcow2 "$vm_disk" "$disk_size" 2>&1); then
         rsd::io::error "Failed to create VM disk image."
+        [[ -n "$qemu_err" ]] && rsd::io::info "$qemu_err"
         return 1
     fi
 
@@ -582,13 +602,8 @@ function rsd::l::vm::libvirt::destroy() {
         virsh "${args[@]}" snapshot-delete "$vm_name" "$snap" &>/dev/null || true
     done
 
-    # Identify storage volumes before undefining
-    local storage_dir
-    if [[ "$conn_uri" == "qemu:///system" ]]; then
-        storage_dir="/var/lib/libvirt/images"
-    else
-        storage_dir="$HOME/.local/share/libvirt/images"
-    fi
+    # Storage path matches create() — always user-writable
+    local storage_dir="$HOME/.local/share/rsd/vm/disks"
 
     # Undefine domain and remove storage
     rsd::io::status "Removing VM '$vm_name' and associated storage..."

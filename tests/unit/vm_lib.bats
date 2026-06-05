@@ -96,6 +96,51 @@ teardown() {
 }
 
 # ==============================================================================
+# VM Name Prefix
+# ==============================================================================
+
+@test "prefixed_name: applies default prefix" {
+    local result
+    result=$(rsd::l::vm::prefixed_name "my-vm")
+    [ "$result" = "rsd-my-vm" ]
+}
+
+@test "prefixed_name: is idempotent — does not double-prefix" {
+    local result
+    result=$(rsd::l::vm::prefixed_name "rsd-my-vm")
+    [ "$result" = "rsd-my-vm" ]
+}
+
+@test "prefixed_name: respects custom prefix from config" {
+    declare -g -A R_INI_vm
+    R_INI_vm["defaults.prefix"]="test-"
+
+    local result
+    result=$(rsd::l::vm::prefixed_name "myvm")
+    [ "$result" = "test-myvm" ]
+
+    unset 'R_INI_vm[defaults.prefix]'
+}
+
+@test "display_name: strips default prefix" {
+    local result
+    result=$(rsd::l::vm::display_name "rsd-my-vm")
+    [ "$result" = "my-vm" ]
+}
+
+@test "display_name: returns unprefixed name unchanged" {
+    local result
+    result=$(rsd::l::vm::display_name "other-vm")
+    [ "$result" = "other-vm" ]
+}
+
+@test "prefix: returns default rsd-" {
+    local result
+    result=$(rsd::l::vm::prefix)
+    [ "$result" = "rsd-" ]
+}
+
+# ==============================================================================
 # Snapshot Name Sanitization
 # ==============================================================================
 

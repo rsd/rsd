@@ -17,7 +17,7 @@ fi
 [[ "$RSD_VM_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/vm.lib)"
 
 RSD_C_VM_SHORT_DESC="Virtual Machine Lifecycle Management"
-RSD_C_VM_VERSION="0.2.0"
+RSD_C_VM_VERSION="0.3.0"
 
 # ==============================================================================
 # Help
@@ -127,6 +127,7 @@ function rsd::c::vm::create() {
     fi
     shift
 
+
     rsd::c::vm::_parse_create_opts "$@"
 
     # Load driver
@@ -149,6 +150,26 @@ function rsd::c::vm::create() {
         "$RSD_VM_OPT_BOOTSTRAP"
 }
 
+# Resolve connection URI for an existing VM.
+# Auto-detects which connection (system/session) the VM belongs to
+# by probing both. Falls back to config default if not found.
+#
+# @param string $1 VM name.
+# @param string $2 Variable name to write the URI into.
+# @return int 0 if found, 1 if VM not found on either connection.
+function rsd::c::vm::_find_vm_conn() {
+    local vm_name="$1"
+
+    # Try auto-detection via driver
+    if rsd::l::vm::dispatch "find_domain" "$vm_name" "$2"; then
+        return 0
+    fi
+
+    # Not found — fall back to config default (error will come from the action)
+    rsd::l::vm::resolve_connection 0 "$2"
+    return 1
+}
+
 function rsd::c::vm::destroy() {
     local vm_name="$1"
     if [[ -z "$vm_name" ]]; then
@@ -158,7 +179,7 @@ function rsd::c::vm::destroy() {
 
     rsd::l::vm::load_driver || return $?
     local conn_uri=""
-    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
     rsd::l::vm::dispatch "destroy" "$vm_name" "$conn_uri"
 }
 
@@ -171,7 +192,7 @@ function rsd::c::vm::start() {
 
     rsd::l::vm::load_driver || return $?
     local conn_uri=""
-    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
     rsd::l::vm::dispatch "start" "$vm_name" "$conn_uri"
 }
 
@@ -184,7 +205,7 @@ function rsd::c::vm::stop() {
 
     rsd::l::vm::load_driver || return $?
     local conn_uri=""
-    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
     rsd::l::vm::dispatch "stop" "$vm_name" "$conn_uri"
 }
 
@@ -197,7 +218,7 @@ function rsd::c::vm::kill() {
 
     rsd::l::vm::load_driver || return $?
     local conn_uri=""
-    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
     rsd::l::vm::dispatch "kill" "$vm_name" "$conn_uri"
 }
 
@@ -210,7 +231,7 @@ function rsd::c::vm::pause() {
 
     rsd::l::vm::load_driver || return $?
     local conn_uri=""
-    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
     rsd::l::vm::dispatch "pause" "$vm_name" "$conn_uri"
 }
 
@@ -223,7 +244,7 @@ function rsd::c::vm::resume() {
 
     rsd::l::vm::load_driver || return $?
     local conn_uri=""
-    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
     rsd::l::vm::dispatch "resume" "$vm_name" "$conn_uri"
 }
 
@@ -236,7 +257,7 @@ function rsd::c::vm::ssh() {
 
     rsd::l::vm::load_driver || return $?
     local conn_uri=""
-    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
     local username
     username=$(rsd::l::vm::config "defaults.user" "rsd")
     rsd::l::vm::dispatch "ssh" "$vm_name" "$conn_uri" "$username"
@@ -251,7 +272,7 @@ function rsd::c::vm::console() {
 
     rsd::l::vm::load_driver || return $?
     local conn_uri=""
-    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
     rsd::l::vm::dispatch "console" "$vm_name" "$conn_uri"
 }
 
@@ -272,13 +293,12 @@ function rsd::c::vm::snapshot() {
     done
 
     if [[ -z "$snap_name" ]]; then
-        # Auto-generate timestamp-based name
         snap_name="snap-$(date +%Y%m%d-%H%M%S)"
     fi
 
     rsd::l::vm::load_driver || return $?
     local conn_uri=""
-    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
     rsd::l::vm::dispatch "snapshot" "$vm_name" "$snap_name" "$conn_uri"
 }
 
@@ -305,7 +325,7 @@ function rsd::c::vm::rollback() {
 
     rsd::l::vm::load_driver || return $?
     local conn_uri=""
-    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
     rsd::l::vm::dispatch "rollback" "$vm_name" "$snap_name" "$conn_uri"
 }
 
@@ -327,7 +347,7 @@ function rsd::c::vm::commit() {
 
     rsd::l::vm::load_driver || return $?
     local conn_uri=""
-    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
     rsd::l::vm::dispatch "commit" "$vm_name" "$snap_name" "$conn_uri"
 }
 
@@ -340,7 +360,7 @@ function rsd::c::vm::snapshots() {
 
     rsd::l::vm::load_driver || return $?
     local conn_uri=""
-    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
     rsd::l::vm::dispatch "list_snapshots" "$vm_name" "$conn_uri"
 }
 
@@ -354,15 +374,21 @@ function rsd::c::vm::delete_snap() {
 
     rsd::l::vm::load_driver || return $?
     local conn_uri=""
-    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
     rsd::l::vm::dispatch "delete_snapshot" "$vm_name" "$snap_name" "$conn_uri"
 }
 
 function rsd::c::vm::list() {
     rsd::l::vm::load_driver || return $?
+    # List from both connections
     local conn_uri=""
     rsd::l::vm::resolve_connection 0 conn_uri
     rsd::l::vm::dispatch "list" "$conn_uri"
+
+    # Also check system if default is session
+    if [[ "$conn_uri" != "qemu:///system" ]]; then
+        rsd::l::vm::dispatch "list" "qemu:///system"
+    fi
 }
 
 function rsd::c::vm::status() {
@@ -374,7 +400,7 @@ function rsd::c::vm::status() {
 
     rsd::l::vm::load_driver || return $?
     local conn_uri=""
-    rsd::l::vm::resolve_connection 0 conn_uri
+    rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
     rsd::l::vm::dispatch "status" "$vm_name" "$conn_uri"
 }
 

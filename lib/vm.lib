@@ -16,7 +16,7 @@ if [[ "$RSD_VM_LIB" == "1" ]]; then
     return 0
 fi
 RSD_VM_LIB=1
-RSD_VM_LIB_VERSION="0.2.0"
+RSD_VM_LIB_VERSION="0.3.0"
 
 # Load structured IO messaging
 [[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
@@ -51,12 +51,59 @@ function rsd::l::vm::config() {
 }
 
 # ==============================================================================
+# VM Name Prefix
+# ==============================================================================
+
+# Get the VM name prefix. Configurable via vm.ini defaults.prefix.
+# Default: "rsd-"
+#
+# @return stdout The prefix string.
+function rsd::l::vm::prefix() {
+    rsd::l::vm::config "defaults.prefix" "rsd-"
+}
+
+# Apply the prefix to a user-provided VM name.
+# Idempotent: if the name already has the prefix, returns it unchanged.
+#
+# @param string $1 User-provided VM name.
+# @return stdout Prefixed name.
+function rsd::l::vm::prefixed_name() {
+    local name="$1"
+    local prefix
+    prefix=$(rsd::l::vm::prefix)
+
+    if [[ "$name" == "${prefix}"* ]]; then
+        echo "$name"
+    else
+        echo "${prefix}${name}"
+    fi
+}
+
+# Strip the prefix from a VM name for user-facing display.
+# If the name doesn't have the prefix, returns it unchanged.
+#
+# @param string $1 Internal (prefixed) VM name.
+# @return stdout Display name without prefix.
+function rsd::l::vm::display_name() {
+    local name="$1"
+    local prefix
+    prefix=$(rsd::l::vm::prefix)
+
+    if [[ "$name" == "${prefix}"* ]]; then
+        echo "${name#"$prefix"}"
+    else
+        echo "$name"
+    fi
+}
+
+# ==============================================================================
 # VM Name Validation
 # ==============================================================================
 
 # Validate a VM name against libvirt/QEMU naming rules.
 # Allows alphanumeric characters, hyphens, and underscores. Must start with
 # a letter. Length 1-63 characters (DNS label constraint for hostname reuse).
+# Validates the SHORT (user-provided) name, not the prefixed form.
 #
 # @param string $1 The proposed VM name.
 # @return int 0 if valid, 1 if invalid.

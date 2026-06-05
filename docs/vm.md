@@ -1,6 +1,41 @@
-# VM Quick Start Guide
+# VM Management
 
 Create and manage virtual machines with `rsd vm`.
+
+## Quick Start
+
+```bash
+# 1. Check if your system is ready
+rsd vm check --system
+
+# 2. Create an Ubuntu 26.04 VM
+rsd vm create my-vm --os ubuntu-26.04 --system
+
+# 3. SSH in
+rsd vm ssh my-vm
+
+# 4. List VMs
+rsd vm list
+
+# 5. VM details
+rsd vm status my-vm
+
+# 6. Take a snapshot before testing
+rsd vm snapshot my-vm --name clean
+
+# 7. List snapshots
+rsd vm snapshots my-vm
+
+# 8. Rollback to a snapshot
+rsd vm rollback my-vm --to clean
+
+# 9. When done, destroy it
+rsd vm destroy my-vm
+```
+
+---
+
+## Reference
 
 ## Prerequisites
 
@@ -84,6 +119,7 @@ This will:
 | `--system` | Bridge (`virbr0`) | `libvirt` group | Production-like, reliable IP discovery |
 
 For `--system` mode, ensure the default virtual network is active.
+`rsd vm check --system` verifies this automatically.
 
 ### What is the default network?
 
@@ -95,8 +131,8 @@ On Arch Linux, this network exists but is **not active** by default after
 installing libvirt. You need to start it once:
 
 ```bash
-# Check current state
-virsh net-list --all
+# Check current state (must specify --connect, bare virsh defaults to session mode)
+virsh --connect qemu:///system net-list --all
 
 # Expected output if inactive:
 #  Name      State      Autostart   Persistent
@@ -237,12 +273,13 @@ enabled=true
 
 ## Storage Paths
 
-| Mode | VM disks | Managed by |
-| :--- | :--- | :--- |
-| `--session` | `~/.local/share/libvirt/images/` | libvirt (user) |
-| `--system` | `/var/lib/libvirt/images/` | libvirt (system) |
+| What | Path |
+| :--- | :--- |
+| VM disks | `~/.local/share/rsd/vm/disks/` |
+| Cloud image cache | `~/.local/share/rsd/vm/cache/` (configurable) |
 
-Cloud image cache: `~/.local/share/rsd/vm/cache/` (configurable).
+VM disks are always stored in the user's home directory — no root
+permissions needed. libvirt's system QEMU can read from any path.
 
 ---
 
