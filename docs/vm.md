@@ -28,6 +28,24 @@ ssh-keygen -t ed25519
 
 ---
 
+## Step 0: Check Environment
+
+Before creating your first VM, run the preflight check:
+
+```bash
+# Session mode (default)
+rsd vm check
+
+# System mode (bridge networking)
+rsd vm check --system
+```
+
+This probes all prerequisites — binaries, KVM, libvirt service, default
+network, SSH keys, group membership — and reports exactly what's ready
+and what needs fixing.
+
+---
+
 ## Step 1: Create a VM
 
 ```bash

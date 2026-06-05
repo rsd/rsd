@@ -45,6 +45,7 @@ function rsd::c::vm::help() {
     echo -e "\t\t\tsnapshots <name>           List all snapshots"
     echo -e "\t\t\tdelete-snap <name> <snap>  Delete a snapshot\n"
     echo -e "\t\tInfo:"
+    echo -e "\t\t\tcheck                      Check environment readiness"
     echo -e "\t\t\tlist                       List all RSD-managed VMs"
     echo -e "\t\t\tstatus <name>              Detailed VM status"
     echo -e "\t\t\timages                     List available cloud images\n"
@@ -381,6 +382,22 @@ function rsd::c::vm::images() {
     rsd::l::vm::list_images
 }
 
+function rsd::c::vm::check() {
+    # Parse --system / --session to check the right connection mode
+    local system_flag=0
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --system) system_flag=1 ;;
+        esac
+    done
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::l::vm::resolve_connection "$system_flag" conn_uri
+    rsd::l::vm::dispatch "check" "$conn_uri"
+}
+
 # ==============================================================================
 # Action Router
 # ==============================================================================
@@ -406,6 +423,7 @@ function rsd::c::vm::command() {
         list)        rsd::c::vm::list "$@" ;;
         status)      rsd::c::vm::status "$@" ;;
         images)      rsd::c::vm::images "$@" ;;
+        check)       rsd::c::vm::check "$@" ;;
         *)           rsd::c::vm::help ;;
     esac
 }

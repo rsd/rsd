@@ -19,7 +19,7 @@ if [[ "$RSD_VM_LIBVIRT_LIB" == "1" ]]; then
     return 0
 fi
 RSD_VM_LIBVIRT_LIB=1
-RSD_VM_LIBVIRT_LIB_VERSION="0.2.0"
+RSD_VM_LIBVIRT_LIB_VERSION="0.3.0"
 
 # Load structured IO messaging
 [[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
@@ -119,6 +119,170 @@ function rsd::l::vm::libvirt::_domain_state() {
     info=$(virsh "${args[@]}" domstate "$name" 2>/dev/null) || return 1
     bash::trim info
     _r_state="$info"
+}
+
+# ==============================================================================
+# Preflight Diagnostics
+# ==============================================================================
+
+# Run a full environment check and report readiness status.
+# Probes: required binaries, KVM support, libvirt service, default network,
+# SSH keys, and libvirt group membership.
+#
+# @param string $1 Connection URI.
+# @return int 0 if all checks pass, 1 if any fail.
+function rsd::l::vm::libvirt::check() {
+    local conn_uri="${1:-qemu:///session}"
+    local failures=0
+
+    rsd::io::blank
+    rsd::io::banner "VM Environment Check"
+    rsd::io::blank
+
+    # --- Required Binaries ---
+    rsd::io::info "Required Binaries:"
+    local -a required_bins=(virsh virt-install qemu-system-x86_64 qemu-img genisoimage curl ssh)
+    local bin bin_path
+    for bin in "${required_bins[@]}"; do
+        bin_path=$(command -v "$bin" 2>/dev/null) || true
+        if [[ -n "$bin_path" ]]; then
+            rsd::io::ok "  $bin  ($bin_path)"
+        else
+            rsd::io::error "  $bin  MISSING"
+            failures=$((failures + 1))
+        fi
+    done
+    rsd::io::blank
+
+    # --- KVM Support ---
+    rsd::io::info "KVM Acceleration:"
+    if [[ -e /dev/kvm ]]; then
+        if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+            rsd::io::ok "  /dev/kvm  accessible (read/write)"
+        else
+            rsd::io::warn "  /dev/kvm  exists but not accessible by current user"
+            rsd::io::info "  Check group ownership: ls -la /dev/kvm"
+            failures=$((failures + 1))
+        fi
+    else
+        rsd::io::error "  /dev/kvm  NOT FOUND — KVM not available"
+        rsd::io::info "  Ensure CPU virtualization (VT-x/AMD-V) is enabled in BIOS"
+        failures=$((failures + 1))
+    fi
+    rsd::io::blank
+
+    # --- Libvirt Service ---
+    rsd::io::info "Libvirt Service:"
+    local service="" service_state=""
+
+    # Detect which daemon is installed (monolithic vs modular)
+    if systemctl list-unit-files libvirtd.service &>/dev/null 2>&1; then
+        service="libvirtd.service"
+    elif systemctl list-unit-files virtqemud.service &>/dev/null 2>&1; then
+        service="virtqemud.service"
+    fi
+
+    if [[ -n "$service" ]]; then
+        service_state=$(systemctl is-active "$service" 2>/dev/null) || true
+        if [[ "$service_state" == "active" ]]; then
+            rsd::io::ok "  $service  active"
+        else
+            rsd::io::error "  $service  $service_state"
+            rsd::io::info "  Start with: sudo systemctl start $service"
+            failures=$((failures + 1))
+        fi
+    else
+        rsd::io::error "  No libvirt service found"
+        rsd::io::info "  Install libvirt: pacman -S libvirt"
+        failures=$((failures + 1))
+    fi
+    rsd::io::blank
+
+    # --- Virsh Connectivity ---
+    rsd::io::info "Virsh Connection ($conn_uri):"
+    if virsh --connect "$conn_uri" version &>/dev/null; then
+        rsd::io::ok "  Connected successfully"
+    else
+        rsd::io::error "  Cannot connect"
+        if [[ "$service_state" != "active" && -n "$service" ]]; then
+            rsd::io::info "  Start the service first (see above)"
+        fi
+        failures=$((failures + 1))
+    fi
+    rsd::io::blank
+
+    # --- Default Network (system mode only) ---
+    if [[ "$conn_uri" == "qemu:///system" ]]; then
+        rsd::io::info "Default Network (system mode):"
+        local net_state
+        net_state=$(virsh --connect "$conn_uri" net-info default 2>/dev/null \
+            | grep -i "^Active:" | awk '{print $2}') || true
+
+        if [[ "$net_state" == "yes" ]]; then
+            rsd::io::ok "  'default' network  active"
+        elif [[ -n "$net_state" ]]; then
+            rsd::io::error "  'default' network  inactive"
+            rsd::io::info "  Start with: sudo virsh net-start default"
+            rsd::io::info "  Auto-start: sudo virsh net-autostart default"
+            failures=$((failures + 1))
+        else
+            rsd::io::error "  'default' network  not found"
+            rsd::io::info "  It may need to be defined. Check: virsh --connect $conn_uri net-list --all"
+            failures=$((failures + 1))
+        fi
+        rsd::io::blank
+    fi
+
+    # --- SSH Key ---
+    rsd::io::info "SSH Key:"
+    local key_file
+    key_file=$(rsd::l::vm::config "defaults.key" "$HOME/.ssh/id_ed25519.pub")
+    key_file="${key_file/#\~/$HOME}"
+    if [[ -f "$key_file" ]]; then
+        rsd::io::ok "  $key_file  found"
+    else
+        rsd::io::error "  $key_file  NOT FOUND"
+        rsd::io::info "  Generate: ssh-keygen -t ed25519"
+        failures=$((failures + 1))
+    fi
+    rsd::io::blank
+
+    # --- Group Membership (system mode) ---
+    if [[ "$conn_uri" == "qemu:///system" ]]; then
+        rsd::io::info "Group Membership:"
+        if id -nG 2>/dev/null | grep -qw libvirt; then
+            rsd::io::ok "  User '$(whoami)' is in the 'libvirt' group"
+        else
+            rsd::io::warn "  User '$(whoami)' is NOT in the 'libvirt' group"
+            rsd::io::info "  Add with: sudo usermod -aG libvirt $(whoami)"
+            rsd::io::info "  Then log out and back in"
+            failures=$((failures + 1))
+        fi
+        rsd::io::blank
+    fi
+
+    # --- Image Cache ---
+    rsd::io::info "Image Cache:"
+    local cache_dir
+    cache_dir=$(rsd::l::vm::cache_dir)
+    if [[ -d "$cache_dir" ]]; then
+        local cached_count
+        cached_count=$(find "$cache_dir" -maxdepth 1 -type f 2>/dev/null | wc -l)
+        rsd::io::ok "  $cache_dir  ($cached_count cached images)"
+    else
+        rsd::io::info "  $cache_dir  (will be created on first download)"
+    fi
+    rsd::io::blank
+
+    # --- Summary ---
+    if [[ $failures -eq 0 ]]; then
+        rsd::io::ok "All checks passed. Ready to create VMs."
+    else
+        rsd::io::error "$failures check(s) failed. Fix the issues above before proceeding."
+    fi
+    rsd::io::blank
+
+    return $((failures > 0 ? 1 : 0))
 }
 
 # ==============================================================================
