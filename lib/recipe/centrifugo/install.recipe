@@ -19,8 +19,9 @@
 #                              write /etc/centrifugo/config.json.
 #  6. setup_systemd          — Install and start centrifugo.service.
 #  7. configure_nginx        — Write Nginx vhost for WebSocket proxying.
-#  8. tune_kernel            — sysctl + Nginx LimitNOFILE tuning (optional).
-#  9. validate_install       — Smoke test: version, config, service, nginx.
+#  8. letsencrypt/install    — Provision SSL cert + HTTPS vhost upgrade.
+#  9. tune_kernel            — sysctl + Nginx LimitNOFILE tuning (optional).
+# 10. validate_install       — Smoke test: version, config, service, nginx.
 #
 # IDEMPOTENCY
 # -----------
@@ -34,16 +35,19 @@
 # CLI OPTIONS
 # -----------
 #   --server-name <domain>  Domain for Nginx vhost (REQUIRED unless --skip-nginx)
+#   --email <address>       Let's Encrypt email for certificate renewal notices
+#                           (REQUIRED unless --skip-ssl or --skip-nginx)
 #   --origins <csv>         Comma-separated allowed_origins list
 #   --client-port <port>    Centrifugo client port (default: 8000)
 #   --internal-port <port>  Centrifugo internal port (default: 8001)
-#   --skip-nginx            Skip Nginx vhost configuration
+#   --skip-nginx            Skip Nginx vhost configuration (implies --skip-ssl)
+#   --skip-ssl              Skip Let's Encrypt SSL provisioning
 #   --skip-sysctl           Skip kernel tuning
 #   --skip-tailscale        Do not bind internal port to Tailscale IP
 #
-# Usage: rsd recipe run centrifugo/install --server-name realtime.example.com
-#        rsd @target recipe run centrifugo/install --server-name rt.example.com --origins "https://example.com"
-#        rsd @target recipe run centrifugo/install --server-name rt.example.com --dry-run --verbose
+# Usage: rsd @target recipe run centrifugo/install --server-name rt.example.com --email admin@example.com
+#        rsd @target recipe run centrifugo/install --server-name rt.example.com --email admin@example.com --origins "https://example.com"
+#        rsd @target recipe run centrifugo/install --server-name rt.example.com --skip-ssl
 #
 # @see docs/recipes.md
 # @see AGENTS.md
@@ -65,9 +69,11 @@ declare -g -A RSD_RECIPE_OPTIONS=(
     ["origins"]=1
     ["client-port"]=1
     ["internal-port"]=1
+    ["email"]=1
     ["skip-nginx"]=0
     ["skip-sysctl"]=0
     ["skip-tailscale"]=0
+    ["skip-ssl"]=0
 )
 
 # ==============================================================================
@@ -165,6 +171,18 @@ function rsd::r::centrifugo_install::register() {
     if [[ "${RSD_COMMAND_ARGS[skip-nginx]}" != "1" ]]; then
         rsd::r::include "nginx/install"
         rsd::r::register_task "centrifugo_install::configure_nginx"
+    fi
+
+    # SSL: include the letsencrypt/install recipe for certificate provisioning
+    if [[ "${RSD_COMMAND_ARGS[skip-nginx]}" != "1" && "${RSD_COMMAND_ARGS[skip-ssl]}" != "1" ]]; then
+        if [[ -z "${RSD_COMMAND_ARGS[email]:-}" ]]; then
+            rsd::io::error "Missing required option: --email <address> (for Let's Encrypt certificate)"
+            rsd::io::info  "Use --skip-ssl to skip SSL provisioning."
+            exit 2
+        fi
+        # Bridge: letsencrypt recipe expects --domain, centrifugo uses --server-name
+        RSD_COMMAND_ARGS["domain"]="$RSD_CENTRIFUGO_SERVER_NAME"
+        rsd::r::include "letsencrypt/install"
     fi
 
     if [[ "${RSD_COMMAND_ARGS[skip-sysctl]}" != "1" ]]; then

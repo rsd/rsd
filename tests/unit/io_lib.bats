@@ -132,3 +132,36 @@ _frame() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"bare output"* ]]
 }
+
+# ==============================================================================
+# Consecutive empty line dedup
+# ==============================================================================
+
+@test "frame_lines deduplicates consecutive empty lines" {
+    run _frame "task" \
+        "line 1" \
+        "" \
+        "" \
+        "" \
+        "line 2"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"line 1"* ]]
+    [[ "$output" == *"line 2"* ]]
+    # Should have 3 framed lines: line1, ONE empty, line2
+    local line_count
+    line_count=$(echo "$output" | grep -c '│')
+    [ "$line_count" -eq 3 ]
+}
+
+@test "frame_lines preserves a single empty line between content" {
+    run _frame "task" \
+        "line 1" \
+        "" \
+        "line 2"
+
+    [ "$status" -eq 0 ]
+    local line_count
+    line_count=$(echo "$output" | grep -c '│')
+    [ "$line_count" -eq 3 ]
+}
