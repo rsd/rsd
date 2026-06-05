@@ -32,6 +32,7 @@ function rsd::c::vm::help() {
     echo -e "\t\t\tdestroy <name>             Remove VM and all storage"
     echo -e "\t\t\tstart <name>               Power on a stopped VM"
     echo -e "\t\t\tstop <name>                Graceful ACPI shutdown"
+    echo -e "\t\t\treboot <name>              Graceful ACPI reboot"
     echo -e "\t\t\tkill <name>                Force power off"
     echo -e "\t\t\tpause <name>               Freeze VM state"
     echo -e "\t\t\tresume <name>              Unfreeze VM state\n"
@@ -207,6 +208,19 @@ function rsd::c::vm::stop() {
     local conn_uri=""
     rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
     rsd::l::vm::dispatch "stop" "$vm_name" "$conn_uri"
+}
+
+function rsd::c::vm::reboot() {
+    local vm_name="$1"
+    if [[ -z "$vm_name" ]]; then
+        rsd::io::error "Usage: rsd vm reboot <name>"
+        return 2
+    fi
+
+    rsd::l::vm::load_driver || return $?
+    local conn_uri=""
+    rsd::c::vm::_find_vm_conn "$vm_name" conn_uri
+    rsd::l::vm::dispatch "reboot" "$vm_name" "$conn_uri"
 }
 
 function rsd::c::vm::kill() {
@@ -436,6 +450,7 @@ function rsd::c::vm::command() {
         destroy)     rsd::c::vm::destroy "$@" ;;
         start)       rsd::c::vm::start "$@" ;;
         stop)        rsd::c::vm::stop "$@" ;;
+        reboot)      rsd::c::vm::reboot "$@" ;;
         kill)        rsd::c::vm::kill "$@" ;;
         pause)       rsd::c::vm::pause "$@" ;;
         resume)      rsd::c::vm::resume "$@" ;;

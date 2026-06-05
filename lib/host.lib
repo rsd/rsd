@@ -16,7 +16,7 @@ if [[ "$RSD_HOST_LIB" == "1" ]]; then
     return 0
 fi
 RSD_HOST_LIB=1
-RSD_HOST_LIB_VERSION="0.1.1"
+RSD_HOST_LIB_VERSION="0.2.0"
 
 # Sourcing hosts.ini if not loaded yet.
 # Intent: Lazy-load hosts configuration profiles to save memory and parsing overhead.
@@ -196,6 +196,34 @@ function rsd::l::host::get_property() {
                 _r_val="${local_props[$prop]}"
                 return 0
             fi
+        fi
+    fi
+
+    # Intent: Fallback dynamically for remote targets by running the standalone
+    # detection script via SSH. Cache results in R_INI_hosts to avoid re-probing.
+    if [[ -n "$RSD_REMOTE_TARGET" && "$alias" != "localhost" ]]; then
+        # Only probe once per session — check if we already cached any property for this alias
+        local probe_key="hosts.${alias}.os"
+        if [[ -z "${R_INI_hosts[$probe_key]+x}" ]]; then
+            local detect_script=""
+            rsd::l::host::generate_standalone_script detect_script
+            local remote_output=""
+            remote_output=$(rsd::l::target::exec bash -s <<< "$detect_script" 2>/dev/null) || true
+
+            # Parse key=value output and cache into R_INI_hosts
+            local line k v
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                k="${line%%=*}"
+                v="${line#*=}"
+                R_INI_hosts["hosts.${alias}.${k}"]="$v"
+            done <<< "$remote_output"
+        fi
+
+        # Re-check after caching
+        if [[ -n "${R_INI_hosts[$key]}" ]]; then
+            _r_val="${R_INI_hosts[$key]}"
+            return 0
         fi
     fi
     

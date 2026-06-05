@@ -685,6 +685,40 @@ function rsd::l::vm::libvirt::stop() {
     rsd::io::ok "Shutdown signal sent to '$vm_name'."
 }
 
+# Reboot a running VM via ACPI signal.
+#
+# @param string $1 VM name.
+# @param string $2 Connection URI.
+# @return int 0 on success.
+function rsd::l::vm::libvirt::reboot() {
+    rsd::check_binaries_or_fail virsh
+
+    local vm_name="$1"
+    local conn_uri="${2:-qemu:///session}"
+    rsd::l::vm::libvirt::_require_service "$conn_uri" || return $?
+    local -a args=()
+    rsd::l::vm::libvirt::_conn_args "$conn_uri" args
+
+    if ! rsd::l::vm::libvirt::_domain_exists "$vm_name" "$conn_uri"; then
+        rsd::io::error "VM '$vm_name' does not exist."
+        return 1
+    fi
+
+    local state=""
+    rsd::l::vm::libvirt::_domain_state "$vm_name" "$conn_uri" state
+    if [[ "$state" != "running" ]]; then
+        rsd::io::info "VM '$vm_name' is not running (state: $state). Use 'rsd vm start' instead."
+        return 0
+    fi
+
+    rsd::io::status "Sending ACPI reboot to '$vm_name'..."
+    if ! virsh "${args[@]}" reboot "$vm_name" &>/dev/null; then
+        rsd::io::error "Failed to send reboot signal to '$vm_name'."
+        return 1
+    fi
+    rsd::io::ok "Reboot signal sent to '$vm_name'."
+}
+
 # Force power off a VM.
 #
 # @param string $1 VM name.
