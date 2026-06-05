@@ -414,40 +414,34 @@ function rsd::r::centrifugo_install::generate_config() {
         origins_json="[${json_items}]"
     fi
 
-    # --- Build JSON config via jq (Centrifugo v6 nested structure) ---
+    # --- Build JSON config locally (pure bash) ---
+    # Cannot use `jq -n` over SSH: the single-quoted jq filter's $variables
+    # get shell-expanded to empty strings by the remote shell's argument
+    # escaping layer. Building JSON locally avoids all quoting issues.
     local config_json=""
-    config_json=$(rsd::l::target::exec jq -n \
-        --arg token_hmac "$token_hmac_secret" \
-        --arg api_key "$api_key" \
-        --arg admin_pw "$admin_password" \
-        --arg admin_sec "$admin_secret" \
-        --arg client_addr "127.0.0.1" \
-        --arg client_port "$RSD_CENTRIFUGO_CLIENT_PORT" \
-        --arg internal_addr "$internal_address" \
-        --arg internal_port "$RSD_CENTRIFUGO_INTERNAL_PORT" \
-        --argjson origins "$origins_json" \
-        '{
-            client: {
-                token: {
-                    hmac_secret_key: $token_hmac
-                },
-                allowed_origins: $origins
-            },
-            admin: {
-                enabled: true,
-                password: $admin_pw,
-                secret: $admin_sec
-            },
-            http_api: {
-                key: $api_key
-            },
-            http_server: {
-                address: $client_addr,
-                port: $client_port,
-                internal_address: $internal_addr,
-                internal_port: $internal_port
-            }
-        }')
+    printf -v config_json '{
+  "client": {
+    "token": {
+      "hmac_secret_key": "%s"
+    },
+    "allowed_origins": %s
+  },
+  "admin": {
+    "enabled": true,
+    "password": "%s",
+    "secret": "%s"
+  },
+  "http_api": {
+    "key": "%s"
+  },
+  "http_server": {
+    "address": "127.0.0.1",
+    "port": "%s",
+    "internal_address": "%s",
+    "internal_port": "%s"
+  }
+}' "$token_hmac_secret" "$origins_json" "$admin_password" "$admin_secret" \
+   "$api_key" "$RSD_CENTRIFUGO_CLIENT_PORT" "$internal_address" "$RSD_CENTRIFUGO_INTERNAL_PORT"
 
     if [[ -z "$config_json" ]]; then
         rsd::io::error "Failed to build JSON configuration."
