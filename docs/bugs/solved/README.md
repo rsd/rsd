@@ -38,3 +38,4 @@ sequence number). Use the template:
 | [0003](0003-sudo-stdout-swallowed.md) | exec_sudo stdout swallowed in command substitution | v1.23.0 | sudo pipeline through SSH PTY merges stdout/stderr |
 | [0004](0004-json-port-type-mismatch.md) | Centrifugo config check fails on string ports | v1.22.0 | JSON `"port": "8000"` vs required integer `"port": 8000` |
 | [0005](0005-config-precheck-exists-not-valid.md) | pre_check passes on broken config files | v1.22.0 | File existence ≠ file validity |
+| [0006](0006-sed-mangled-through-ssh.md) | sed expressions mangled through SSH | v1.23.0 | Complex sed `{ }` and `\` destroyed by 4-layer quoting |

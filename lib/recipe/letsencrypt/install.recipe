@@ -219,15 +219,37 @@ location ^~ /.well-known/acme-challenge/ {
     # Read current vhost, add the include line if missing.
     local vhost_content=""
     vhost_content=$(rsd::l::target::exec_sudo "" cat "$RSD_LE_VHOST_PATH" 2>/dev/null)
+    vhost_content="${vhost_content//$'\r'/}"
 
     if [[ "$vhost_content" != *"acme-challenge.conf"* ]]; then
         rsd::io::status "Injecting ACME include into vhost..."
 
-        # Insert `include snippets/acme-challenge.conf;` after `server_name` in the HTTP block.
-        # Use sed to find the first `server_name` line in a `listen 80` block and add after it.
-        rsd::l::target::exec_sudo "" sed -i \
-            '/listen 80;/,/}/ { /server_name/a\    include snippets/acme-challenge.conf;' \
-            -e '}' "$RSD_LE_VHOST_PATH"
+        # Pure-bash injection: insert the include line after server_name.
+        # Avoids sed through SSH which mangles { } and \ characters
+        # across the local → SSH → sudo → sh -c quoting layers.
+        local acme_include="    include snippets/acme-challenge.conf;"
+        local modified_vhost=""
+        local injected=0
+        while IFS= read -r line; do
+            modified_vhost+="${line}"$'\n'
+            # Inject after the first server_name line (in the HTTP block)
+            if [[ $injected -eq 0 && "$line" == *"server_name"* ]]; then
+                modified_vhost+="${acme_include}"$'\n'
+                injected=1
+            fi
+        done <<< "$vhost_content"
+
+        if [[ $injected -eq 0 ]]; then
+            rsd::io::error "Could not find server_name directive in vhost to inject ACME include."
+            return 1
+        fi
+
+        # Write modified vhost back via temp file
+        local tmpfile=""
+        tmpfile=$(rsd::l::target::mktemp "rsd-vhost-acme.XXXXXX") || return 14
+        printf '%s' "$modified_vhost" | rsd::l::target::exec tee "$tmpfile" >/dev/null
+        rsd::l::target::exec_sudo "" mv "$tmpfile" "$RSD_LE_VHOST_PATH"
+        rsd::l::target::exec_sudo "" chmod 0644 "$RSD_LE_VHOST_PATH"
 
         # Verify nginx still loads cleanly
         if ! rsd::l::target::exec_sudo "" nginx -t 2>&1; then
@@ -385,6 +407,7 @@ function rsd::r::letsencrypt_install::upgrade_vhost() {
     # 3. Whether a proxy-websocket snippet should be included
     local existing_vhost=""
     existing_vhost=$(rsd::l::target::exec_sudo "" cat "$RSD_LE_VHOST_PATH" 2>/dev/null)
+    existing_vhost="${existing_vhost//$'\r'/}"
 
     if [[ -z "$existing_vhost" ]]; then
         rsd::io::error "Cannot read existing vhost: ${RSD_LE_VHOST_PATH}"
