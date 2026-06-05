@@ -1,0 +1,775 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# Centrifugo — Real-time Messaging Server Provisioning Recipe
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Downloads, installs, and configures Centrifugo as a production-ready
+# real-time messaging server behind an Nginx reverse proxy.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+#  1. resolve_platform       — Detect OS/arch, validate Linux target.
+#  2. install_dependencies   — Ensure curl, tar, jq are available.
+#  3. download_binary        — Fetch latest linux_amd64 release from GitHub.
+#  4. create_user            — Create dedicated 'centrifugo' system user.
+#  5. generate_config        — Auto-generate secrets, detect Tailscale,
+#                              write /etc/centrifugo/config.json.
+#  6. setup_systemd          — Install and start centrifugo.service.
+#  7. configure_nginx        — Write Nginx vhost for WebSocket proxying.
+#  8. tune_kernel            — sysctl + Nginx LimitNOFILE tuning (optional).
+#  9. validate_install       — Smoke test: version, config, service, nginx.
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. Each task has a pre_check that detects
+# whether the desired state is already satisfied.
+#
+# SCOPE
+# -----
+# Works on both local and remote targets.
+#
+# CLI OPTIONS
+# -----------
+#   --server-name <domain>  Domain for Nginx vhost (REQUIRED unless --skip-nginx)
+#   --origins <csv>         Comma-separated allowed_origins list
+#   --client-port <port>    Centrifugo client port (default: 8000)
+#   --internal-port <port>  Centrifugo internal port (default: 8001)
+#   --skip-nginx            Skip Nginx vhost configuration
+#   --skip-sysctl           Skip kernel tuning
+#
+# Usage: rsd recipe run centrifugo/install --server-name realtime.example.com
+#        rsd @target recipe run centrifugo/install --server-name rt.example.com --origins "https://example.com"
+#        rsd @target recipe run centrifugo/install --server-name rt.example.com --dry-run --verbose
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load dependencies
+[[ "$RSD_HOST_LIB" != "1" ]]    && source "$(rsd::get_libdir_file lib/host.lib)"
+[[ "$RSD_APT_LIB" != "1" ]]     && source "$(rsd::get_libdir_file lib/apt.lib)"
+[[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
+
+# Recipe-specific CLI options
+declare -g -A RSD_RECIPE_OPTIONS=(
+    ["server-name"]=1
+    ["origins"]=1
+    ["client-port"]=1
+    ["internal-port"]=1
+    ["skip-nginx"]=0
+    ["skip-sysctl"]=0
+)
+
+# ==============================================================================
+# Constants
+# ==============================================================================
+
+declare -g RSD_CENTRIFUGO_BIN="/usr/local/bin/centrifugo"
+declare -g RSD_CENTRIFUGO_CONFIG_DIR="/etc/centrifugo"
+declare -g RSD_CENTRIFUGO_CONFIG="${RSD_CENTRIFUGO_CONFIG_DIR}/config.json"
+declare -g RSD_CENTRIFUGO_SERVICE="centrifugo.service"
+declare -g RSD_CENTRIFUGO_USER="centrifugo"
+declare -g RSD_CENTRIFUGO_SYSCTL="/etc/sysctl.d/90-centrifugo.conf"
+declare -g RSD_CENTRIFUGO_NGINX_VHOST="/etc/nginx/sites-available/centrifugo"
+declare -g RSD_CENTRIFUGO_NGINX_ENABLED="/etc/nginx/sites-enabled/centrifugo"
+declare -g RSD_CENTRIFUGO_NGINX_OVERRIDE_DIR="/etc/systemd/system/nginx.service.d"
+
+# Resolved at registration time
+declare -g RSD_CENTRIFUGO_CLIENT_PORT=""
+declare -g RSD_CENTRIFUGO_INTERNAL_PORT=""
+declare -g RSD_CENTRIFUGO_SERVER_NAME=""
+declare -g RSD_CENTRIFUGO_ORIGINS=""
+declare -g RSD_CENTRIFUGO_TAILSCALE_IP=""
+
+# ==============================================================================
+# Platform Resolution
+# ==============================================================================
+
+# Resolve and validate target platform. Supports Ubuntu 26.04+ as primary
+# target with best-effort support for other Debian-family distros and Arch.
+#
+# @return int 0 on success.
+# @return exit 2 on unsupported platform.
+function rsd::l::r::centrifugo_install::resolve_platform() {
+    [[ -n "${RSD_CENTRIFUGO_PLATFORM_OK:-}" ]] && return 0
+
+    local host_alias="localhost"
+    if [[ -n "$RSD_REMOTE_TARGET" ]]; then
+        host_alias="${RSD_REMOTE_TARGET#@}"
+    fi
+
+    local distro="" family="" version="" arch=""
+    rsd::l::host::get_property "$host_alias" "family" family
+    rsd::l::host::get_property "$host_alias" "distro" distro
+    rsd::l::host::get_property "$host_alias" "version" version
+    rsd::l::host::get_property "$host_alias" "arch" arch
+
+    if [[ "$arch" != "x86_64" && "$arch" != "amd64" ]]; then
+        rsd::io::error "This recipe supports linux_amd64 only. Detected: $arch"
+        exit 2
+    fi
+
+    # Primary target: Ubuntu 26.04+
+    if [[ "$distro" == "ubuntu" ]]; then
+        if ! rsd::l::host::version_gte "$version" "26.04"; then
+            rsd::io::warn "This recipe targets Ubuntu 26.04+. Detected: $version. Proceeding with best effort."
+        fi
+    elif [[ "$family" == "debian" ]]; then
+        rsd::io::info "Detected Debian-family distro: $distro $version. Proceeding with best effort."
+    elif [[ "$family" == "arch" ]]; then
+        rsd::io::info "Detected Arch Linux. Proceeding with best effort."
+    else
+        rsd::io::warn "Untested distro: $distro ($family). Proceeding with best effort."
+    fi
+
+    declare -g RSD_CENTRIFUGO_PLATFORM_OK=1
+}
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::centrifugo_install::register() {
+    rsd::l::r::centrifugo_install::resolve_platform
+
+    # Resolve CLI options with defaults
+    RSD_CENTRIFUGO_CLIENT_PORT="${RSD_COMMAND_ARGS[client-port]:-8000}"
+    RSD_CENTRIFUGO_INTERNAL_PORT="${RSD_COMMAND_ARGS[internal-port]:-8001}"
+    RSD_CENTRIFUGO_SERVER_NAME="${RSD_COMMAND_ARGS[server-name]:-}"
+    RSD_CENTRIFUGO_ORIGINS="${RSD_COMMAND_ARGS[origins]:-}"
+
+    # Validate --server-name is provided when Nginx is not skipped
+    if [[ "${RSD_COMMAND_ARGS[skip-nginx]}" != "1" && -z "$RSD_CENTRIFUGO_SERVER_NAME" ]]; then
+        rsd::io::error "Missing required option: --server-name <domain>"
+        rsd::io::info  "Provide the domain for the Nginx vhost, or use --skip-nginx to skip Nginx configuration."
+        exit 2
+    fi
+
+    rsd::r::register_task "centrifugo_install::install_dependencies"
+    rsd::r::register_task "centrifugo_install::download_binary"
+    rsd::r::register_task "centrifugo_install::create_user"
+    rsd::r::register_task "centrifugo_install::generate_config"
+    rsd::r::register_task "centrifugo_install::setup_systemd"
+
+    # Nginx: include the nginx/install recipe as a self-healing prerequisite
+    if [[ "${RSD_COMMAND_ARGS[skip-nginx]}" != "1" ]]; then
+        rsd::r::include "nginx/install"
+        rsd::r::register_task "centrifugo_install::configure_nginx"
+    fi
+
+    if [[ "${RSD_COMMAND_ARGS[skip-sysctl]}" != "1" ]]; then
+        rsd::r::register_task "centrifugo_install::tune_kernel" "ignore"
+    fi
+
+    rsd::r::register_task "centrifugo_install::validate_install"
+}
+
+# ==============================================================================
+# Task: install_dependencies
+# ==============================================================================
+# Verifies that required host binaries are available for download and
+# config generation. Attempts to install jq if missing.
+
+function rsd::r::centrifugo_install::install_dependencies::pre_check() {
+    rsd::l::target::has_bin curl \
+        && rsd::l::target::has_bin tar \
+        && rsd::l::target::has_bin jq
+}
+
+function rsd::r::centrifugo_install::install_dependencies() {
+    rsd::io::status "Checking required dependencies..."
+
+    if ! rsd::l::target::has_bin curl; then
+        rsd::io::error "curl is required but not found on the target."
+        rsd::io::info  "Install: sudo apt-get install -y curl"
+        return 3
+    fi
+
+    if ! rsd::l::target::has_bin tar; then
+        rsd::io::error "tar is required but not found on the target."
+        rsd::io::info  "Install: sudo apt-get install -y tar"
+        return 3
+    fi
+
+    if ! rsd::l::target::has_bin jq; then
+        rsd::io::status "jq not found. Installing..."
+        if ! rsd::l::r::install_pkg jq; then
+            rsd::io::error "Failed to install jq."
+            return 3
+        fi
+    fi
+
+    # openssl is preferred for key generation but not strictly required
+    if ! rsd::l::target::has_bin openssl; then
+        rsd::io::warn "openssl not found. Will use /dev/urandom for key generation."
+    fi
+
+    rsd::io::ok "All dependencies satisfied."
+}
+
+# ==============================================================================
+# Task: download_binary
+# ==============================================================================
+# Fetches the latest Centrifugo linux_amd64 release from GitHub.
+# Uses secure temp file handling per AGENTS.md §8.
+
+function rsd::r::centrifugo_install::download_binary::pre_check() {
+    rsd::l::target::file_exists "$RSD_CENTRIFUGO_BIN"
+}
+
+function rsd::r::centrifugo_install::download_binary() {
+    rsd::io::status "Fetching latest Centrifugo release URL from GitHub..."
+
+    # Query GitHub API for the latest release download URL
+    local api_response=""
+    api_response=$(rsd::l::target::exec curl -fsSL \
+        "https://api.github.com/repos/centrifugal/centrifugo/releases/latest" 2>/dev/null)
+
+    if [[ -z "$api_response" ]]; then
+        rsd::io::error "Failed to query GitHub API for Centrifugo releases."
+        return 1
+    fi
+
+    local download_url=""
+    download_url=$(echo "$api_response" | rsd::l::target::exec jq -r \
+        '.assets[] | select(.name | test("linux_amd64.tar.gz$")) | .browser_download_url' 2>/dev/null)
+
+    if [[ -z "$download_url" ]]; then
+        rsd::io::error "Could not find linux_amd64.tar.gz asset in the latest release."
+        return 1
+    fi
+
+    local release_version=""
+    release_version=$(echo "$api_response" | rsd::l::target::exec jq -r '.tag_name' 2>/dev/null)
+    rsd::io::info "Latest release: ${release_version:-unknown}"
+    rsd::io::info "URL: $download_url"
+
+    # Create secure temp directory on the target
+    local tmpdir=""
+    tmpdir=$(rsd::l::target::mktemp "rsd-centrifugo.XXXXXX" "-d") || return 14
+
+    local archive_file="${tmpdir}/centrifugo.tar.gz"
+
+    # Download the archive
+    rsd::io::status "Downloading Centrifugo..."
+    if ! rsd::l::target::exec curl -fSL --retry 3 --retry-delay 2 \
+        -o "$archive_file" "$download_url" 2>/dev/null; then
+        rsd::io::error "Download failed: $download_url"
+        rsd::l::target::exec rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # Verify non-empty download
+    if ! rsd::l::target::exec test -s "$archive_file" 2>/dev/null; then
+        rsd::io::error "Downloaded file is empty or missing."
+        rsd::l::target::exec rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # Extract and install
+    rsd::io::status "Extracting binary..."
+    if ! rsd::l::target::exec tar -xzf "$archive_file" -C "$tmpdir" 2>/dev/null; then
+        rsd::io::error "Failed to extract archive."
+        rsd::l::target::exec rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # Move binary to /usr/local/bin/ with sudo
+    if ! rsd::l::target::exec_sudo "" mv "${tmpdir}/centrifugo" "$RSD_CENTRIFUGO_BIN"; then
+        rsd::io::error "Failed to move binary to $RSD_CENTRIFUGO_BIN"
+        rsd::l::target::exec rm -rf "$tmpdir"
+        return 1
+    fi
+
+    rsd::l::target::exec_sudo "" chmod 0755 "$RSD_CENTRIFUGO_BIN"
+
+    # Cleanup
+    rsd::l::target::exec rm -rf "$tmpdir"
+
+    rsd::io::ok "Centrifugo binary installed: $RSD_CENTRIFUGO_BIN"
+}
+
+# ==============================================================================
+# Task: create_user
+# ==============================================================================
+# Creates a dedicated system user for running the Centrifugo service.
+# No home directory, no login shell — principle of least privilege.
+
+function rsd::r::centrifugo_install::create_user::pre_check() {
+    rsd::l::target::exec id "$RSD_CENTRIFUGO_USER" &>/dev/null
+}
+
+function rsd::r::centrifugo_install::create_user() {
+    rsd::io::status "Creating system user '${RSD_CENTRIFUGO_USER}'..."
+
+    if ! rsd::l::target::exec_sudo "" useradd \
+        --system \
+        --no-create-home \
+        --shell /usr/sbin/nologin \
+        "$RSD_CENTRIFUGO_USER"; then
+        rsd::io::error "Failed to create user '$RSD_CENTRIFUGO_USER'."
+        return 1
+    fi
+
+    rsd::io::ok "System user '${RSD_CENTRIFUGO_USER}' created."
+}
+
+# ==============================================================================
+# Task: generate_config
+# ==============================================================================
+# Generates /etc/centrifugo/config.json with auto-generated cryptographic
+# secrets and Tailscale-aware internal binding.
+#
+# SECURITY: Config file is set to 0640 (root:centrifugo) so secrets are
+# readable only by root and the centrifugo service user.
+
+function rsd::r::centrifugo_install::generate_config::pre_check() {
+    rsd::l::target::file_exists "$RSD_CENTRIFUGO_CONFIG"
+}
+
+function rsd::r::centrifugo_install::generate_config() {
+    rsd::io::status "Generating Centrifugo configuration..."
+
+    # --- Generate cryptographic secrets ---
+    local token_hmac_secret="" api_key="" admin_password="" admin_secret=""
+
+    if rsd::l::target::has_bin openssl; then
+        token_hmac_secret=$(rsd::l::target::exec openssl rand -hex 32)
+        api_key=$(rsd::l::target::exec openssl rand -hex 32)
+        admin_password=$(rsd::l::target::exec openssl rand -hex 16)
+        admin_secret=$(rsd::l::target::exec openssl rand -hex 32)
+    else
+        # Fallback to /dev/urandom for environments without openssl
+        token_hmac_secret=$(rsd::l::target::exec sh -c "cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 64 | head -n 1")
+        api_key=$(rsd::l::target::exec sh -c "cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 64 | head -n 1")
+        admin_password=$(rsd::l::target::exec sh -c "cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 32 | head -n 1")
+        admin_secret=$(rsd::l::target::exec sh -c "cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 64 | head -n 1")
+    fi
+
+    bash::trim token_hmac_secret
+    bash::trim api_key
+    bash::trim admin_password
+    bash::trim admin_secret
+
+    if [[ -z "$token_hmac_secret" || -z "$api_key" || -z "$admin_password" || -z "$admin_secret" ]]; then
+        rsd::io::error "Failed to generate cryptographic secrets."
+        return 1
+    fi
+
+    # --- Detect Tailscale IP for internal binding ---
+    local internal_address="127.0.0.1"
+    RSD_CENTRIFUGO_TAILSCALE_IP=""
+
+    if rsd::l::target::has_bin tailscale; then
+        local ts_ip=""
+        ts_ip=$(rsd::l::target::exec tailscale ip -4 2>/dev/null)
+        bash::trim ts_ip
+        if [[ -n "$ts_ip" ]]; then
+            internal_address="$ts_ip"
+            RSD_CENTRIFUGO_TAILSCALE_IP="$ts_ip"
+            rsd::io::info "Tailscale detected. Internal port bound to: $ts_ip"
+        fi
+    fi
+
+    # If Tailscale binds internal port, also allow localhost for backend API calls
+    # by binding to 0.0.0.0 on internal port and relying on firewall/network isolation.
+    # Actually, Centrifugo only supports a single internal_address.
+    # We bind to the Tailscale IP; backend calls from localhost need to target that IP.
+    # Alternative: bind to 127.0.0.1 and access admin via SSH tunnel.
+    # We choose Tailscale IP when available for direct mesh access.
+
+    # --- Build allowed_origins array ---
+    local origins_json="[]"
+    if [[ -n "$RSD_CENTRIFUGO_ORIGINS" ]]; then
+        # Convert comma-separated list to JSON array via jq
+        origins_json=$(echo "$RSD_CENTRIFUGO_ORIGINS" | rsd::l::target::exec jq -R \
+            'split(",") | map(gsub("^\\s+|\\s+$"; ""))' 2>/dev/null)
+        if [[ -z "$origins_json" ]]; then
+            origins_json="[]"
+        fi
+    fi
+
+    # --- Build JSON config via jq ---
+    local config_json=""
+    config_json=$(rsd::l::target::exec jq -n \
+        --arg token_hmac "$token_hmac_secret" \
+        --arg api_key "$api_key" \
+        --arg admin_pw "$admin_password" \
+        --arg admin_sec "$admin_secret" \
+        --arg client_addr "127.0.0.1" \
+        --arg client_port "$RSD_CENTRIFUGO_CLIENT_PORT" \
+        --arg internal_addr "$internal_address" \
+        --arg internal_port "$RSD_CENTRIFUGO_INTERNAL_PORT" \
+        --argjson origins "$origins_json" \
+        '{
+            token_hmac_secret_key: $token_hmac,
+            api_key: $api_key,
+            admin: true,
+            admin_password: $admin_pw,
+            admin_secret: $admin_sec,
+            allowed_origins: $origins,
+            http_server: {
+                address: $client_addr,
+                port: $client_port,
+                internal_address: $internal_addr,
+                internal_port: $internal_port
+            }
+        }')
+
+    if [[ -z "$config_json" ]]; then
+        rsd::io::error "Failed to build JSON configuration."
+        return 1
+    fi
+
+    # --- Write config file ---
+    rsd::l::target::exec_sudo "" mkdir -p "$RSD_CENTRIFUGO_CONFIG_DIR"
+
+    # Stage through temp file for safe SSH transport
+    local tmpfile=""
+    tmpfile=$(rsd::l::target::mktemp "rsd-cfgcfg.XXXXXX") || return 14
+
+    printf '%s\n' "$config_json" | rsd::l::target::exec tee "$tmpfile" >/dev/null
+
+    rsd::l::target::exec_sudo "" mv "$tmpfile" "$RSD_CENTRIFUGO_CONFIG"
+    rsd::l::target::exec_sudo "" chown "root:${RSD_CENTRIFUGO_USER}" "$RSD_CENTRIFUGO_CONFIG"
+    rsd::l::target::exec_sudo "" chmod 0640 "$RSD_CENTRIFUGO_CONFIG"
+
+    rsd::io::ok "Configuration written: $RSD_CENTRIFUGO_CONFIG"
+    rsd::io::blank
+    rsd::io::banner "Generated Credentials (save these securely)"
+    rsd::io::blank
+    rsd::io::info "  API Key:        $api_key"
+    rsd::io::info "  Admin Password: $admin_password"
+    rsd::io::info "  Admin URL:      http://${internal_address}:${RSD_CENTRIFUGO_INTERNAL_PORT}/"
+    rsd::io::blank
+    rsd::io::warn "These credentials are shown ONCE. They are stored in $RSD_CENTRIFUGO_CONFIG."
+    rsd::io::blank
+}
+
+# ==============================================================================
+# Task: setup_systemd
+# ==============================================================================
+# Creates and installs the centrifugo.service unit file.
+# Includes LimitNOFILE=65536 for high-concurrency WebSocket workloads.
+
+function rsd::r::centrifugo_install::setup_systemd::pre_check() {
+    rsd::l::systemd::is_active "$RSD_CENTRIFUGO_SERVICE"
+}
+
+function rsd::r::centrifugo_install::setup_systemd() {
+    rsd::io::status "Installing systemd service..."
+
+    # Build unit file content manually to include LimitNOFILE
+    # (rsd::l::systemd::generate_service does not support arbitrary directives)
+    local unit_content=""
+    unit_content+="# Created by RSD"$'\n'
+    unit_content+="# Created: $(date -Iseconds)"$'\n'
+    unit_content+=""$'\n'
+    unit_content+="[Unit]"$'\n'
+    unit_content+="Description=Centrifugo Real-time Messaging Server"$'\n'
+    unit_content+="After=network.target"$'\n'
+    unit_content+=""$'\n'
+    unit_content+="[Service]"$'\n'
+    unit_content+="Type=simple"$'\n'
+    unit_content+="User=${RSD_CENTRIFUGO_USER}"$'\n'
+    unit_content+="Group=${RSD_CENTRIFUGO_USER}"$'\n'
+    unit_content+="ExecStart=${RSD_CENTRIFUGO_BIN} --config ${RSD_CENTRIFUGO_CONFIG}"$'\n'
+    unit_content+="Restart=on-failure"$'\n'
+    unit_content+="RestartSec=5"$'\n'
+    unit_content+="LimitNOFILE=65536"$'\n'
+    unit_content+="StandardOutput=journal"$'\n'
+    unit_content+="StandardError=journal"$'\n'
+    unit_content+=""$'\n'
+    unit_content+="[Install]"$'\n'
+    unit_content+="WantedBy=multi-user.target"$'\n'
+
+    # Install unit, daemon-reload, enable, and start
+    if ! rsd::l::systemd::install_unit "$RSD_CENTRIFUGO_SERVICE" "$unit_content" 1 1; then
+        rsd::io::error "Failed to install systemd service."
+        return 1
+    fi
+
+    # Brief sanity check
+    sleep 1
+    if ! rsd::l::systemd::is_active "$RSD_CENTRIFUGO_SERVICE"; then
+        rsd::io::error "Centrifugo service failed to start."
+        rsd::io::info  "Check: journalctl -u ${RSD_CENTRIFUGO_SERVICE} --no-pager -n 20"
+        return 1
+    fi
+
+    rsd::io::ok "Centrifugo service installed and running."
+}
+
+# ==============================================================================
+# Task: configure_nginx
+# ==============================================================================
+# Writes an Nginx virtual host that proxies /connection/* to Centrifugo
+# and blocks all internal endpoints (whitelist approach).
+#
+# The nginx/install recipe is included as a prerequisite via the
+# registration hook, ensuring Nginx is present before this task runs.
+
+function rsd::r::centrifugo_install::configure_nginx::pre_check() {
+    rsd::l::target::file_exists "$RSD_CENTRIFUGO_NGINX_ENABLED"
+}
+
+function rsd::r::centrifugo_install::configure_nginx() {
+    rsd::io::status "Configuring Nginx reverse proxy for Centrifugo..."
+
+    local server_name="$RSD_CENTRIFUGO_SERVER_NAME"
+    local backend_port="$RSD_CENTRIFUGO_CLIENT_PORT"
+
+    # Build the vhost content
+    local vhost=""
+    vhost+="# Centrifugo WebSocket Reverse Proxy — Generated by RSD"$'\n'
+    vhost+="# WARNING: This file is managed by RSD recipes. Manual edits will be overwritten."$'\n'
+    vhost+=""$'\n'
+    vhost+="map \$http_upgrade \$connection_upgrade {"$'\n'
+    vhost+="    default upgrade;"$'\n'
+    vhost+="    ''      close;"$'\n'
+    vhost+="}"$'\n'
+    vhost+=""$'\n'
+    vhost+="upstream centrifugo_backend {"$'\n'
+    vhost+="    server 127.0.0.1:${backend_port};"$'\n'
+    vhost+="}"$'\n'
+    vhost+=""$'\n'
+    vhost+="# HTTP -> HTTPS redirect"$'\n'
+    vhost+="server {"$'\n'
+    vhost+="    listen 80;"$'\n'
+    vhost+="    server_name ${server_name};"$'\n'
+    vhost+="    return 301 https://\$host\$request_uri;"$'\n'
+    vhost+="}"$'\n'
+    vhost+=""$'\n'
+    vhost+="server {"$'\n'
+    vhost+="    listen 443 ssl;"$'\n'
+    vhost+="    http2 on;"$'\n'
+    vhost+="    server_name ${server_name};"$'\n'
+    vhost+=""$'\n'
+    vhost+="    # SSL — uncomment after running: certbot certonly --nginx -d ${server_name}"$'\n'
+    vhost+="    # ssl_certificate     /etc/letsencrypt/live/${server_name}/fullchain.pem;"$'\n'
+    vhost+="    # ssl_certificate_key /etc/letsencrypt/live/${server_name}/privkey.pem;"$'\n'
+    vhost+=""$'\n'
+    vhost+="    # --- Whitelist: Only client-facing endpoints are proxied ---"$'\n'
+    vhost+="    location /connection {"$'\n'
+    vhost+="        proxy_pass              http://centrifugo_backend;"$'\n'
+    vhost+="        proxy_http_version      1.1;"$'\n'
+    vhost+="        proxy_set_header        Upgrade \$http_upgrade;"$'\n'
+    vhost+="        proxy_set_header        Connection \$connection_upgrade;"$'\n'
+    vhost+="        proxy_set_header        Host \$host;"$'\n'
+    vhost+="        proxy_set_header        X-Real-IP \$remote_addr;"$'\n'
+    vhost+="        proxy_set_header        X-Forwarded-For \$proxy_add_x_forwarded_for;"$'\n'
+    vhost+="        proxy_set_header        X-Forwarded-Proto \$scheme;"$'\n'
+    vhost+="        proxy_buffering         off;"$'\n'
+    vhost+="        proxy_request_buffering off;"$'\n'
+    vhost+="        proxy_read_timeout      3600s;"$'\n'
+    vhost+="        proxy_send_timeout      3600s;"$'\n'
+    vhost+="        proxy_socket_keepalive  on;"$'\n'
+    vhost+="    }"$'\n'
+    vhost+=""$'\n'
+    vhost+="    # Everything else returns 404 — /api, /admin, /metrics, /health"$'\n'
+    vhost+="    # are never exposed to the public internet."$'\n'
+    vhost+="    location / {"$'\n'
+    vhost+="        return 404;"$'\n'
+    vhost+="    }"$'\n'
+    vhost+="}"$'\n'
+
+    # Stage through temp file
+    local tmpfile=""
+    tmpfile=$(rsd::l::target::mktemp "rsd-ngxcfg.XXXXXX") || return 14
+
+    printf '%s' "$vhost" | rsd::l::target::exec tee "$tmpfile" >/dev/null
+
+    rsd::l::target::exec_sudo "" mv "$tmpfile" "$RSD_CENTRIFUGO_NGINX_VHOST"
+    rsd::l::target::exec_sudo "" chmod 0644 "$RSD_CENTRIFUGO_NGINX_VHOST"
+
+    # Create symlink in sites-enabled
+    if ! rsd::l::target::file_exists "$RSD_CENTRIFUGO_NGINX_ENABLED"; then
+        rsd::l::target::exec_sudo "" ln -s "$RSD_CENTRIFUGO_NGINX_VHOST" "$RSD_CENTRIFUGO_NGINX_ENABLED"
+    fi
+
+    # Validate and reload
+    if ! rsd::l::target::exec_sudo "" nginx -t 2>/dev/null; then
+        rsd::io::error "Nginx configuration test failed after adding Centrifugo vhost."
+        rsd::io::info  "Check: nginx -t"
+        # Remove the broken config to avoid leaving Nginx in a bad state
+        rsd::l::target::exec_sudo "" rm -f "$RSD_CENTRIFUGO_NGINX_ENABLED"
+        return 1
+    fi
+
+    rsd::l::systemd::reload "nginx.service"
+
+    rsd::io::ok "Nginx vhost configured for ${server_name}."
+    rsd::io::blank
+    rsd::io::info "SSL is commented out. To enable, run:"
+    rsd::io::info "  sudo certbot certonly --nginx -d ${server_name}"
+    rsd::io::info "Then uncomment the ssl_certificate lines in ${RSD_CENTRIFUGO_NGINX_VHOST}"
+    rsd::io::blank
+}
+
+# ==============================================================================
+# Task: tune_kernel (recovery=ignore)
+# ==============================================================================
+# Applies sysctl kernel parameters for high-concurrency WebSocket workloads
+# and raises Nginx's LimitNOFILE via a systemd drop-in override.
+#
+# This is an optional optimization task. Defaults work fine for small
+# deployments (<5k concurrent connections). Some environments (containers,
+# restrictive VPS) may block sysctl writes — hence recovery=ignore.
+
+function rsd::r::centrifugo_install::tune_kernel::pre_check() {
+    # Skip if the sysctl file already exists with our content
+    rsd::l::target::file_contains "net.core.somaxconn = 65535" "$RSD_CENTRIFUGO_SYSCTL" 2>/dev/null
+}
+
+function rsd::r::centrifugo_install::tune_kernel() {
+    rsd::io::status "Applying kernel tuning for high-concurrency WebSockets..."
+
+    # --- sysctl parameters ---
+    local sysctl_content=""
+    sysctl_content+="# Centrifugo high-concurrency WebSocket tuning — managed by RSD"$'\n'
+    sysctl_content+="# Increase listen backlog for burst WebSocket reconnects"$'\n'
+    sysctl_content+="net.core.somaxconn = 65535"$'\n'
+    sysctl_content+="# Match SYN queue to listen backlog"$'\n'
+    sysctl_content+="net.ipv4.tcp_max_syn_backlog = 65535"$'\n'
+    sysctl_content+="# Widen ephemeral port range for Nginx->Centrifugo proxy hops"$'\n'
+    sysctl_content+="net.ipv4.ip_local_port_range = 1024 65535"$'\n'
+    sysctl_content+="# Reduce TIME_WAIT duration to free sockets faster"$'\n'
+    sysctl_content+="net.ipv4.tcp_fin_timeout = 15"$'\n'
+
+    local tmpfile=""
+    tmpfile=$(rsd::l::target::mktemp "rsd-sysctl.XXXXXX") || return 14
+
+    printf '%s' "$sysctl_content" | rsd::l::target::exec tee "$tmpfile" >/dev/null
+
+    rsd::l::target::exec_sudo "" mv "$tmpfile" "$RSD_CENTRIFUGO_SYSCTL"
+    rsd::l::target::exec_sudo "" chmod 0644 "$RSD_CENTRIFUGO_SYSCTL"
+
+    # Apply immediately
+    if ! rsd::l::target::exec_sudo "" sysctl --system 2>/dev/null; then
+        rsd::io::warn "sysctl --system failed. Parameters may not be applied until reboot."
+    fi
+
+    # --- Nginx LimitNOFILE override ---
+    rsd::io::status "Raising Nginx LimitNOFILE..."
+
+    rsd::l::target::exec_sudo "" mkdir -p "$RSD_CENTRIFUGO_NGINX_OVERRIDE_DIR"
+
+    local override_content=""
+    override_content+="# Raise file descriptor limit for high-concurrency WebSocket proxying"$'\n'
+    override_content+="# Managed by RSD centrifugo/install recipe"$'\n'
+    override_content+="[Service]"$'\n'
+    override_content+="LimitNOFILE=65536"$'\n'
+
+    local tmpoverride=""
+    tmpoverride=$(rsd::l::target::mktemp "rsd-ngxovr.XXXXXX") || return 14
+
+    printf '%s' "$override_content" | rsd::l::target::exec tee "$tmpoverride" >/dev/null
+
+    rsd::l::target::exec_sudo "" mv "$tmpoverride" "${RSD_CENTRIFUGO_NGINX_OVERRIDE_DIR}/override.conf"
+    rsd::l::target::exec_sudo "" chmod 0644 "${RSD_CENTRIFUGO_NGINX_OVERRIDE_DIR}/override.conf"
+
+    rsd::l::systemd::daemon_reload
+
+    # Restart Nginx to pick up the new LimitNOFILE
+    rsd::l::systemd::restart "nginx.service"
+
+    rsd::io::ok "Kernel tuning applied."
+    rsd::io::info "  somaxconn:         65535"
+    rsd::io::info "  tcp_max_syn_backlog: 65535"
+    rsd::io::info "  ip_local_port_range: 1024-65535"
+    rsd::io::info "  tcp_fin_timeout:     15s"
+    rsd::io::info "  Nginx LimitNOFILE:   65536"
+}
+
+# ==============================================================================
+# Task: validate_install
+# ==============================================================================
+# Read-only smoke test. Verifies the full stack is operational.
+
+function rsd::r::centrifugo_install::validate_install() {
+    rsd::io::blank
+    rsd::io::banner "Validating Centrifugo Installation"
+    rsd::io::blank
+
+    local errors=0
+
+    # 1. Binary version
+    local version=""
+    version=$(rsd::l::target::exec "$RSD_CENTRIFUGO_BIN" version 2>/dev/null)
+    bash::trim version
+    if [[ -n "$version" ]]; then
+        rsd::io::info "Version:       $version"
+    else
+        rsd::io::error "Binary check:  FAILED ($RSD_CENTRIFUGO_BIN not executable)"
+        (( errors++ ))
+    fi
+
+    # 2. Config validation
+    if rsd::l::target::exec "$RSD_CENTRIFUGO_BIN" checkconfig \
+        --config "$RSD_CENTRIFUGO_CONFIG" &>/dev/null; then
+        rsd::io::info "Config check:  OK"
+    else
+        rsd::io::error "Config check:  FAILED"
+        (( errors++ ))
+    fi
+
+    # 3. Service status
+    if rsd::l::systemd::is_active "$RSD_CENTRIFUGO_SERVICE"; then
+        rsd::io::info "Service:       active"
+    else
+        rsd::io::error "Service:       NOT ACTIVE"
+        (( errors++ ))
+    fi
+
+    # 4. Nginx config test (if applicable)
+    if [[ "${RSD_COMMAND_ARGS[skip-nginx]}" != "1" ]]; then
+        if rsd::l::target::exec_sudo "" nginx -t 2>/dev/null; then
+            rsd::io::info "Nginx config:  OK"
+        else
+            rsd::io::error "Nginx config:  FAILED"
+            (( errors++ ))
+        fi
+    fi
+
+    # 5. Determine admin access URL
+    local admin_host="${RSD_CENTRIFUGO_TAILSCALE_IP:-127.0.0.1}"
+
+    rsd::io::blank
+    if [[ $errors -gt 0 ]]; then
+        rsd::io::fatal "$errors validation check(s) failed."
+        return 1
+    fi
+
+    rsd::io::banner "Centrifugo installation completed successfully."
+    rsd::io::blank
+    rsd::io::info "Binary:         $RSD_CENTRIFUGO_BIN"
+    rsd::io::info "Config:         $RSD_CENTRIFUGO_CONFIG"
+    rsd::io::info "Service:        $RSD_CENTRIFUGO_SERVICE"
+    rsd::io::info "Admin UI:       http://${admin_host}:${RSD_CENTRIFUGO_INTERNAL_PORT}/"
+
+    if [[ "${RSD_COMMAND_ARGS[skip-nginx]}" != "1" ]]; then
+        rsd::io::info "Client WS:     wss://${RSD_CENTRIFUGO_SERVER_NAME}/connection/websocket"
+        rsd::io::info "Nginx vhost:   $RSD_CENTRIFUGO_NGINX_VHOST"
+    fi
+
+    rsd::io::blank
+    rsd::io::info "Next steps:"
+    if [[ "${RSD_COMMAND_ARGS[skip-nginx]}" != "1" ]]; then
+        rsd::io::info "  1. Obtain SSL certificate:"
+        rsd::io::info "     sudo certbot certonly --nginx -d ${RSD_CENTRIFUGO_SERVER_NAME}"
+        rsd::io::info "  2. Uncomment SSL lines in ${RSD_CENTRIFUGO_NGINX_VHOST}"
+        rsd::io::info "  3. Reload Nginx: rsd systemd reload nginx.service"
+    fi
+    rsd::io::info "  • Configure your backend to publish via:"
+    rsd::io::info "    POST http://127.0.0.1:${RSD_CENTRIFUGO_INTERNAL_PORT}/api"
+    rsd::io::info "    Authorization: apikey <your-api-key>"
+    rsd::io::blank
+}
