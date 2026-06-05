@@ -1,0 +1,630 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# Let's Encrypt — SSL Certificate Provisioning Recipe
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Installs certbot, provisions a Let's Encrypt SSL certificate using the
+# webroot method, deploys nginx SSL/ACME snippets, and upgrades an existing
+# HTTP-only nginx vhost to HTTPS with automatic renewal.
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+#  1. install_certbot        — Ensure certbot is installed via apt.
+#  2. prepare_webroot        — Create /var/www/certbot, deploy ACME snippet,
+#                              inject ACME location into existing vhost.
+#  3. open_firewall          — Snapshot UFW state, ensure 80/443 are open.
+#  4. provision_certificate  — Run certbot certonly --webroot.
+#  5. deploy_ssl_snippet     — Write modern SSL/TLS params to nginx snippets.
+#  6. upgrade_vhost          — Rewrite vhost: HTTP-redirect + HTTPS block.
+#  7. install_deploy_hook    — Renewal hook that reloads nginx on cert renewal.
+#  8. verify_ssl             — nginx -t, reload, certbot dry-run.
+#
+# DESIGN DECISIONS
+# ----------------
+# - Uses `certbot certonly --webroot` (NOT `--nginx`). The --nginx plugin
+#   rewrites nginx configs, causing drift from RSD-managed templates. The
+#   webroot method is non-invasive: it places challenge files in a served
+#   directory and never touches nginx config files.
+#
+# - Nginx config uses snippets (`include snippets/*.conf`) for SSL params,
+#   ACME challenge locations, and WebSocket proxy headers. This keeps vhosts
+#   clean and the shared directives maintainable in one place.
+#
+# - Port 80 is opened permanently (required for ACME renewals). Port 443 is
+#   opened and stays open (required for serving HTTPS traffic).
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. Each task has a pre_check that detects
+# whether the desired state is already satisfied.
+#
+# CLI OPTIONS
+# -----------
+#   --domain <fqdn>   Domain to provision certificate for (REQUIRED)
+#   --email <addr>    Let's Encrypt account email for renewal notices (REQUIRED)
+#   --webroot <path>  Custom webroot path (default: /var/www/certbot)
+#   --vhost <name>    Nginx vhost filename in sites-available (auto-detected from domain)
+#
+# Usage: rsd recipe run letsencrypt/install --domain example.com --email admin@example.com
+#        rsd @target recipe run letsencrypt/install --domain example.com --email admin@example.com
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load dependencies
+[[ "$RSD_APT_LIB" != "1" ]]     && source "$(rsd::get_libdir_file lib/apt.lib)"
+[[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
+[[ "$RSD_UFW_LIB" != "1" ]]     && source "$(rsd::get_libdir_file lib/ufw.lib)"
+
+# Recipe-specific CLI options
+declare -g -A RSD_RECIPE_OPTIONS=(
+    ["domain"]=1
+    ["email"]=1
+    ["webroot"]=1
+    ["vhost"]=1
+)
+
+# ==============================================================================
+# Constants
+# ==============================================================================
+
+declare -g RSD_LE_DOMAIN=""
+declare -g RSD_LE_EMAIL=""
+declare -g RSD_LE_WEBROOT="/var/www/certbot"
+declare -g RSD_LE_VHOST_NAME=""
+declare -g RSD_LE_VHOST_PATH=""
+declare -g RSD_LE_CERT_DIR=""
+declare -g RSD_LE_SNIPPETS_DIR="/etc/nginx/snippets"
+declare -g RSD_LE_DEPLOY_HOOK="/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh"
+
+# UFW state snapshot — tracks which ports we opened so we know what to restore.
+# Values: "was_open" or "was_closed".
+declare -g RSD_LE_UFW_ACTIVE=0
+declare -g RSD_LE_UFW_80_STATE=""
+declare -g RSD_LE_UFW_443_STATE=""
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::letsencrypt_install::register() {
+    # Resolve CLI options
+    RSD_LE_DOMAIN="${RSD_COMMAND_ARGS[domain]:-}"
+    RSD_LE_EMAIL="${RSD_COMMAND_ARGS[email]:-}"
+    RSD_LE_WEBROOT="${RSD_COMMAND_ARGS[webroot]:-/var/www/certbot}"
+
+    if [[ -z "$RSD_LE_DOMAIN" ]]; then
+        rsd::io::error "Missing required option: --domain <fqdn>"
+        exit 2
+    fi
+    if [[ -z "$RSD_LE_EMAIL" ]]; then
+        rsd::io::error "Missing required option: --email <address>"
+        exit 2
+    fi
+
+    # Derive paths from domain
+    RSD_LE_CERT_DIR="/etc/letsencrypt/live/${RSD_LE_DOMAIN}"
+
+    # Auto-detect vhost filename: look for a vhost containing the domain
+    # as server_name, or use the --vhost override.
+    if [[ -n "${RSD_COMMAND_ARGS[vhost]:-}" ]]; then
+        RSD_LE_VHOST_NAME="${RSD_COMMAND_ARGS[vhost]}"
+    else
+        # Attempt to find vhost by domain on the target
+        local detected=""
+        detected=$(rsd::l::target::exec_sudo "" \
+            grep -rl "server_name.*${RSD_LE_DOMAIN}" /etc/nginx/sites-available/ 2>/dev/null \
+            | head -n1)
+        bash::trim detected
+        if [[ -n "$detected" ]]; then
+            RSD_LE_VHOST_NAME=$(basename "$detected")
+        else
+            rsd::io::error "Could not auto-detect nginx vhost for domain '${RSD_LE_DOMAIN}'."
+            rsd::io::info  "Use --vhost <filename> to specify the vhost file in /etc/nginx/sites-available/"
+            exit 2
+        fi
+    fi
+    RSD_LE_VHOST_PATH="/etc/nginx/sites-available/${RSD_LE_VHOST_NAME}"
+
+    rsd::io::info "Domain:  ${RSD_LE_DOMAIN}"
+    rsd::io::info "Email:   ${RSD_LE_EMAIL}"
+    rsd::io::info "Vhost:   ${RSD_LE_VHOST_PATH}"
+    rsd::io::info "Webroot: ${RSD_LE_WEBROOT}"
+    rsd::io::blank
+
+    rsd::r::register_task "letsencrypt_install::install_certbot"
+    rsd::r::register_task "letsencrypt_install::prepare_webroot"
+    rsd::r::register_task "letsencrypt_install::open_firewall" "ignore"
+    rsd::r::register_task "letsencrypt_install::provision_certificate"
+    rsd::r::register_task "letsencrypt_install::deploy_ssl_snippet"
+    rsd::r::register_task "letsencrypt_install::upgrade_vhost"
+    rsd::r::register_task "letsencrypt_install::install_deploy_hook"
+    rsd::r::register_task "letsencrypt_install::verify_ssl"
+}
+
+# ==============================================================================
+# Task 1: Install Certbot
+# ==============================================================================
+
+function rsd::r::letsencrypt_install::install_certbot::pre_check() {
+    rsd::l::target::has_bin certbot
+}
+
+function rsd::r::letsencrypt_install::install_certbot() {
+    rsd::io::status "Installing certbot..."
+    if ! rsd::l::r::install_pkg certbot; then
+        rsd::io::error "Failed to install certbot."
+        return 1
+    fi
+    rsd::io::ok "Certbot installed."
+}
+
+# ==============================================================================
+# Task 2: Prepare Webroot
+# ==============================================================================
+
+# pre_check: webroot dir exists AND the ACME snippet is deployed AND
+# the current vhost includes the ACME snippet.
+function rsd::r::letsencrypt_install::prepare_webroot::pre_check() {
+    rsd::l::target::file_exists "${RSD_LE_WEBROOT}/.keep" || return 1
+    rsd::l::target::file_exists "${RSD_LE_SNIPPETS_DIR}/acme-challenge.conf" || return 1
+
+    # Vhost must already include the ACME snippet
+    local vhost_content=""
+    vhost_content=$(rsd::l::target::exec_sudo "" cat "$RSD_LE_VHOST_PATH" 2>/dev/null)
+    [[ "$vhost_content" == *"acme-challenge.conf"* ]]
+}
+
+function rsd::r::letsencrypt_install::prepare_webroot() {
+    # 1. Create webroot directory
+    rsd::io::status "Creating webroot directory: ${RSD_LE_WEBROOT}"
+    rsd::l::target::exec_sudo "" mkdir -p "${RSD_LE_WEBROOT}"
+    rsd::l::target::exec_sudo "" chown www-data:www-data "${RSD_LE_WEBROOT}"
+    rsd::l::target::exec_sudo "" chmod 0755 "${RSD_LE_WEBROOT}"
+    rsd::l::target::exec_sudo "" touch "${RSD_LE_WEBROOT}/.keep"
+
+    # 2. Deploy ACME challenge snippet
+    rsd::io::status "Deploying ACME challenge snippet..."
+    rsd::l::target::exec_sudo "" mkdir -p "${RSD_LE_SNIPPETS_DIR}"
+
+    local acme_snippet=""
+    printf -v acme_snippet '# ACME HTTP-01 challenge handler for Let'"'"'s Encrypt / certbot
+# Include this in any HTTP server block that needs certificate validation.
+# Managed by RSD — do not edit manually.
+
+location ^~ /.well-known/acme-challenge/ {
+    default_type "text/plain";
+    root %s;
+    allow all;
+}' "$RSD_LE_WEBROOT"
+
+    local tmpfile=""
+    tmpfile=$(rsd::l::target::mktemp "rsd-acme.XXXXXX") || return 14
+    printf '%s\n' "$acme_snippet" | rsd::l::target::exec tee "$tmpfile" >/dev/null
+    rsd::l::target::exec_sudo "" mv "$tmpfile" "${RSD_LE_SNIPPETS_DIR}/acme-challenge.conf"
+    rsd::l::target::exec_sudo "" chmod 0644 "${RSD_LE_SNIPPETS_DIR}/acme-challenge.conf"
+
+    # 3. Inject ACME include into existing vhost (HTTP block only)
+    # Read current vhost, add the include line if missing.
+    local vhost_content=""
+    vhost_content=$(rsd::l::target::exec_sudo "" cat "$RSD_LE_VHOST_PATH" 2>/dev/null)
+
+    if [[ "$vhost_content" != *"acme-challenge.conf"* ]]; then
+        rsd::io::status "Injecting ACME include into vhost..."
+
+        # Insert `include snippets/acme-challenge.conf;` after `server_name` in the HTTP block.
+        # Use sed to find the first `server_name` line in a `listen 80` block and add after it.
+        rsd::l::target::exec_sudo "" sed -i \
+            '/listen 80;/,/}/ { /server_name/a\    include snippets/acme-challenge.conf;' \
+            -e '}' "$RSD_LE_VHOST_PATH"
+
+        # Verify nginx still loads cleanly
+        if ! rsd::l::target::exec_sudo "" nginx -t 2>&1; then
+            rsd::io::error "Nginx config test failed after injecting ACME include."
+            return 1
+        fi
+        rsd::l::target::exec_sudo "" systemctl reload nginx
+    fi
+
+    rsd::io::ok "Webroot and ACME snippet prepared."
+}
+
+# ==============================================================================
+# Task 3: Open Firewall
+# ==============================================================================
+
+function rsd::r::letsencrypt_install::open_firewall::pre_check() {
+    # Skip entirely if UFW is not installed or not active
+    rsd::l::target::has_bin ufw || return 0
+    rsd::l::ufw::is_active || return 0
+
+    # If UFW is active, both ports must already be allowed
+    rsd::l::ufw::is_port_allowed "80/tcp" || return 1
+    rsd::l::ufw::is_port_allowed "443/tcp" || return 1
+    return 0
+}
+
+function rsd::r::letsencrypt_install::open_firewall() {
+    # If UFW is not active, nothing to do
+    if ! rsd::l::target::has_bin ufw || ! rsd::l::ufw::is_active; then
+        rsd::io::info "UFW not active — no firewall changes needed."
+        return 0
+    fi
+
+    RSD_LE_UFW_ACTIVE=1
+    rsd::io::status "UFW is active. Ensuring ports 80/443 are open..."
+
+    # Snapshot current state
+    if rsd::l::ufw::is_port_allowed "80/tcp"; then
+        RSD_LE_UFW_80_STATE="was_open"
+        rsd::io::info "Port 80/tcp: already allowed."
+    else
+        RSD_LE_UFW_80_STATE="was_closed"
+        rsd::io::status "Opening port 80/tcp (required permanently for ACME renewals)..."
+        rsd::l::ufw::allow "80/tcp"
+    fi
+
+    if rsd::l::ufw::is_port_allowed "443/tcp"; then
+        RSD_LE_UFW_443_STATE="was_open"
+        rsd::io::info "Port 443/tcp: already allowed."
+    else
+        RSD_LE_UFW_443_STATE="was_closed"
+        rsd::io::status "Opening port 443/tcp (required for HTTPS traffic)..."
+        rsd::l::ufw::allow "443/tcp"
+    fi
+
+    rsd::io::ok "Firewall ports configured."
+}
+
+# ==============================================================================
+# Task 4: Provision Certificate
+# ==============================================================================
+
+function rsd::r::letsencrypt_install::provision_certificate::pre_check() {
+    rsd::l::target::file_exists "${RSD_LE_CERT_DIR}/fullchain.pem"
+}
+
+function rsd::r::letsencrypt_install::provision_certificate() {
+    rsd::io::status "Provisioning SSL certificate for ${RSD_LE_DOMAIN}..."
+    rsd::io::info "Method: webroot (${RSD_LE_WEBROOT})"
+
+    if ! rsd::l::target::exec_sudo "" certbot certonly \
+        --webroot \
+        -w "$RSD_LE_WEBROOT" \
+        --non-interactive \
+        --agree-tos \
+        --email "$RSD_LE_EMAIL" \
+        -d "$RSD_LE_DOMAIN"; then
+        rsd::io::error "Certbot failed to provision certificate."
+        rsd::io::info "Check: certbot certificates"
+        return 1
+    fi
+
+    # Verify the cert was actually created
+    if ! rsd::l::target::file_exists "${RSD_LE_CERT_DIR}/fullchain.pem"; then
+        rsd::io::error "Certificate files not found after certbot succeeded."
+        return 1
+    fi
+
+    rsd::io::ok "Certificate provisioned: ${RSD_LE_CERT_DIR}"
+}
+
+# ==============================================================================
+# Task 5: Deploy SSL Snippet
+# ==============================================================================
+
+function rsd::r::letsencrypt_install::deploy_ssl_snippet::pre_check() {
+    rsd::l::target::file_exists "${RSD_LE_SNIPPETS_DIR}/ssl-params.conf"
+}
+
+function rsd::r::letsencrypt_install::deploy_ssl_snippet() {
+    rsd::io::status "Deploying SSL parameters snippet..."
+
+    local ssl_snippet=""
+    printf -v ssl_snippet '# Modern SSL/TLS parameters for nginx
+# Managed by RSD — do not edit manually.
+# Reference: https://ssl-config.mozilla.org/ (Intermediate profile)
+
+# Protocols: TLS 1.2 + 1.3 only (no SSLv3, TLS 1.0/1.1)
+ssl_protocols TLSv1.2 TLSv1.3;
+
+# Ciphers: Mozilla Intermediate profile
+ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-CHACHA20-POLY1305;
+ssl_prefer_server_ciphers off;
+
+# Session cache: shared across all workers
+ssl_session_timeout 1d;
+ssl_session_cache shared:SSL:10m;
+ssl_session_tickets off;
+
+# OCSP stapling — verify certificate revocation status inline
+ssl_stapling on;
+ssl_stapling_verify on;
+
+# HSTS — tell browsers to always use HTTPS (1 year)
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;'
+
+    local tmpfile=""
+    tmpfile=$(rsd::l::target::mktemp "rsd-sslsnip.XXXXXX") || return 14
+    printf '%s\n' "$ssl_snippet" | rsd::l::target::exec tee "$tmpfile" >/dev/null
+    rsd::l::target::exec_sudo "" mv "$tmpfile" "${RSD_LE_SNIPPETS_DIR}/ssl-params.conf"
+    rsd::l::target::exec_sudo "" chmod 0644 "${RSD_LE_SNIPPETS_DIR}/ssl-params.conf"
+
+    rsd::io::ok "SSL parameters snippet deployed: ${RSD_LE_SNIPPETS_DIR}/ssl-params.conf"
+}
+
+# ==============================================================================
+# Task 6: Upgrade Vhost (HTTP-only → HTTPS)
+# ==============================================================================
+
+function rsd::r::letsencrypt_install::upgrade_vhost::pre_check() {
+    # Already upgraded if the vhost contains `listen 443 ssl`
+    local vhost_content=""
+    vhost_content=$(rsd::l::target::exec_sudo "" cat "$RSD_LE_VHOST_PATH" 2>/dev/null)
+    [[ "$vhost_content" == *"listen 443 ssl"* ]]
+}
+
+function rsd::r::letsencrypt_install::upgrade_vhost() {
+    rsd::io::status "Upgrading nginx vhost to HTTPS: ${RSD_LE_VHOST_PATH}"
+
+    # Read the existing vhost to extract upstream and location blocks.
+    # We need to detect:
+    # 1. The upstream block name and backend address
+    # 2. The location blocks inside the current server block
+    # 3. Whether a proxy-websocket snippet should be included
+    local existing_vhost=""
+    existing_vhost=$(rsd::l::target::exec_sudo "" cat "$RSD_LE_VHOST_PATH" 2>/dev/null)
+
+    if [[ -z "$existing_vhost" ]]; then
+        rsd::io::error "Cannot read existing vhost: ${RSD_LE_VHOST_PATH}"
+        return 1
+    fi
+
+    # Extract upstream block if present (preserve it verbatim)
+    local upstream_block=""
+    upstream_block=$(echo "$existing_vhost" | sed -n '/^upstream /,/^}/p')
+
+    # Extract map block if present (e.g., WebSocket upgrade map)
+    local map_block=""
+    map_block=$(echo "$existing_vhost" | sed -n '/^map /,/^}/p')
+
+    # Detect if this is a WebSocket proxy (has proxy_set_header Upgrade)
+    local has_websocket=0
+    if [[ "$existing_vhost" == *"proxy_set_header"*"Upgrade"* ]]; then
+        has_websocket=1
+
+        # Deploy the proxy-websocket snippet if it doesn't exist yet
+        if ! rsd::l::target::file_exists "${RSD_LE_SNIPPETS_DIR}/proxy-websocket.conf"; then
+            rsd::l::r::letsencrypt_install::deploy_websocket_snippet
+        fi
+    fi
+
+    # Extract the upstream name for proxy_pass (e.g., "centrifugo_backend")
+    local upstream_name=""
+    if [[ -n "$upstream_block" ]]; then
+        upstream_name=$(echo "$upstream_block" | head -1 | sed 's/upstream \([^ {]*\).*/\1/')
+        bash::trim upstream_name
+    fi
+
+    # Detect proxy location paths from existing vhost (e.g., /connection)
+    local -a proxy_locations=()
+    local loc
+    while IFS= read -r loc; do
+        bash::trim loc
+        [[ -n "$loc" ]] && proxy_locations+=("$loc")
+    done < <(echo "$existing_vhost" | grep -oP 'location\s+\K/[^\s{]+')
+
+    # Remove the catch-all "/" if it's a deny/404 block (not a proxy)
+    local -a filtered_locations=()
+    for loc in "${proxy_locations[@]}"; do
+        if [[ "$loc" == "/" ]]; then
+            continue
+        fi
+        filtered_locations+=("$loc")
+    done
+
+    # --- Build the new vhost ---
+    local vhost=""
+    local domain="$RSD_LE_DOMAIN"
+
+    # Header
+    vhost+="# HTTPS Reverse Proxy — Generated by RSD (letsencrypt/install)"$'\n'
+    vhost+="# Managed by RSD — do not edit manually."$'\n'
+    vhost+=""$'\n'
+
+    # Map block (WebSocket upgrade)
+    if [[ -n "$map_block" ]]; then
+        vhost+="${map_block}"$'\n'
+        vhost+=""$'\n'
+    fi
+
+    # Upstream block
+    if [[ -n "$upstream_block" ]]; then
+        vhost+="${upstream_block}"$'\n'
+        vhost+=""$'\n'
+    fi
+
+    # HTTP → HTTPS redirect + ACME challenge
+    vhost+="# HTTP: ACME challenge + redirect to HTTPS"$'\n'
+    vhost+="server {"$'\n'
+    vhost+="    listen 80;"$'\n'
+    vhost+="    server_name ${domain};"$'\n'
+    vhost+=""$'\n'
+    vhost+="    include snippets/acme-challenge.conf;"$'\n'
+    vhost+=""$'\n'
+    vhost+="    location / {"$'\n'
+    vhost+="        return 301 https://\$host\$request_uri;"$'\n'
+    vhost+="    }"$'\n'
+    vhost+="}"$'\n'
+    vhost+=""$'\n'
+
+    # HTTPS server block
+    vhost+="# HTTPS: TLS termination + reverse proxy"$'\n'
+    vhost+="server {"$'\n'
+    vhost+="    listen 443 ssl;"$'\n'
+    vhost+="    http2 on;"$'\n'
+    vhost+="    server_name ${domain};"$'\n'
+    vhost+=""$'\n'
+    vhost+="    ssl_certificate     ${RSD_LE_CERT_DIR}/fullchain.pem;"$'\n'
+    vhost+="    ssl_certificate_key ${RSD_LE_CERT_DIR}/privkey.pem;"$'\n'
+    vhost+="    include snippets/ssl-params.conf;"$'\n'
+    vhost+=""$'\n'
+
+    # Proxy location blocks
+    for loc in "${filtered_locations[@]}"; do
+        vhost+="    location ${loc} {"$'\n'
+        if [[ -n "$upstream_name" ]]; then
+            vhost+="        proxy_pass http://${upstream_name};"$'\n'
+        fi
+        if [[ "$has_websocket" -eq 1 ]]; then
+            vhost+="        include snippets/proxy-websocket.conf;"$'\n'
+        fi
+        vhost+="    }"$'\n'
+        vhost+=""$'\n'
+    done
+
+    # Catch-all deny
+    vhost+="    location / {"$'\n'
+    vhost+="        return 404;"$'\n'
+    vhost+="    }"$'\n'
+    vhost+="}"$'\n'
+
+    # Write the new vhost
+    local tmpfile=""
+    tmpfile=$(rsd::l::target::mktemp "rsd-vhost.XXXXXX") || return 14
+    printf '%s' "$vhost" | rsd::l::target::exec tee "$tmpfile" >/dev/null
+    rsd::l::target::exec_sudo "" mv "$tmpfile" "$RSD_LE_VHOST_PATH"
+    rsd::l::target::exec_sudo "" chmod 0644 "$RSD_LE_VHOST_PATH"
+
+    # Test and reload
+    if ! rsd::l::target::exec_sudo "" nginx -t 2>&1; then
+        rsd::io::error "Nginx config test failed after vhost upgrade."
+        rsd::io::info "Restore previous config and debug with: nginx -t"
+        return 1
+    fi
+
+    rsd::l::target::exec_sudo "" systemctl reload nginx
+
+    rsd::io::ok "Vhost upgraded to HTTPS."
+}
+
+# Deploy the proxy-websocket snippet (called from upgrade_vhost when needed).
+function rsd::l::r::letsencrypt_install::deploy_websocket_snippet() {
+    rsd::io::status "Deploying WebSocket proxy snippet..."
+
+    local ws_snippet=""
+    printf -v ws_snippet '# WebSocket reverse proxy headers
+# Include this inside a location block that proxies WebSocket connections.
+# Managed by RSD — do not edit manually.
+
+proxy_http_version      1.1;
+proxy_set_header        Upgrade $http_upgrade;
+proxy_set_header        Connection $connection_upgrade;
+proxy_set_header        Host $host;
+proxy_set_header        X-Real-IP $remote_addr;
+proxy_set_header        X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header        X-Forwarded-Proto $scheme;
+proxy_buffering         off;
+proxy_request_buffering off;
+proxy_read_timeout      3600s;
+proxy_send_timeout      3600s;
+proxy_socket_keepalive  on;'
+
+    local tmpfile=""
+    tmpfile=$(rsd::l::target::mktemp "rsd-wsproxy.XXXXXX") || return 14
+    printf '%s\n' "$ws_snippet" | rsd::l::target::exec tee "$tmpfile" >/dev/null
+    rsd::l::target::exec_sudo "" mv "$tmpfile" "${RSD_LE_SNIPPETS_DIR}/proxy-websocket.conf"
+    rsd::l::target::exec_sudo "" chmod 0644 "${RSD_LE_SNIPPETS_DIR}/proxy-websocket.conf"
+
+    rsd::io::ok "WebSocket proxy snippet deployed."
+}
+
+# ==============================================================================
+# Task 7: Install Deploy Hook
+# ==============================================================================
+
+function rsd::r::letsencrypt_install::install_deploy_hook::pre_check() {
+    rsd::l::target::file_exists "$RSD_LE_DEPLOY_HOOK"
+}
+
+function rsd::r::letsencrypt_install::install_deploy_hook() {
+    rsd::io::status "Installing certbot deploy hook for nginx..."
+
+    local hook_script='#!/bin/bash
+# Certbot deploy hook — reloads nginx after successful certificate renewal.
+# Managed by RSD — do not edit manually.
+
+nginx -t && systemctl reload nginx'
+
+    rsd::l::target::exec_sudo "" mkdir -p "$(dirname "$RSD_LE_DEPLOY_HOOK")"
+
+    local tmpfile=""
+    tmpfile=$(rsd::l::target::mktemp "rsd-hook.XXXXXX") || return 14
+    printf '%s\n' "$hook_script" | rsd::l::target::exec tee "$tmpfile" >/dev/null
+    rsd::l::target::exec_sudo "" mv "$tmpfile" "$RSD_LE_DEPLOY_HOOK"
+    rsd::l::target::exec_sudo "" chmod 0755 "$RSD_LE_DEPLOY_HOOK"
+
+    rsd::io::ok "Deploy hook installed: ${RSD_LE_DEPLOY_HOOK}"
+}
+
+# ==============================================================================
+# Task 8: Verify SSL
+# ==============================================================================
+
+function rsd::r::letsencrypt_install::verify_ssl() {
+    rsd::io::blank
+    rsd::io::banner "Verifying SSL Configuration"
+    rsd::io::blank
+
+    # 1. Nginx config test
+    rsd::io::status "Testing nginx configuration..."
+    if rsd::l::target::exec_sudo "" nginx -t 2>&1; then
+        rsd::io::ok "Nginx config: OK"
+    else
+        rsd::io::error "Nginx config test failed."
+        return 1
+    fi
+
+    # 2. Certbot certificate listing
+    rsd::io::status "Checking certificate status..."
+    rsd::l::target::exec_sudo "" certbot certificates 2>&1 | while IFS= read -r line; do
+        rsd::io::info "  $line"
+    done
+
+    # 3. Renewal dry run
+    rsd::io::status "Testing renewal (dry run)..."
+    if rsd::l::target::exec_sudo "" certbot renew --dry-run 2>&1; then
+        rsd::io::ok "Renewal dry run: OK"
+    else
+        rsd::io::warn "Renewal dry run failed. Check certbot logs."
+    fi
+
+    # 4. Renewal timer
+    rsd::io::status "Checking renewal timer..."
+    local timer_status=""
+    timer_status=$(rsd::l::target::exec systemctl list-timers 2>/dev/null | grep -i certbot)
+    if [[ -n "$timer_status" ]]; then
+        rsd::io::ok "Renewal timer active."
+        rsd::io::info "  $timer_status"
+    else
+        rsd::io::warn "No certbot renewal timer detected. Manual renewal may be needed."
+    fi
+
+    rsd::io::blank
+    rsd::io::banner "SSL provisioning complete for ${RSD_LE_DOMAIN}"
+    rsd::io::blank
+    rsd::io::info "Certificate: ${RSD_LE_CERT_DIR}/"
+    rsd::io::info "Vhost:       ${RSD_LE_VHOST_PATH}"
+    rsd::io::info "Snippets:    ${RSD_LE_SNIPPETS_DIR}/"
+    rsd::io::info "Deploy hook: ${RSD_LE_DEPLOY_HOOK}"
+    rsd::io::blank
+}

@@ -32,7 +32,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_UFW_LIB=1
-RSD_UFW_LIB_VERSION="0.1.0"
+RSD_UFW_LIB_VERSION="0.2.0"
 
 # ==============================================================================
 # Query Functions
@@ -54,6 +54,28 @@ function rsd::l::ufw::get_status() {
     local _out_var="$1"
     declare -n _r_status="$_out_var"
     _r_status=$(rsd::l::target::exec_sudo "" ufw status verbose 2>/dev/null)
+}
+
+# Check if UFW is currently active (enforcing rules).
+# Uses a lightweight non-verbose status call for speed.
+#
+# @return int 0 if active, 1 if inactive or UFW not present.
+function rsd::l::ufw::is_active() {
+    local status=""
+    status=$(rsd::l::target::exec_sudo "" ufw status 2>/dev/null)
+    [[ "$status" == *"Status: active"* ]]
+}
+
+# Check if a specific port/proto combination has an ALLOW rule.
+# Parses the verbose status output for a matching ALLOW IN line.
+#
+# @param string $1 Port/proto spec (e.g., "80/tcp", "443/tcp", "22").
+# @return int 0 if the port is allowed, 1 if not.
+function rsd::l::ufw::is_port_allowed() {
+    local rule="$1"
+    local status=""
+    rsd::l::ufw::get_status status
+    [[ "$status" == *"${rule}"*"ALLOW"* ]]
 }
 
 # ==============================================================================
