@@ -1,0 +1,370 @@
+#!/usr/bin/env bash
+
+# VM management driver dispatcher and common utilities.
+# namespace rsd::l::vm::
+
+# @see docs/vm.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+if [[ "$RSD_VM_LIB" == "1" ]]; then
+    return 0
+fi
+RSD_VM_LIB=1
+RSD_VM_LIB_VERSION="0.1.0"
+
+# Load structured IO messaging
+[[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
+
+# Load configuration subsystem
+[[ "$RSD_CONFIG_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/config.lib)"
+
+# Load VM configuration
+declare -g -A R_INI_vm 2>/dev/null || true
+if bash::is_function rsd::config::get_file; then
+    eval "$(rsd::config::get_file vm)"
+fi
+
+# ==============================================================================
+# Configuration Accessors
+# ==============================================================================
+
+# Resolve a VM config value with fallback chain: CLI → vm.ini → hardcoded default.
+#
+# @param string $1 Config key (e.g., "defaults.driver").
+# @param string $2 Hardcoded fallback value.
+# @return stdout Resolved value.
+function rsd::l::vm::config() {
+    local key="$1"
+    local fallback="$2"
+
+    if [[ -n "${R_INI_vm[$key]:-}" ]]; then
+        echo "${R_INI_vm[$key]}"
+    else
+        echo "$fallback"
+    fi
+}
+
+# ==============================================================================
+# VM Name Validation
+# ==============================================================================
+
+# Validate a VM name against libvirt/QEMU naming rules.
+# Allows alphanumeric characters, hyphens, and underscores. Must start with
+# a letter. Length 1-63 characters (DNS label constraint for hostname reuse).
+#
+# @param string $1 The proposed VM name.
+# @return int 0 if valid, 1 if invalid.
+function rsd::l::vm::validate_name() {
+    local name="$1"
+
+    if [[ -z "$name" ]]; then
+        rsd::io::error "VM name cannot be empty."
+        return 1
+    fi
+
+    if [[ ${#name} -gt 63 ]]; then
+        rsd::io::error "VM name must be 63 characters or fewer (got ${#name})."
+        return 1
+    fi
+
+    if [[ ! "$name" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ ]]; then
+        rsd::io::error "VM name must start with a letter and contain only letters, digits, hyphens, or underscores."
+        return 1
+    fi
+
+    return 0
+}
+
+# ==============================================================================
+# Snapshot Name Sanitization
+# ==============================================================================
+
+# Sanitize a snapshot name for safe use with virsh.
+# Replaces spaces and special characters with hyphens. Trims length to 63.
+#
+# @param string& $1 nameref variable to sanitize in place.
+# @return void
+function rsd::l::vm::sanitize_snapshot_name() {
+    local _out_var="$1"
+    declare -n _r_snap="$_out_var"
+
+    # Replace whitespace and non-alphanumeric (except hyphen/underscore) with hyphen
+    _r_snap="${_r_snap//[^a-zA-Z0-9_-]/-}"
+    # Collapse consecutive hyphens
+    while [[ "$_r_snap" == *--* ]]; do
+        _r_snap="${_r_snap//--/-}"
+    done
+    # Trim leading/trailing hyphens
+    _r_snap="${_r_snap#-}"
+    _r_snap="${_r_snap%-}"
+    # Truncate to 63 characters
+    _r_snap="${_r_snap:0:63}"
+}
+
+# ==============================================================================
+# Image Registry
+# ==============================================================================
+
+# Resolve an --os specification to a cloud image download URL.
+# Parses <distro>-<version> format and looks up in data/vm/images.ini.
+#
+# @param string  $1 OS spec (e.g., "ubuntu-26.04").
+# @param string& $2 nameref: resolved distro name.
+# @param string& $3 nameref: resolved version string.
+# @param string& $4 nameref: resolved download URL.
+# @return int 0 on success, 1 if OS spec is invalid or not found.
+function rsd::l::vm::resolve_image() {
+    local os_spec="$1"
+    local _out_distro="$2"; declare -n _r_distro="$_out_distro"
+    local _out_version="$3"; declare -n _r_version="$_out_version"
+    local _out_url="$4"; declare -n _r_url="$_out_url"
+
+    # Parse distro-version
+    if [[ "$os_spec" != *-* ]]; then
+        rsd::io::error "Invalid OS spec '$os_spec'. Expected format: <distro>-<version> (e.g., ubuntu-26.04)."
+        return 1
+    fi
+
+    _r_distro="${os_spec%%-*}"
+    _r_version="${os_spec#*-}"
+
+    # Load image registry
+    local images_file
+    images_file="$(rsd::get_libdir_file data/vm/images.ini)"
+    if [[ ! -f "$images_file" ]]; then
+        rsd::io::error "Image registry not found: data/vm/images.ini"
+        return 1
+    fi
+
+    declare -A _img_registry
+    rsd::config::read_ini "$images_file" "_img_registry"
+
+    local key="${_r_distro}.${_r_version}"
+    if [[ -z "${_img_registry[$key]:-}" ]]; then
+        rsd::io::error "No cloud image registered for '${os_spec}'."
+        rsd::io::info "Available images:"
+        local k
+        for k in "${!_img_registry[@]}"; do
+            rsd::io::info "  ${k%%.*}-${k#*.}"
+        done
+        return 1
+    fi
+
+    _r_url="${_img_registry[$key]}"
+    return 0
+}
+
+# List all available OS images from the registry.
+#
+# @return stdout Formatted list of available images.
+function rsd::l::vm::list_images() {
+    local images_file
+    images_file="$(rsd::get_libdir_file data/vm/images.ini)"
+    if [[ ! -f "$images_file" ]]; then
+        rsd::io::error "Image registry not found: data/vm/images.ini"
+        return 1
+    fi
+
+    declare -A _img_registry
+    rsd::config::read_ini "$images_file" "_img_registry"
+
+    rsd::io::blank
+    rsd::io::info "Available Cloud Images:"
+    rsd::io::blank
+
+    # Sort keys for deterministic display
+    local -a sorted_keys
+    IFS=$'\n' read -r -d '' -a sorted_keys < <(printf '%s\n' "${!_img_registry[@]}" | sort && printf '\0') || true
+
+    local k distro version
+    for k in "${sorted_keys[@]}"; do
+        distro="${k%%.*}"
+        version="${k#*.}"
+        rsd::io::info "  ${distro}-${version}"
+        rsd::io::info "    ${_img_registry[$k]}"
+    done
+    rsd::io::blank
+}
+
+# ==============================================================================
+# Connection Mode Resolution
+# ==============================================================================
+
+# Resolve connection mode flags to a libvirt URI.
+# Priority: CLI flags → vm.ini config → hardcoded default.
+#
+# @param int    $1 1 if --system flag is set, 0 otherwise.
+# @param string& $2 nameref: resolved libvirt connection URI.
+# @return void
+function rsd::l::vm::resolve_connection() {
+    local system_flag="$1"
+    local _out_uri="$2"; declare -n _r_uri="$_out_uri"
+
+    if [[ "$system_flag" -eq 1 ]]; then
+        _r_uri="qemu:///system"
+        return
+    fi
+
+    local configured_mode
+    configured_mode=$(rsd::l::vm::config "defaults.mode" "session")
+
+    case "$configured_mode" in
+        system) _r_uri="qemu:///system" ;;
+        *)      _r_uri="qemu:///session" ;;
+    esac
+}
+
+# ==============================================================================
+# Cache Management
+# ==============================================================================
+
+# Resolve the image cache directory path.
+#
+# @return stdout Absolute path to the cache directory.
+function rsd::l::vm::cache_dir() {
+    local dir
+    dir=$(rsd::l::vm::config "cache.dir" "$HOME/.local/share/rsd/vm/cache")
+    # Expand ~ to $HOME
+    dir="${dir/#\~/$HOME}"
+    echo "$dir"
+}
+
+# Check if image caching is enabled.
+#
+# @return int 0 if enabled, 1 if disabled.
+function rsd::l::vm::cache_enabled() {
+    local enabled
+    enabled=$(rsd::l::vm::config "cache.enabled" "true")
+    [[ "$enabled" == "true" || "$enabled" == "1" || "$enabled" == "yes" ]]
+}
+
+# Compute the cached filename for an OS image.
+# Deterministic: <distro>-<version>-amd64.<extension>
+#
+# @param string $1 Distro name.
+# @param string $2 Version string.
+# @param string $3 Download URL (to extract extension).
+# @return stdout Filename (basename only, not full path).
+function rsd::l::vm::cache_filename() {
+    local distro="$1"
+    local version="$2"
+    local url="$3"
+
+    # Extract extension from URL (.img, .qcow2, etc.)
+    local basename_url
+    basename_url=$(basename "$url")
+    local ext="${basename_url##*.}"
+
+    echo "${distro}-${version}-amd64.${ext}"
+}
+
+# ==============================================================================
+# Cloud-Init Template Rendering
+# ==============================================================================
+
+# Render a cloud-init template file by replacing %%PLACEHOLDER%% tokens.
+#
+# @param string $1 Path to the template file.
+# @param string $2 Output path for the rendered file.
+# @param string $3 Hostname (%%HOSTNAME%%).
+# @param string $4 Username (%%USERNAME%%).
+# @param string $5 SSH public key content (%%SSH_PUB_KEY%%).
+# @param string $6 Instance ID (%%INSTANCE_ID%%).
+# @return int 0 on success, 1 on failure.
+function rsd::l::vm::render_template() {
+    local template="$1"
+    local output="$2"
+    local hostname="$3"
+    local username="${4:-}"
+    local ssh_key="${5:-}"
+    local instance_id="${6:-}"
+
+    if [[ ! -f "$template" ]]; then
+        rsd::io::error "Template not found: $template"
+        return 1
+    fi
+
+    local content
+    content=$(cat "$template")
+
+    content="${content//%%HOSTNAME%%/$hostname}"
+    [[ -n "$username" ]]    && content="${content//%%USERNAME%%/$username}"
+    [[ -n "$ssh_key" ]]     && content="${content//%%SSH_PUB_KEY%%/$ssh_key}"
+    [[ -n "$instance_id" ]] && content="${content//%%INSTANCE_ID%%/$instance_id}"
+
+    echo "$content" > "$output"
+}
+
+# ==============================================================================
+# Driver Loading
+# ==============================================================================
+
+# Load the active VM driver library.
+# Resolution order: $1 parameter → vm.ini defaults.driver → auto-detect.
+#
+# @param string $1 Optional explicit driver name.
+# @return int 0 on success, 3 if driver not found.
+function rsd::l::vm::load_driver() {
+    local driver="${1:-}"
+
+    # Resolve driver name
+    if [[ -z "$driver" ]]; then
+        driver=$(rsd::l::vm::config "defaults.driver" "")
+    fi
+
+    # Auto-detect if still empty
+    if [[ -z "$driver" ]]; then
+        if rsd::check_binary virsh; then
+            driver="libvirt"
+        else
+            rsd::io::error "No VM driver configured and none auto-detected."
+            rsd::io::info "Install libvirt (virsh) or set driver=libvirt in vm.ini."
+            return 3
+        fi
+    fi
+
+    # Load driver library
+    local driver_lib="lib/vm/${driver}.lib"
+    if ! rsd::check_libdir_file "$driver_lib"; then
+        rsd::io::error "VM driver library not found: $driver_lib"
+        return 3
+    fi
+
+    local driver_flag="RSD_VM_${driver^^}_LIB"
+    if [[ "${!driver_flag}" != "1" ]]; then
+        source "$(rsd::get_libdir_file "$driver_lib")"
+    fi
+
+    # Export active driver name for dispatch
+    declare -g RSD_VM_ACTIVE_DRIVER="$driver"
+    return 0
+}
+
+# Dispatch a VM operation to the active driver.
+# Loads the driver if not already loaded.
+#
+# @param string $1 Operation name (e.g., "create", "start", "stop").
+# @param string $@ Remaining arguments passed to the driver function.
+# @return int Exit code of the driver function.
+function rsd::l::vm::dispatch() {
+    local operation="$1"
+    shift
+
+    if [[ -z "${RSD_VM_ACTIVE_DRIVER:-}" ]]; then
+        rsd::l::vm::load_driver || return $?
+    fi
+
+    local func="rsd::l::vm::${RSD_VM_ACTIVE_DRIVER}::${operation}"
+    if ! bash::is_function "$func"; then
+        rsd::io::error "Driver '${RSD_VM_ACTIVE_DRIVER}' does not implement operation '${operation}'."
+        return 2
+    fi
+
+    "$func" "$@"
+}

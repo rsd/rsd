@@ -1,0 +1,8 @@
+# RSD VM Cloud-Init Meta Data Template
+#
+# Placeholders replaced at runtime:
+#   %%INSTANCE_ID%%  — Unique instance identifier (rsd-<vmname>)
+#   %%HOSTNAME%%     — VM name
+
+instance-id: %%INSTANCE_ID%%
+local-hostname: %%HOSTNAME%%

@@ -1,0 +1,33 @@
+#cloud-config
+# RSD VM Cloud-Init User Data Template
+#
+# Placeholders replaced at runtime:
+#   %%HOSTNAME%%     — VM name
+#   %%USERNAME%%     — Default user
+#   %%SSH_PUB_KEY%%  — SSH public key content
+
+hostname: %%HOSTNAME%%
+manage_etc_hosts: true
+
+users:
+  - name: %%USERNAME%%
+    groups: sudo
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    ssh_authorized_keys:
+      - %%SSH_PUB_KEY%%
+
+# Ensure SSH is available immediately after boot
+package_update: true
+packages:
+  - openssh-server
+  - bash
+  - curl
+  - tar
+  - git
+
+# Disable cloud-init after first boot to avoid re-running on reboot
+runcmd:
+  - systemctl enable ssh
+  - systemctl start ssh

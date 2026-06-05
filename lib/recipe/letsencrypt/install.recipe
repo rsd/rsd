@@ -122,9 +122,10 @@ function rsd::r::letsencrypt_install::register() {
         # Attempt to find vhost by domain on the target
         local detected=""
         detected=$(rsd::l::target::exec_sudo "" \
-            grep -rl "server_name.*${RSD_LE_DOMAIN}" /etc/nginx/sites-available/ 2>/dev/null \
+            grep -rlF "$RSD_LE_DOMAIN" /etc/nginx/sites-available/ \
             | head -n1)
         bash::trim detected
+        detected="${detected//$'\r'/}"
         if [[ -n "$detected" ]]; then
             RSD_LE_VHOST_NAME=$(basename "$detected")
         else
