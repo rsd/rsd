@@ -322,7 +322,20 @@ function rsd::l::io::frame_lines() {
         fi
     fi
 
+    local _prev_filtered=0
     while IFS= read -r line || [[ -n "$line" ]]; do
+        # Filter SSH transport noise — OpenSSH prints these on every
+        # connection close, producing useless output in recipe runs.
+        if [[ "$line" == "Connection to "* && "$line" == *" closed." ]]; then
+            _prev_filtered=1
+            continue
+        fi
+        # Skip empty lines immediately following filtered SSH noise
+        if [[ -z "$line" && $_prev_filtered -eq 1 ]]; then
+            continue
+        fi
+        _prev_filtered=0
+
         printf '%s%s%s %s│%s %s\n' \
             "$tag_display" "$pad" "$cmd_tag" \
             "$_RSD_C_DIM" "$_RSD_C_RESET" \
