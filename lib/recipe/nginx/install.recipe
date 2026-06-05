@@ -284,7 +284,7 @@ function rsd::r::nginx_install::validate_install() {
 
     # 4. Worker process user — extract from nginx config (more reliable than ps)
     local worker_user=""
-    worker_user=$(rsd::l::target::exec_sudo "" nginx -T 2>/dev/null | grep -m1 '^\s*user ' | sed 's/^[[:space:]]*user[[:space:]]*//;s/[[:space:]]*;$//')
+    worker_user=$(rsd::l::target::exec_sudo "" nginx -T 2>/dev/null | grep -m1 '^\s*user ' | sed 's/^[[:space:]]*user[[:space:]]*//;s/[[:space:]]*;[[:space:]]*$//;s/\r//')
     bash::trim worker_user
     if [[ -n "$worker_user" ]]; then
         rsd::io::info "Worker user: $worker_user"

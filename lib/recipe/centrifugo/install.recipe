@@ -343,7 +343,7 @@ function rsd::r::centrifugo_install::create_user() {
 function rsd::r::centrifugo_install::generate_config::pre_check() {
     rsd::l::target::file_exists "$RSD_CENTRIFUGO_CONFIG" || return 1
     # Verify the config is actually valid, not a leftover broken file
-    rsd::l::target::exec "$RSD_CENTRIFUGO_BIN" checkconfig \
+    rsd::l::target::exec_sudo "" "$RSD_CENTRIFUGO_BIN" checkconfig \
         --config "$RSD_CENTRIFUGO_CONFIG" &>/dev/null
 }
 
@@ -439,9 +439,9 @@ function rsd::r::centrifugo_install::generate_config() {
   },
   "http_server": {
     "address": "127.0.0.1",
-    "port": "%s",
+    "port": %s,
     "internal_address": "%s",
-    "internal_port": "%s"
+    "internal_port": %s
   }
 }' "$token_hmac_secret" "$origins_json" "$admin_password" "$admin_secret" \
    "$api_key" "$RSD_CENTRIFUGO_CLIENT_PORT" "$internal_address" "$RSD_CENTRIFUGO_INTERNAL_PORT"
@@ -737,7 +737,7 @@ function rsd::r::centrifugo_install::validate_install() {
     fi
 
     # 2. Config validation
-    if rsd::l::target::exec "$RSD_CENTRIFUGO_BIN" checkconfig \
+    if rsd::l::target::exec_sudo "" "$RSD_CENTRIFUGO_BIN" checkconfig \
         --config "$RSD_CENTRIFUGO_CONFIG" &>/dev/null; then
         rsd::io::info "Config check:  OK"
     else

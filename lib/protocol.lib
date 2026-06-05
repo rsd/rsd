@@ -10,7 +10,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_PROTOCOL_LIB=1
-RSD_PROTOCOL_LIB_VERSION="0.1.3"
+RSD_PROTOCOL_LIB_VERSION="0.2.0"
 
 # Unified Protocol Interface (UPI) Library
 # All protocol handlers are prefixed using rsd::l::protocol::<scheme>::
@@ -45,7 +45,7 @@ function rsd::l::protocol::ssh::run() {
         connection_target="$host"
     fi
 
-    local -a ssh_opts=()
+    local -a ssh_opts=("-o" "LogLevel=ERROR")
     if [[ -n "$port" ]]; then
         ssh_opts+=("-p" "$port")
     fi
