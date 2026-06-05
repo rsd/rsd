@@ -31,6 +31,48 @@ RSD_VM_LIBVIRT_LIB_VERSION="0.1.0"
 # Internal Helpers
 # ==============================================================================
 
+# Preflight check: verify libvirtd (or modular virtqemud) is running.
+# Probes virsh connectivity against the target URI. If it fails, inspects
+# systemd to give the user an actionable error message.
+#
+# @param string $1 Connection URI (e.g., qemu:///session).
+# @return int 0 if service is reachable, 1 with user-facing error if not.
+function rsd::l::vm::libvirt::_require_service() {
+    local conn_uri="${1:-qemu:///session}"
+
+    # Quick connectivity probe — if virsh can talk to the hypervisor, we're fine
+    if virsh --connect "$conn_uri" version &>/dev/null; then
+        return 0
+    fi
+
+    # Probe failed — diagnose why
+    rsd::io::error "Cannot connect to libvirt ($conn_uri)."
+
+    # Check for the monolithic daemon first, then the modular QEMU daemon
+    local service=""
+    if systemctl list-unit-files libvirtd.service &>/dev/null 2>&1; then
+        service="libvirtd.service"
+    elif systemctl list-unit-files virtqemud.service &>/dev/null 2>&1; then
+        service="virtqemud.service"
+    fi
+
+    if [[ -n "$service" ]]; then
+        local state
+        state=$(systemctl is-active "$service" 2>/dev/null) || true
+        if [[ "$state" != "active" ]]; then
+            rsd::io::info "The libvirt service ($service) is not running."
+            rsd::io::info ""
+            rsd::io::info "Start it with:"
+            rsd::io::info "  sudo systemctl start $service"
+            rsd::io::info ""
+        fi
+    else
+        rsd::io::info "No libvirt service found. You need to install libvirt."
+    fi
+
+    return 1
+}
+
 # Build the virsh connection argument array.
 # Appends --connect <uri> if the connection URI is non-default.
 #
