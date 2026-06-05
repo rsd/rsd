@@ -39,6 +39,7 @@
 #   --internal-port <port>  Centrifugo internal port (default: 8001)
 #   --skip-nginx            Skip Nginx vhost configuration
 #   --skip-sysctl           Skip kernel tuning
+#   --skip-tailscale        Do not bind internal port to Tailscale IP
 #
 # Usage: rsd recipe run centrifugo/install --server-name realtime.example.com
 #        rsd @target recipe run centrifugo/install --server-name rt.example.com --origins "https://example.com"
@@ -66,6 +67,7 @@ declare -g -A RSD_RECIPE_OPTIONS=(
     ["internal-port"]=1
     ["skip-nginx"]=0
     ["skip-sysctl"]=0
+    ["skip-tailscale"]=0
 )
 
 # ==============================================================================
@@ -368,7 +370,7 @@ function rsd::r::centrifugo_install::generate_config() {
     local internal_address="127.0.0.1"
     RSD_CENTRIFUGO_TAILSCALE_IP=""
 
-    if rsd::l::target::has_bin tailscale; then
+    if [[ "${RSD_COMMAND_ARGS[skip-tailscale]}" != "1" ]] && rsd::l::target::has_bin tailscale; then
         local ts_ip=""
         ts_ip=$(rsd::l::target::exec tailscale ip -4 2>/dev/null)
         bash::trim ts_ip
@@ -377,6 +379,8 @@ function rsd::r::centrifugo_install::generate_config() {
             RSD_CENTRIFUGO_TAILSCALE_IP="$ts_ip"
             rsd::io::info "Tailscale detected. Internal port bound to: $ts_ip"
         fi
+    elif [[ "${RSD_COMMAND_ARGS[skip-tailscale]}" == "1" ]]; then
+        rsd::io::info "Tailscale detection skipped (--skip-tailscale). Internal port bound to: 127.0.0.1"
     fi
 
     # If Tailscale binds internal port, also allow localhost for backend API calls
