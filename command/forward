@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+
+# RSD Command: forward
+# Opens SSH local port forwards (tunnels) to a remote target.
+#
+# Usage:
+#   rsd @target forward <port>              # forward localhost:<port> → remote:127.0.0.1:<port>
+#   rsd @target forward <local>:<remote>    # forward localhost:<local> → remote:127.0.0.1:<remote>
+#   rsd @target forward <p1> <p2> ...       # multiple forwards at once
+#
+# Examples:
+#   rsd @flow forward 8001                  # Centrifugo admin
+#   rsd @flow forward 3306                  # MySQL
+#   rsd @flow forward 9090:8001             # local:9090 → remote:8001
+#   rsd @flow forward 8001 3306 6379        # multiple ports
+#
+# @see docs/commands.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+RSD_C_FORWARD_VERSION='0.1.0'
+RSD_C_FORWARD_REMOTE_AWARE=1
+
+[[ "$RSD_REMOTE_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/remote.lib)"
+
+# ==============================================================================
+# Action: forward (default)
+# ==============================================================================
+
+function rsd::c::forward::help() {
+    echo "Usage: rsd @target forward <port> [<port> ...]"
+    echo ""
+    echo "Opens SSH port forwards (tunnels) to a remote target."
+    echo "Stays open until Ctrl+C."
+    echo ""
+    echo "Port formats:"
+    echo "  <port>          Forward localhost:<port> → remote:127.0.0.1:<port>"
+    echo "  <local>:<remote> Forward localhost:<local> → remote:127.0.0.1:<remote>"
+    echo ""
+    echo "Examples:"
+    echo "  rsd @flow forward 8001"
+    echo "  rsd @flow forward 9090:8001"
+    echo "  rsd @flow forward 8001 3306 6379"
+}
+
+function rsd::c::forward::forward() {
+    if [[ -z "${RSD_REMOTE_TARGET:-}" ]]; then
+        rsd::io::error "The 'forward' command requires a remote target."
+        rsd::io::info  "Usage: rsd @target forward <port>"
+        exit 2
+    fi
+
+    if [[ ${#RSD_ARGS_UNPROCESSED[@]} -eq 0 ]]; then
+        rsd::io::error "No port(s) specified."
+        rsd::c::forward::help
+        exit 2
+    fi
+
+    # Resolve the remote target to get SSH connection details
+    local -a hops=()
+    rsd::l::remote::resolve_pathway "$RSD_REMOTE_TARGET" hops
+
+    if [[ ${#hops[@]} -eq 0 ]]; then
+        rsd::io::error "Failed to resolve remote target '$RSD_REMOTE_TARGET'."
+        exit 20
+    fi
+
+    # Use the final hop for the SSH tunnel (last hop in the chain)
+    local final_hop="${hops[${#hops[@]}-1]}"
+    local proto user host port
+    rsd::l::remote::parse_spec "$final_hop" proto user host port
+
+    if [[ "$proto" != "ssh" ]]; then
+        rsd::io::error "Port forwarding requires SSH protocol (got: $proto)."
+        exit 2
+    fi
+
+    # Build SSH options
+    local -a ssh_opts=("-o" "LogLevel=ERROR")
+    [[ -n "$port" ]] && ssh_opts+=("-p" "$port")
+
+    # Build connection target
+    local connection_target="$host"
+    [[ -n "$user" ]] && connection_target="${user}@${host}"
+
+    # Parse port specs and build -L options
+    local -a forward_opts=()
+    local spec local_port remote_port
+    for spec in "${RSD_ARGS_UNPROCESSED[@]}"; do
+        if [[ "$spec" == *":"* ]]; then
+            local_port="${spec%%:*}"
+            remote_port="${spec##*:}"
+        else
+            local_port="$spec"
+            remote_port="$spec"
+        fi
+
+        # Validate ports are numeric
+        if [[ ! "$local_port" =~ ^[0-9]+$ ]] || [[ ! "$remote_port" =~ ^[0-9]+$ ]]; then
+            rsd::io::error "Invalid port spec: '$spec' (expected <port> or <local>:<remote>)"
+            exit 2
+        fi
+
+        forward_opts+=("-L" "${local_port}:127.0.0.1:${remote_port}")
+        rsd::io::info "Forward: localhost:${local_port} → ${host}:${remote_port}"
+    done
+
+    rsd::io::blank
+    rsd::io::ok "Tunnel open to ${connection_target}. Press Ctrl+C to close."
+    rsd::io::blank
+
+    # Open tunnel — `-N` means no remote command, just forward
+    ssh "${ssh_opts[@]}" "${forward_opts[@]}" -N "$connection_target"
+    local rc=$?
+
+    if [[ $rc -eq 0 || $rc -eq 130 || $rc -eq 255 ]]; then
+        rsd::io::info "Tunnel closed."
+    else
+        rsd::io::error "SSH tunnel exited with code $rc."
+    fi
+    return $rc
+}
