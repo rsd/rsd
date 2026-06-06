@@ -43,7 +43,6 @@
 #   --skip-nginx            Skip Nginx vhost configuration (implies --skip-ssl)
 #   --skip-ssl              Skip Let's Encrypt SSL provisioning
 #   --skip-sysctl           Skip kernel tuning
-#   --skip-tailscale        Do not bind internal port to Tailscale IP
 #
 # Usage: rsd @target recipe run centrifugo/install --server-name rt.example.com --email admin@example.com
 #        rsd @target recipe run centrifugo/install --server-name rt.example.com --email admin@example.com --origins "https://example.com"
@@ -72,7 +71,6 @@ declare -g -A RSD_RECIPE_OPTIONS=(
     ["email"]=1
     ["skip-nginx"]=0
     ["skip-sysctl"]=0
-    ["skip-tailscale"]=0
     ["skip-ssl"]=0
 )
 
@@ -95,7 +93,6 @@ declare -g RSD_CENTRIFUGO_CLIENT_PORT=""
 declare -g RSD_CENTRIFUGO_INTERNAL_PORT=""
 declare -g RSD_CENTRIFUGO_SERVER_NAME=""
 declare -g RSD_CENTRIFUGO_ORIGINS=""
-declare -g RSD_CENTRIFUGO_TAILSCALE_IP=""
 
 # ==============================================================================
 # Platform Resolution
@@ -369,29 +366,10 @@ function rsd::r::centrifugo_install::generate_config() {
         return 1
     fi
 
-    # --- Detect Tailscale IP for internal binding ---
+    # Internal port always binds to localhost. This avoids a hard dependency on
+    # Tailscale (crash-loop if interface isn't up at boot). Access admin via SSH
+    # tunnel: ssh -L 8001:127.0.0.1:8001 <target>
     local internal_address="127.0.0.1"
-    RSD_CENTRIFUGO_TAILSCALE_IP=""
-
-    if [[ "${RSD_COMMAND_ARGS[skip-tailscale]}" != "1" ]] && rsd::l::target::has_bin tailscale; then
-        local ts_ip=""
-        ts_ip=$(rsd::l::target::exec tailscale ip -4 2>/dev/null)
-        bash::trim ts_ip
-        if [[ -n "$ts_ip" ]]; then
-            internal_address="$ts_ip"
-            RSD_CENTRIFUGO_TAILSCALE_IP="$ts_ip"
-            rsd::io::info "Tailscale detected. Internal port bound to: $ts_ip"
-        fi
-    elif [[ "${RSD_COMMAND_ARGS[skip-tailscale]}" == "1" ]]; then
-        rsd::io::info "Tailscale detection skipped (--skip-tailscale). Internal port bound to: 127.0.0.1"
-    fi
-
-    # If Tailscale binds internal port, also allow localhost for backend API calls
-    # by binding to 0.0.0.0 on internal port and relying on firewall/network isolation.
-    # Actually, Centrifugo only supports a single internal_address.
-    # We bind to the Tailscale IP; backend calls from localhost need to target that IP.
-    # Alternative: bind to 127.0.0.1 and access admin via SSH tunnel.
-    # We choose Tailscale IP when available for direct mesh access.
 
     # --- Build allowed_origins array ---
     # Built locally in pure bash to avoid SSH stdin piping issues
@@ -725,8 +703,8 @@ function rsd::r::centrifugo_install::validate_install() {
         fi
     fi
 
-    # 5. Determine admin access URL
-    local admin_host="${RSD_CENTRIFUGO_TAILSCALE_IP:-127.0.0.1}"
+    # 5. Admin access info
+    local admin_host="127.0.0.1"
 
     rsd::io::blank
     if [[ $errors -gt 0 ]]; then
@@ -739,7 +717,7 @@ function rsd::r::centrifugo_install::validate_install() {
     rsd::io::info "Binary:         $RSD_CENTRIFUGO_BIN"
     rsd::io::info "Config:         $RSD_CENTRIFUGO_CONFIG"
     rsd::io::info "Service:        $RSD_CENTRIFUGO_SERVICE"
-    rsd::io::info "Admin UI:       http://${admin_host}:${RSD_CENTRIFUGO_INTERNAL_PORT}/"
+    rsd::io::info "Admin UI:       ssh -L ${RSD_CENTRIFUGO_INTERNAL_PORT}:127.0.0.1:${RSD_CENTRIFUGO_INTERNAL_PORT} @target → http://localhost:${RSD_CENTRIFUGO_INTERNAL_PORT}/"
 
     if [[ "${RSD_COMMAND_ARGS[skip-nginx]}" != "1" ]]; then
         rsd::io::info "Client WS:     wss://${RSD_CENTRIFUGO_SERVER_NAME}/connection/websocket"
