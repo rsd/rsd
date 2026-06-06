@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# Sudo Elevation Command
+# ==============================================================================
+#
+# Vault-aware sudo pass-through for local and remote targets.
+# Routes all payloads through rsd::l::target::exec_sudo, which activates
+# the full credential lifecycle: vault lookup → session cache → interactive
+# prompt → offer-to-save.
+#
+# Without this command, `rsd @target sudo <cmd>` falls through to raw
+# pass-through (Precedence 3 in the runner), which bypasses the credential
+# pipeline entirely — the remote `sudo` binary prompts via the PTY, RSD
+# never sees the password, and vault save never fires.
+#
+# Usage:
+#   rsd @target sudo <command> [args...]
+#   rsd @target sudo -u <user> <command> [args...]
+#   rsd @target sudo --user <user> <command> [args...]
+#   rsd sudo <command> [args...]              (local elevation)
+#
+# Examples:
+#   rsd @flow sudo systemctl status centrifugo.service
+#   rsd @flow sudo -u postgres pg_dump mydb
+#   rsd sudo systemctl restart nginx
+#
+# @see docs/host.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load target-aware execution routing
+[[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
+
+RSD_C_SUDO_SHORT_DESC="Vault-Aware Sudo Elevation"
+RSD_C_SUDO_VERSION="0.1.0"
+
+# Command is remote-aware (Mode A — local orchestration)
+RSD_C_SUDO_REMOTE_AWARE=1
+
+# ==============================================================================
+# Help
+# ==============================================================================
+
+# Display usage and options for the sudo command.
+#
+# @return void
+function rsd::c::sudo::help() {
+    echo -e "\n\tSudo Command Help:\n"
+    echo -e "\t\tUsage:"
+    echo -e "\t\t\trsd [@target] sudo [options] <command> [args...]"
+    echo -e "\n\t\tOptions:"
+    echo -e "\t\t\t-u, --user <user>   Elevate as <user> (default: root)"
+    echo -e "\n\t\tExamples:"
+    echo -e "\t\t\trsd @flow sudo systemctl status centrifugo.service"
+    echo -e "\t\t\trsd @flow sudo -u postgres pg_dump mydb"
+    echo -e "\t\t\trsd sudo systemctl restart nginx"
+    echo -e "\n\t\tCredential Pipeline:"
+    echo -e "\t\t\t1. KeePassXC vault lookup (Sudo/<host>)"
+    echo -e "\t\t\t2. Session memory cache (15 min TTL)"
+    echo -e "\t\t\t3. Interactive secure prompt"
+    echo -e "\t\t\t4. Offer to save to vault on success"
+}
+
+# ==============================================================================
+# Command Entry Point
+# ==============================================================================
+
+# Route the sudo payload through the credential-managed exec_sudo pipeline.
+# Parses -u/--user from the leading arguments, passes everything else as
+# the command payload.
+#
+# @param string $@ [-u <user>] <command> [args...]
+# @return int Exit code of the elevated command.
+function rsd::c::sudo::command() {
+    local user=""
+
+    # Parse leading -u / --user option (stop at first non-option)
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -u|--user)
+                if [[ -z "${2:-}" ]]; then
+                    rsd::io::error "Option $1 requires a user argument."
+                    return 2
+                fi
+                user="$2"
+                shift 2
+                ;;
+            --help|-h)
+                rsd::c::sudo::help
+                return 0
+                ;;
+            *)
+                # First non-option is the command — stop parsing
+                break
+                ;;
+        esac
+    done
+
+    if [[ $# -eq 0 ]]; then
+        rsd::io::error "No command specified."
+        rsd::c::sudo::help
+        return 2
+    fi
+
+    # Inject PAGER=cat to prevent pager-related terminal warnings
+    # (e.g., "WARNING: terminal is not fully functional" from less)
+    # when commands like systemctl status invoke a pager through
+    # the SSH PTY tunnel. The env wrapper is harmless for commands
+    # that don't use a pager.
+    rsd::l::target::exec_sudo "$user" env PAGER=cat "$@"
+    return $?
+}
