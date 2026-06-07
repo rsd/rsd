@@ -429,22 +429,38 @@ function rsd::r::letsencrypt_install::upgrade_vhost() {
         bash::trim upstream_name
     fi
 
-    # Detect proxy location paths from existing vhost (e.g., /connection)
-    local -a proxy_locations=()
-    local loc
-    while IFS= read -r loc; do
-        bash::trim loc
-        [[ -n "$loc" ]] && proxy_locations+=("$loc")
-    done < <(echo "$existing_vhost" | grep -oP 'location\s+\K/[^\s{]+')
-
-    # Remove the catch-all "/" if it's a deny/404 block (not a proxy)
-    local -a filtered_locations=()
-    for loc in "${proxy_locations[@]}"; do
-        if [[ "$loc" == "/" ]]; then
-            continue
+    # Extract full location blocks from the existing vhost, preserving each
+    # block's content verbatim (proxy_pass target, headers, snippets).
+    # This handles mixed upstreams correctly (e.g., /connection → centrifugo_backend,
+    # /api → centrifugo_api) during the HTTP→HTTPS upgrade.
+    local -a location_blocks=()
+    local in_location=0
+    local brace_depth=0
+    local current_block=""
+    local current_path=""
+    while IFS= read -r line; do
+        if [[ $in_location -eq 0 ]]; then
+            # Match 'location /path {' — skip catch-all '/'
+            if [[ "$line" =~ ^[[:space:]]*location[[:space:]]+(\/[^[:space:]{]+) ]]; then
+                current_path="${BASH_REMATCH[1]}"
+                in_location=1
+                brace_depth=0
+                current_block=""
+            fi
         fi
-        filtered_locations+=("$loc")
-    done
+        if [[ $in_location -eq 1 ]]; then
+            current_block+="${line}"$'\n'
+            # Count braces to find the end of the block
+            local opens="${line//[^\{]/}"
+            local closes="${line//[^\}]/}"
+            (( brace_depth += ${#opens} - ${#closes} ))
+            if [[ $brace_depth -le 0 ]]; then
+                location_blocks+=("$current_block")
+                in_location=0
+                current_block=""
+            fi
+        fi
+    done <<< "$existing_vhost"
 
     # --- Build the new vhost ---
     local vhost=""
@@ -461,7 +477,7 @@ function rsd::r::letsencrypt_install::upgrade_vhost() {
         vhost+=""$'\n'
     fi
 
-    # Upstream block
+    # Upstream block(s) — preserve all upstream blocks verbatim
     if [[ -n "$upstream_block" ]]; then
         vhost+="${upstream_block}"$'\n'
         vhost+=""$'\n'
@@ -493,16 +509,19 @@ function rsd::r::letsencrypt_install::upgrade_vhost() {
     vhost+="    include snippets/ssl-params.conf;"$'\n'
     vhost+=""$'\n'
 
-    # Proxy location blocks
-    for loc in "${filtered_locations[@]}"; do
-        vhost+="    location ${loc} {"$'\n'
-        if [[ -n "$upstream_name" ]]; then
-            vhost+="        proxy_pass http://${upstream_name};"$'\n'
-        fi
-        if [[ "$has_websocket" -eq 1 ]]; then
-            vhost+="        include snippets/proxy-websocket.conf;"$'\n'
-        fi
-        vhost+="    }"$'\n'
+    # Location blocks — preserved verbatim from original vhost
+    local block
+    for block in "${location_blocks[@]}"; do
+        # Ensure consistent 4-space indentation
+        while IFS= read -r line; do
+            # Strip leading whitespace and re-indent
+            local trimmed="${line#"${line%%[![:space:]]*}"}"
+            if [[ -n "$trimmed" ]]; then
+                vhost+="    ${trimmed}"$'\n'
+            else
+                vhost+=""$'\n'
+            fi
+        done <<< "$block"
         vhost+=""$'\n'
     done
 
