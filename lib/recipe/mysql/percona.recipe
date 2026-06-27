@@ -187,6 +187,54 @@ function rsd::r::mysql_percona::enable_repo() {
         return 1
     fi
 
+    # Check if package is available natively, if not apply fallback
+    if ! rsd::l::apt::has_candidate "percona-server-server"; then
+        rsd::io::info "Package 'percona-server-server' is not available in the default repository."
+
+        local host_alias=""
+        rsd::l::r::resolve_host_alias host_alias
+
+        local distro=""
+        local version=""
+        rsd::l::host::get_property "$host_alias" "distro" distro
+        rsd::l::host::get_property "$host_alias" "version" version
+
+        local codename=""
+        codename=$(rsd::l::target::exec lsb_release -sc 2>/dev/null)
+        bash::trim codename
+
+        if [[ -z "$codename" ]]; then
+            codename=$(rsd::l::target::exec sh -c "grep '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2")
+            bash::trim codename
+            codename="${codename//\"/}"
+        fi
+
+        # Fallback to hardcoded codename if resolution failed
+        if [[ -z "$codename" && "$distro" == "ubuntu" && "$version" == "26.04" ]]; then
+            codename="resolute"
+        fi
+
+        if [[ -n "$codename" ]]; then
+            if [[ "$distro" == "ubuntu" ]]; then
+                rsd::io::warn "Ubuntu detected. Forcing fallback from '$codename' to 'noble' (Ubuntu 24.04) repositories..."
+                if ! rsd::l::target::exec_sudo "" sed -i "s/$codename/noble/g" "/etc/apt/sources.list.d/percona-release.list"; then
+                    rsd::io::error "Failed to rewrite repository codename to 'noble'."
+                    return 1
+                fi
+                # Refresh apt cache with the fallback repository
+                rsd::l::apt::update
+            elif [[ "$distro" == "debian" ]]; then
+                rsd::io::warn "Debian detected. Forcing fallback from '$codename' to 'bookworm' (Debian 12) repositories..."
+                if ! rsd::l::target::exec_sudo "" sed -i "s/$codename/bookworm/g" "/etc/apt/sources.list.d/percona-release.list"; then
+                    rsd::io::error "Failed to rewrite repository codename to 'bookworm'."
+                    return 1
+                fi
+                # Refresh apt cache with the fallback repository
+                rsd::l::apt::update
+            fi
+        fi
+    fi
+
     rsd::io::ok "Percona repository $RSD_MYSQL_REPO_NAME setup completed."
 }
 
