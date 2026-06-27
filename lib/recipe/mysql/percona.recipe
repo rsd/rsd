@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# Percona MySQL Server — Production Provisioning Recipe
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Installs Percona Server for MySQL or Percona Distribution for MySQL
+# from the official Percona repositories.
+# Supports 8.4 LTS (recommended) and 8.0 (EOL).
+#
+# WHAT THIS RECIPE DOES
+# ---------------------
+#  1. validate_env    — Validates distribution (Ubuntu >= 24.04, Debian >= 12)
+#                       and version selection.
+#  2. install_repo    — Installs the percona-release DEB package.
+#  3. enable_repo     — Enables the targeted repository (ps-84-lts, ps80, etc.).
+#  4. install_server  — Installs the percona-server-server packages and
+#                       ensures the mysql systemd service is active.
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. All installation tasks contain pre-flight
+# necessity checks (pre_check) to skip completed steps.
+#
+# Usage:
+#   rsd recipe run mysql/percona
+#   rsd recipe run mysql/percona --version 8.0
+#   rsd recipe run mysql/percona --distribution
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load dependencies
+[[ "$RSD_HOST_LIB" != "1" ]]    && source "$(rsd::get_libdir_file lib/host.lib)"
+[[ "$RSD_APT_LIB" != "1" ]]     && source "$(rsd::get_libdir_file lib/apt.lib)"
+[[ "$RSD_SYSTEMD_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/systemd.lib)"
+
+# Recipe-specific CLI options
+declare -g -A RSD_RECIPE_OPTIONS=(
+    ["version"]=1
+    ["distribution"]=0
+)
+
+# ==============================================================================
+# Globals
+# ==============================================================================
+
+declare -g RSD_MYSQL_VERSION="8.4"
+declare -g RSD_MYSQL_DISTRIBUTION=0
+declare -g RSD_MYSQL_REPO_NAME=""
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::mysql_percona::register() {
+    # Platform validation: must be debian family
+    rsd::l::r::require_platform "debian" "*" "*"
+
+    # CLI option parsing
+    RSD_MYSQL_VERSION="${RSD_COMMAND_ARGS[version]:-8.4}"
+    if [[ -v RSD_COMMAND_ARGS[distribution] ]]; then
+        RSD_MYSQL_DISTRIBUTION=1
+    else
+        RSD_MYSQL_DISTRIBUTION=0
+    fi
+
+    rsd::r::register_task "mysql_percona::validate_env"
+    rsd::r::register_task "mysql_percona::install_repo"
+    rsd::r::register_task "mysql_percona::enable_repo" "rollback"
+    rsd::r::register_task "mysql_percona::install_server"
+}
+
+# ==============================================================================
+# Task: validate_env
+# ==============================================================================
+
+function rsd::r::mysql_percona::validate_env() {
+    rsd::io::status "Validating distribution and version parameters..."
+
+    local host_alias=""
+    rsd::l::r::resolve_host_alias host_alias
+
+    local distro=""
+    local version=""
+    rsd::l::host::get_property "$host_alias" "distro" distro
+    rsd::l::host::get_property "$host_alias" "version" version
+
+    if [[ "$distro" == "ubuntu" ]]; then
+        if ! rsd::l::host::version_gte "$version" "24.04"; then
+            rsd::io::error "Ubuntu version must be at least 24.04 (Noble). Detected: $version."
+            return 1
+        fi
+    elif [[ "$distro" == "debian" ]]; then
+        if ! rsd::l::host::version_gte "$version" "12"; then
+            rsd::io::error "Debian version must be at least 12 (Bookworm). Detected: $version."
+            return 1
+        fi
+    else
+        rsd::io::error "Unsupported distribution: $distro. Only Ubuntu >= 24.04 and Debian >= 12 are supported."
+        return 1
+    fi
+
+    # Validate version input
+    if [[ "$RSD_MYSQL_VERSION" != "8.4" && "$RSD_MYSQL_VERSION" != "8.0" ]]; then
+        rsd::io::error "Unsupported Percona MySQL version: $RSD_MYSQL_VERSION. Only 8.4 and 8.0 are supported."
+        return 1
+    fi
+
+    # Resolve repository product code name
+    if [[ "$RSD_MYSQL_VERSION" == "8.4" ]]; then
+        if ((RSD_MYSQL_DISTRIBUTION)); then
+            RSD_MYSQL_REPO_NAME="pdps-84-lts"
+        else
+            RSD_MYSQL_REPO_NAME="ps-84-lts"
+        fi
+    elif [[ "$RSD_MYSQL_VERSION" == "8.0" ]]; then
+        if ((RSD_MYSQL_DISTRIBUTION)); then
+            RSD_MYSQL_REPO_NAME="pdps80"
+        else
+            RSD_MYSQL_REPO_NAME="ps80"
+        fi
+    fi
+
+    rsd::io::ok "Environment validation passed. Target: $distro $version. Repo: $RSD_MYSQL_REPO_NAME."
+}
+
+# ==============================================================================
+# Task: install_repo
+# ==============================================================================
+
+function rsd::r::mysql_percona::install_repo::pre_check() {
+    rsd::l::target::exec sh -c "dpkg -l percona-release 2>/dev/null | grep -q '^ii'"
+}
+
+function rsd::r::mysql_percona::install_repo() {
+    rsd::io::status "Installing percona-release configuration tool..."
+
+    local deb_url="https://repo.percona.com/apt/percona-release_latest.generic_all.deb"
+    local tmpfile
+    tmpfile=$(rsd::l::target::mktemp "rsd-perconarelease.XXXXXX") || return 14
+
+    rsd::io::info "Downloading release package from $deb_url..."
+    if ! rsd::l::target::exec curl -fsSL "$deb_url" -o "$tmpfile"; then
+        rsd::io::error "Failed to download Percona release package."
+        rsd::l::target::exec rm -f "$tmpfile"
+        return 1
+    fi
+
+    rsd::io::info "Installing release package via dpkg..."
+    if ! rsd::l::target::exec_sudo "" dpkg -i "$tmpfile"; then
+        rsd::io::error "Failed to install Percona release package."
+        rsd::l::target::exec rm -f "$tmpfile"
+        return 1
+    fi
+
+    rsd::l::target::exec rm -f "$tmpfile"
+    rsd::io::ok "percona-release package successfully installed."
+}
+
+# ==============================================================================
+# Task: enable_repo
+# ==============================================================================
+
+function rsd::r::mysql_percona::enable_repo::pre_check() {
+    rsd::l::target::file_contains "$RSD_MYSQL_REPO_NAME" "/etc/apt/sources.list.d/percona-release.list"
+}
+
+function rsd::r::mysql_percona::enable_repo() {
+    rsd::io::status "Setting up Percona repository: $RSD_MYSQL_REPO_NAME..."
+
+    # Backup existing configuration file if present
+    if rsd::l::target::file_exists "/etc/apt/sources.list.d/percona-release.list"; then
+        rsd::l::r::backup "/etc/apt/sources.list.d/percona-release.list" || return 1
+    fi
+
+    if ! rsd::l::target::exec_sudo "" percona-release setup -y "$RSD_MYSQL_REPO_NAME"; then
+        rsd::io::error "Failed to set up Percona repository: $RSD_MYSQL_REPO_NAME."
+        return 1
+    fi
+
+    rsd::io::ok "Percona repository $RSD_MYSQL_REPO_NAME setup completed."
+}
+
+function rsd::r::mysql_percona::enable_repo::rollback() {
+    rsd::io::status "Rolling back Percona repository configuration..."
+    if rsd::l::target::file_exists "/etc/apt/sources.list.d/percona-release.list.rsd.bak"; then
+        rsd::l::r::restore_backup "/etc/apt/sources.list.d/percona-release.list"
+    else
+        rsd::l::target::exec_sudo "" rm -f "/etc/apt/sources.list.d/percona-release.list"
+    fi
+}
+
+# ==============================================================================
+# Task: install_server
+# ==============================================================================
+
+function rsd::r::mysql_percona::install_server::pre_check() {
+    rsd::l::target::exec sh -c "dpkg -l percona-server-server 2>/dev/null | grep -q '^ii'"
+}
+
+function rsd::r::mysql_percona::install_server() {
+    rsd::io::status "Updating apt caches..."
+    rsd::l::apt::update
+
+    rsd::io::status "Installing percona-server-server..."
+    if ! rsd::l::apt::install percona-server-server; then
+        rsd::io::error "Failed to install percona-server-server."
+        return 1
+    fi
+
+    rsd::io::ok "percona-server-server installed."
+
+    rsd::l::r::restart_and_enable "mysql.service"
+}
