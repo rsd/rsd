@@ -1,0 +1,16 @@
+# MySQL Connection Configuration Profile
+# Place this file as mysql.ini in ~/.config/rsd/ or another config directory.
+# Keys are formatted as [<host_alias>] where host_alias corresponds to RSD host targets.
+
+[localhost]
+connection_mode = remote
+user = root
+
+# Example remote profile configuration
+#[production-db]
+#connection_mode = remote     # remote (SSH execution on target) or direct (network TCP from controller)
+#host = localhost             # target database host (accessible from execution context)
+#user = backup
+#pwd = secretpassword
+#port = 3306
+#socket = /var/run/mysqld/mysqld.sock

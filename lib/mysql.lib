@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# MySQL Connection Resolution & Query Library
+# ==============================================================================
+# namespace rsd::l::mysql::
+#
+# Provides configuration resolution, connection verification, and query routing
+# for MySQL database servers. Supports both remote target-aware execution (SSH)
+# and direct TCP execution from the controller.
+#
+# @see AGENTS.md
+# @see docs/config.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+if [[ "$RSD_MYSQL_LIB" == "1" ]]; then
+    return 0
+fi
+RSD_MYSQL_LIB=1
+RSD_MYSQL_LIB_VERSION="0.1.0"
+
+# Load dependencies
+[[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
+[[ "$RSD_IO_LIB" != "1" ]]     && source "$(rsd::get_libdir_file lib/io.lib)"
+
+# ==============================================================================
+# Globals
+# ==============================================================================
+
+# Resolved connection settings
+declare -g RSD_MYSQL_METHOD=""   # "remote" | "direct"
+declare -g RSD_MYSQL_HOST=""
+declare -g RSD_MYSQL_USER=""
+declare -g RSD_MYSQL_PWD=""
+declare -g RSD_MYSQL_PORT=""
+declare -g RSD_MYSQL_SOCKET=""
+declare -g RSD_MYSQL_RESOLVED=0
+
+# ==============================================================================
+# Connection Resolution
+# ==============================================================================
+
+# Lazy-load mysql.ini if not loaded yet
+function rsd::l::mysql::load_config() {
+    [[ "${RSD_MYSQL_CONFIG_LOADED:-}" == "1" ]] && return 0
+    if [[ ! -v "R_INI_mysql" ]]; then
+        declare -gA R_INI_mysql
+    fi
+    if bash::is_function rsd::config::get_file; then
+        eval "$(rsd::config::get_file mysql)"
+    fi
+    RSD_MYSQL_CONFIG_LOADED=1
+}
+
+# Resolve connection parameters for a database target profile
+#
+# @param string $1 Optional database profile alias from mysql.ini.
+#                  If empty, defaults to active remote target or "localhost".
+# @return int 0 on success, 1 on failure.
+function rsd::l::mysql::resolve() {
+    local profile="${1:-}"
+    
+    # 1. Fallback to active remote target or "localhost"
+    if [[ -z "$profile" ]]; then
+        if [[ -n "${RSD_REMOTE_TARGET:-}" ]]; then
+            profile="${RSD_REMOTE_TARGET#@}"
+        else
+            profile="localhost"
+        fi
+    fi
+
+    rsd::l::mysql::load_config
+
+    rsd::debug "mysql::resolve: loading connection settings for profile '$profile'..." 10
+
+    # 2. Extract properties from R_INI_mysql
+    local connection_mode="${R_INI_mysql[${profile}.connection_mode]:-remote}"
+    local host="${R_INI_mysql[${profile}.host]:-localhost}"
+    local user="${R_INI_mysql[${profile}.user]:-${USER:-root}}"
+    local pwd="${R_INI_mysql[${profile}.pwd]:-}"
+    local port="${R_INI_mysql[${profile}.port]:-3306}"
+    local socket="${R_INI_mysql[${profile}.socket]:-}"
+
+    # 3. Apply profile configurations to globals
+    RSD_MYSQL_METHOD="$connection_mode"
+    RSD_MYSQL_HOST="$host"
+    RSD_MYSQL_USER="$user"
+    RSD_MYSQL_PWD="$pwd"
+    RSD_MYSQL_PORT="$port"
+    RSD_MYSQL_SOCKET="$socket"
+    RSD_MYSQL_RESOLVED=1
+
+    rsd::debug "mysql::resolve: resolved method=${RSD_MYSQL_METHOD}, host=${RSD_MYSQL_HOST}, user=${RSD_MYSQL_USER}, port=${RSD_MYSQL_PORT}" 10
+    return 0
+}
+
+# ==============================================================================
+# Query Execution Wrappers
+# ==============================================================================
+
+# Execute a SQL query on the resolved database, clean output, and return exit code
+#
+# @param string $1 SQL statement to execute.
+# @param string $2 Optional: default database name to USE.
+# @return int mysql exit code. Stdout contains query results.
+function rsd::l::mysql::query() {
+    local sql="$1"
+    local db="${2:-}"
+
+    if [[ "$RSD_MYSQL_RESOLVED" -ne 1 ]]; then
+        rsd::l::mysql::resolve || return 1
+    fi
+
+    # Defensive validation: verify mysql binary is present on the execution target
+    if [[ "$RSD_MYSQL_METHOD" == "direct" ]]; then
+        # Check mysql client locally
+        if ! rsd::check_binary mysql; then
+            rsd::io::error "MySQL client binary 'mysql' not found on the controller host."
+            return 3
+        fi
+    else
+        # Check mysql client on remote target
+        if ! rsd::l::target::has_bin mysql; then
+            rsd::io::error "MySQL client binary 'mysql' not found on the target host."
+            return 3
+        fi
+    fi
+
+    local _output=""
+    local _exit=0
+
+    # Build connection options
+    local -a conn_args=("-h" "$RSD_MYSQL_HOST" "-P" "$RSD_MYSQL_PORT" "-u" "$RSD_MYSQL_USER")
+    [[ -n "$RSD_MYSQL_SOCKET" ]] && conn_args+=("--socket=$RSD_MYSQL_SOCKET")
+    [[ -n "$db" ]] && conn_args+=("$db")
+
+    if [[ "$RSD_MYSQL_METHOD" == "direct" ]]; then
+        # Unset target to route execution locally
+        local old_target="${RSD_REMOTE_TARGET:-}"
+        unset RSD_REMOTE_TARGET
+        
+        # Execute locally
+        _output=$(MYSQL_PWD="$RSD_MYSQL_PWD" rsd::l::target::exec mysql -sN "${conn_args[@]}" -e "$sql" 2>/dev/null)
+        _exit=$?
+
+        # Restore target if there was one
+        [[ -n "$old_target" ]] && export RSD_REMOTE_TARGET="$old_target"
+    else
+        # Route query to remote target via SSH
+        local -a env_args=()
+        [[ -n "$RSD_MYSQL_PWD" ]] && env_args+=("MYSQL_PWD=$RSD_MYSQL_PWD")
+
+        _output=$(rsd::l::target::exec env "${env_args[@]}" mysql -sN "${conn_args[@]}" -e "$sql" 2>/dev/null)
+        _exit=$?
+    fi
+
+    # Clean transport artifacts (SSH \r and extra blanks)
+    _output="${_output//$'\r'/}"
+    while [[ "$_output" == $'\n'* ]]; do
+        _output="${_output#$'\n'}"
+    done
+    while [[ "$_output" == *$'\n' ]]; do
+        _output="${_output%$'\n'}"
+    done
+
+    [[ -n "$_output" ]] && printf '%s\n' "$_output"
+    return $_exit
+}
+
+# Ping connection to check database server status
+#
+# @return int 0 if ping succeeded, 1 if failed.
+function rsd::l::mysql::ping() {
+    rsd::l::mysql::query "SELECT 1" >/dev/null 2>&1
+    return $?
+}
+
+# ==============================================================================
+# Convenience Helpers
+# ==============================================================================
+
+# Verify that the resolved MySQL connection works
+#
+# @return int 0 if connected, 1 if not.
+function rsd::l::mysql::verify_connection() {
+    if rsd::l::mysql::ping; then
+        rsd::io::ok "Connected to MySQL successfully (method: ${RSD_MYSQL_METHOD}, host: ${RSD_MYSQL_HOST})"
+        return 0
+    else
+        rsd::io::error "Cannot connect to MySQL server."
+        rsd::io::info "Probed: method=${RSD_MYSQL_METHOD}, host=${RSD_MYSQL_HOST}, user=${RSD_MYSQL_USER}."
+        return 1
+    fi
+}
+
+# List all user databases (excluding mysql, sys, information_schema, performance_schema)
+#
+# @stdout Database names, one per line.
+function rsd::l::mysql::list_databases() {
+    rsd::l::mysql::query "SHOW DATABASES;" | grep -Ev "(Database|information_schema|performance_schema|mysql|sys)"
+}
+
+# Check if a database exists
+#
+# @param string $1 Database name.
+# @return int 0 if database exists, 1 otherwise.
+function rsd::l::mysql::database_exists() {
+    local db_name="$1"
+    rsd::l::mysql::query "SHOW DATABASES LIKE '$db_name';" | grep -q "$db_name"
+    return $?
+}
+
+# List tables in a database
+#
+# @param string $1 Database name.
+# @stdout Table names, one per line.
+function rsd::l::mysql::list_tables() {
+    local db_name="$1"
+    rsd::l::mysql::query "SHOW TABLES;" "$db_name"
+}
+
+# Check if a table exists
+#
+# @param string $1 Database name.
+# @param string $2 Table name.
+# @return int 0 if table exists, 1 otherwise.
+function rsd::l::mysql::table_exists() {
+    local db_name="$1"
+    local table_name="$2"
+    rsd::l::mysql::query "SHOW TABLES LIKE '$table_name';" "$db_name" | grep -q "$table_name"
+    return $?
+}

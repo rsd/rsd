@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# MySQL Command Module
+# ==============================================================================
+# namespace rsd::c::mysql::
+#
+# Command actions for MySQL database operations.
+#
+# @see AGENTS.md
+# @see docs/config.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+[[ "$RSD_MYSQL_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/mysql.lib)"
+[[ "$RSD_CONFIGLIB_VERSION" == "" ]] && source "$(rsd::get_libdir_file lib/config.lib)"
+
+RSD_C_MYSQL_SHORT_DESC="MySQL Database Integration"
+RSD_C_MYSQL_VERSION="0.1.0"
+
+# Command is remote-aware (Mode A — local orchestration)
+RSD_C_MYSQL_REMOTE_AWARE=1
+
+# Config specification for option parser
+declare -g -A RSD_C_MYSQL_CONFIGURE_ARGS_PARAM=(
+    ["interactive"]=0
+    ["i"]=0
+    ["mode"]=1
+    ["host"]=1
+    ["user"]=1
+    ["pwd"]=1
+    ["port"]=1
+    ["socket"]=1
+)
+
+# ==============================================================================
+# Help
+# ==============================================================================
+
+function rsd::c::mysql::help() {
+    echo -e "\n\tMySQL Command Help:\n"
+    echo -e "\t\tActions:"
+    echo -e "\t\t\tconfigure [@server] [options]  Configures connection parameters"
+    echo -e "\t\t\tping [@server]                 Verifies database connection"
+    echo -e "\t\t\tlist-databases [@server]       Lists available databases"
+    echo -e "\t\t\tlist-tables <db> [@server]     Lists tables in a database"
+    echo -e "\t\t\tquery <sql> [db] [@server]     Executes a query"
+    echo -e "\n\t\tConfigure Options:"
+    echo -e "\t\t\t-i, --interactive              Prompt for inputs interactively"
+    echo -e "\t\t\t--mode <remote|direct>         Connection mode"
+    echo -e "\t\t\t--host <host>                  Database host"
+    echo -e "\t\t\t--user <user>                  Database username"
+    echo -e "\t\t\t--pwd <password>               Database password"
+    echo -e "\t\t\t--port <port>                  Database TCP port"
+    echo -e "\t\t\t--socket <socket>              Unix socket path"
+}
+
+# ==============================================================================
+# Helpers
+# ==============================================================================
+
+# Parse standard positional arguments to find the database server profile alias (starts with @)
+#
+# @param string $@ Arguments list.
+# @param string& $1 Output nameref for the resolved profile alias name (without @).
+# @param array& $2 Output nameref for remaining positional arguments.
+function rsd::c::mysql::_parse_profile_args() {
+    declare -n __out_profile="$1"
+    declare -n __out_remaining="$2"
+    shift 2
+
+    __out_profile=""
+    __out_remaining=()
+
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == @* ]]; then
+            __out_profile="${arg#@}"
+        else
+            __out_remaining+=("$arg")
+        fi
+    done
+
+    # Fallback default profile name
+    if [[ -z "$__out_profile" ]]; then
+        if [[ -n "${RSD_REMOTE_TARGET:-}" ]]; then
+            __out_profile="${RSD_REMOTE_TARGET#@}"
+        else
+            __out_profile="localhost"
+        fi
+    fi
+}
+
+# Helper: prompt user for input from /dev/tty
+function rsd::c::mysql::_prompt() {
+    local text="$1"
+    local default="$2"
+    declare -n __out_var="$3"
+    
+    local display="${text}"
+    [[ -n "$default" ]] && display="${text} [${default}]"
+    
+    local _tag="${RSD_IO_TAG:-[rsd]}"
+    local _tag_len=${#_tag}
+    local _pad=""
+    if [[ $_tag_len -lt 14 ]]; then
+        printf -v _pad '%*s' $(( 14 - _tag_len )) ''
+    fi
+    
+    printf "%s%s ▸ %s: " "$_tag" "$_pad" "$display" > /dev/tty
+    local reply
+    read -r reply < /dev/tty
+    
+    __out_var="${reply:-$default}"
+}
+
+# ==============================================================================
+# Actions
+# ==============================================================================
+
+# Configure action
+function rsd::c::mysql::configure() {
+    # Ensure config command is loaded to use rsd::c::config::set
+    if ! bash::is_function rsd::c::config::set; then
+        source "$(rsd::get_libdir_file command/config)"
+    fi
+
+    local -A opt_args
+    local -a opt_unprocessed
+    
+    # Disable stop-on-command temporarily so options after target are parsed
+    local old_stop="${RSD_PARSE_CONFIG[stop-on-command]:-1}"
+    RSD_PARSE_CONFIG[stop-on-command]=0
+    rsd::parse_args "RSD_C_MYSQL_CONFIGURE_ARGS_PARAM" opt_args opt_unprocessed "$@"
+    RSD_PARSE_CONFIG[stop-on-command]="$old_stop"
+
+    local -a all_args=()
+    [[ -n "${opt_args[command]:-}" ]] && all_args+=("${opt_args[command]}")
+    all_args+=("${opt_unprocessed[@]}")
+
+    local profile=""
+    local -a remaining
+    rsd::c::mysql::_parse_profile_args profile remaining "${all_args[@]}"
+
+    local mode="${opt_args[mode]:-}"
+    local host="${opt_args[host]:-}"
+    local user="${opt_args[user]:-}"
+    local pwd="${opt_args[pwd]:-}"
+    local port="${opt_args[port]:-}"
+    local socket="${opt_args[socket]:-}"
+
+    local interactive=0
+    if [[ -v opt_args[interactive] || -v opt_args[i] ]]; then
+        interactive=1
+    fi
+
+    # If no options are specified, default to interactive mode
+    if [[ -z "$mode" && -z "$host" && -z "$user" && -z "$pwd" && -z "$port" && -z "$socket" && $interactive -eq 0 ]]; then
+        interactive=1
+    fi
+
+    if ((interactive)); then
+        # Load existing configuration properties as defaults
+        rsd::l::mysql::load_config
+        local def_mode="${R_INI_mysql[${profile}.connection_mode]:-remote}"
+        local def_host="${R_INI_mysql[${profile}.host]:-localhost}"
+        local def_user="${R_INI_mysql[${profile}.user]:-${USER:-root}}"
+        local def_port="${R_INI_mysql[${profile}.port]:-3306}"
+        local def_socket="${R_INI_mysql[${profile}.socket]:-}"
+
+        rsd::io::status "Configuring MySQL profile for '$profile'"
+        rsd::c::mysql::_prompt "Connection Mode (remote/direct)" "$def_mode" mode
+        rsd::c::mysql::_prompt "Database Host" "$def_host" host
+        rsd::c::mysql::_prompt "Database Username" "$def_user" user
+        rsd::c::mysql::_prompt "Database Port" "$def_port" port
+        rsd::c::mysql::_prompt "Unix Socket Path" "$def_socket" socket
+        rsd::io::read_secret "Database Password" pwd
+    fi
+
+    # Write configs to mysql.ini
+    [[ -n "$mode" ]]   && rsd::c::config::set "mysql.${profile}.connection_mode" "$mode"
+    [[ -n "$host" ]]   && rsd::c::config::set "mysql.${profile}.host" "$host"
+    [[ -n "$user" ]]   && rsd::c::config::set "mysql.${profile}.user" "$user"
+    [[ -n "$port" ]]   && rsd::c::config::set "mysql.${profile}.port" "$port"
+    [[ -n "$socket" ]] && rsd::c::config::set "mysql.${profile}.socket" "$socket"
+    [[ -n "$pwd" ]]    && rsd::c::config::set "mysql.${profile}.pwd" "$pwd"
+
+    return 0
+}
+
+# Ping action
+function rsd::c::mysql::ping() {
+    local profile=""
+    local -a remaining
+    rsd::c::mysql::_parse_profile_args profile remaining "$@"
+
+    rsd::l::mysql::resolve "$profile" || return 1
+    rsd::l::mysql::verify_connection
+    return $?
+}
+
+# List databases action
+function rsd::c::mysql::list-databases() {
+    local profile=""
+    local -a remaining
+    rsd::c::mysql::_parse_profile_args profile remaining "$@"
+
+    rsd::l::mysql::resolve "$profile" || return 1
+    rsd::l::mysql::list_databases
+    return $?
+}
+
+# List tables action
+function rsd::c::mysql::list-tables() {
+    local profile=""
+    local -a remaining
+    rsd::c::mysql::_parse_profile_args profile remaining "$@"
+
+    local db="${remaining[0]:-}"
+    if [[ -z "$db" ]]; then
+        rsd::io::error "Database name is required: rsd mysql list-tables <db> [@server]"
+        return 2
+    fi
+
+    rsd::l::mysql::resolve "$profile" || return 1
+    if ! rsd::l::mysql::database_exists "$db"; then
+        rsd::io::error "Database '$db' does not exist."
+        return 1
+    fi
+
+    rsd::l::mysql::list_tables "$db"
+    return $?
+}
+
+# Query action
+function rsd::c::mysql::query() {
+    local profile=""
+    local -a remaining
+    rsd::c::mysql::_parse_profile_args profile remaining "$@"
+
+    local sql="${remaining[0]:-}"
+    local db="${remaining[1]:-}"
+
+    if [[ -z "$sql" ]]; then
+        rsd::io::error "SQL query string is required: rsd mysql query \"<sql>\" [db] [@server]"
+        return 2
+    fi
+
+    rsd::l::mysql::resolve "$profile" || return 1
+    rsd::l::mysql::query "$sql" "$db"
+    return $?
+}
