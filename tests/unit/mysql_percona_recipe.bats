@@ -275,6 +275,10 @@ _run_io() {
         # Mocking file_contains to succeed
         return 0
     }
+    rsd::l::apt::has_candidate() {
+        # Mocking has_candidate to succeed
+        return 0
+    }
 
     run rsd::r::mysql_percona::enable_repo::pre_check
     [ "$status" -eq 0 ]
@@ -285,6 +289,9 @@ _run_io() {
     rsd::l::target::file_contains() {
         # Mocking file_contains to fail
         return 1
+    }
+    rsd::l::apt::has_candidate() {
+        return 0
     }
 
     run rsd::r::mysql_percona::enable_repo::pre_check

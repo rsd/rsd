@@ -171,20 +171,43 @@ function rsd::r::mysql_percona::install_repo() {
 # ==============================================================================
 
 function rsd::r::mysql_percona::enable_repo::pre_check() {
-    rsd::l::target::file_contains "$RSD_MYSQL_REPO_NAME" "/etc/apt/sources.list.d/percona-release.list"
+    local list_file=""
+    if rsd::l::target::file_exists "/etc/apt/sources.list.d/percona-${RSD_MYSQL_REPO_NAME}-release.list"; then
+        list_file="/etc/apt/sources.list.d/percona-${RSD_MYSQL_REPO_NAME}-release.list"
+    else
+        list_file="/etc/apt/sources.list.d/percona-release.list"
+    fi
+    rsd::l::target::file_contains "$RSD_MYSQL_REPO_NAME" "$list_file" || return 1
+
+    # Ensure repository is actually resolving candidates successfully (not blank)
+    rsd::l::apt::has_candidate "percona-server-server"
 }
 
 function rsd::r::mysql_percona::enable_repo() {
     rsd::io::status "Setting up Percona repository: $RSD_MYSQL_REPO_NAME..."
 
+    local list_file=""
+    if rsd::l::target::file_exists "/etc/apt/sources.list.d/percona-${RSD_MYSQL_REPO_NAME}-release.list"; then
+        list_file="/etc/apt/sources.list.d/percona-${RSD_MYSQL_REPO_NAME}-release.list"
+    else
+        list_file="/etc/apt/sources.list.d/percona-release.list"
+    fi
+
     # Backup existing configuration file if present
-    if rsd::l::target::file_exists "/etc/apt/sources.list.d/percona-release.list"; then
-        rsd::l::r::backup "/etc/apt/sources.list.d/percona-release.list" || return 1
+    if rsd::l::target::file_exists "$list_file"; then
+        rsd::l::r::backup "$list_file" || return 1
     fi
 
     if ! rsd::l::target::exec_sudo "" percona-release setup -y "$RSD_MYSQL_REPO_NAME"; then
         rsd::io::error "Failed to set up Percona repository: $RSD_MYSQL_REPO_NAME."
         return 1
+    fi
+
+    # The list file might have been created by setup command, resolve path again
+    if rsd::l::target::file_exists "/etc/apt/sources.list.d/percona-${RSD_MYSQL_REPO_NAME}-release.list"; then
+        list_file="/etc/apt/sources.list.d/percona-${RSD_MYSQL_REPO_NAME}-release.list"
+    else
+        list_file="/etc/apt/sources.list.d/percona-release.list"
     fi
 
     # Check if package is available natively, if not apply fallback
@@ -217,7 +240,7 @@ function rsd::r::mysql_percona::enable_repo() {
         if [[ -n "$codename" ]]; then
             if [[ "$distro" == "ubuntu" ]]; then
                 rsd::io::warn "Ubuntu detected. Forcing fallback from '$codename' to 'noble' (Ubuntu 24.04) repositories..."
-                if ! rsd::l::target::exec_sudo "" sed -i "s/$codename/noble/g" "/etc/apt/sources.list.d/percona-release.list"; then
+                if ! rsd::l::target::exec_sudo "" sed -i "s/$codename/noble/g" "$list_file"; then
                     rsd::io::error "Failed to rewrite repository codename to 'noble'."
                     return 1
                 fi
@@ -225,7 +248,7 @@ function rsd::r::mysql_percona::enable_repo() {
                 rsd::l::apt::update
             elif [[ "$distro" == "debian" ]]; then
                 rsd::io::warn "Debian detected. Forcing fallback from '$codename' to 'bookworm' (Debian 12) repositories..."
-                if ! rsd::l::target::exec_sudo "" sed -i "s/$codename/bookworm/g" "/etc/apt/sources.list.d/percona-release.list"; then
+                if ! rsd::l::target::exec_sudo "" sed -i "s/$codename/bookworm/g" "$list_file"; then
                     rsd::io::error "Failed to rewrite repository codename to 'bookworm'."
                     return 1
                 fi
@@ -240,10 +263,18 @@ function rsd::r::mysql_percona::enable_repo() {
 
 function rsd::r::mysql_percona::enable_repo::rollback() {
     rsd::io::status "Rolling back Percona repository configuration..."
-    if rsd::l::target::file_exists "/etc/apt/sources.list.d/percona-release.list.rsd.bak"; then
-        rsd::l::r::restore_backup "/etc/apt/sources.list.d/percona-release.list"
+    
+    local list_file=""
+    if rsd::l::target::file_exists "/etc/apt/sources.list.d/percona-${RSD_MYSQL_REPO_NAME}-release.list"; then
+        list_file="/etc/apt/sources.list.d/percona-${RSD_MYSQL_REPO_NAME}-release.list"
     else
-        rsd::l::target::exec_sudo "" rm -f "/etc/apt/sources.list.d/percona-release.list"
+        list_file="/etc/apt/sources.list.d/percona-release.list"
+    fi
+
+    if rsd::l::target::file_exists "${list_file}.rsd.bak"; then
+        rsd::l::r::restore_backup "$list_file"
+    else
+        rsd::l::target::exec_sudo "" rm -f "$list_file"
     fi
 }
 
