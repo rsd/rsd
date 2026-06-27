@@ -278,3 +278,21 @@ setup() {
     [[ "$output" == *"LOCAL_SUDO_EMPTY_HOST"* ]]
     unset RSD_MOCK_SUDO_PASSWORD
 }
+
+@test "rsd::l::protocol::ssh::run avoids duplicate semicolons when command ends with semicolon" {
+    ssh() {
+        echo "SSH_COMMAND: $*"
+        return 0
+    }
+
+    export RSD_VAULT_MODE="never"
+    export RSD_KPX_LIB=0
+
+    run rsd::l::protocol::ssh::run "" "server1" "" "echo 'test';"
+
+    [ "$status" -eq 0 ]
+    # The output should contain exactly one semicolon between test and exit
+    [[ "$output" == *"echo 'test'; _rsd_rc="* ]]
+    [[ "$output" != *";; _rsd_rc="* ]]
+}
+

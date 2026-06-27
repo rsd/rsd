@@ -8,6 +8,7 @@ setup() {
     export RSD_DEBUG=0
     export RSD_MODE="devel"
     export RSD_RUN_DIR="${BATS_TEST_DIRNAME}/../../"
+    export USER="bats-user"
 
     declare -ga RSD_LIBRARY_SEARCH_PATH
     RSD_LIBRARY_SEARCH_PATH+=("${BATS_TEST_DIRNAME}/../../")
@@ -19,6 +20,12 @@ setup() {
     # Source dependent libraries
     source "${BATS_TEST_DIRNAME}/../../lib/rsd.lib"
     source "${BATS_TEST_DIRNAME}/../../lib/config.lib"
+    
+    # Stub config loader to isolate tests from host configs
+    rsd::config::get_file() {
+        return 0
+    }
+    
     source "${BATS_TEST_DIRNAME}/../../lib/mysql.lib"
 
     # Capture fd 7 (rsd::io) output on stdout for Bats assertions
@@ -49,7 +56,7 @@ setup() {
     [ "$RSD_MYSQL_RESOLVED" -eq 1 ]
     [ "$RSD_MYSQL_METHOD" = "remote" ]
     [ "$RSD_MYSQL_HOST" = "localhost" ]
-    [ "$RSD_MYSQL_USER" = "$USER" ]
+    [ "$RSD_MYSQL_USER" = "bats-user" ]
     [ "$RSD_MYSQL_PORT" = "3306" ]
 }
 

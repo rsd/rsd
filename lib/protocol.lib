@@ -156,7 +156,19 @@ EOF
     _stderr_cap=$(mktemp "${TMPDIR:-/tmp}/rsd-stderr.XXXXXX")
     chmod 0700 "$_stderr_cap"
 
-    ssh "${ssh_opts[@]}" "$connection_target" "${payload[*]}"'; _rsd_rc=$?; exit $_rsd_rc' \
+    local remote_cmd="${payload[*]}"
+    # Trim trailing whitespace
+    remote_cmd="${remote_cmd%"${remote_cmd##*[![:space:]]}"}"
+    
+    # Avoid duplicate semicolons (e.g. command already ending in ;)
+    local suffix
+    if [[ "$remote_cmd" == *";" ]]; then
+        suffix=" _rsd_rc=\$?; exit \$_rsd_rc"
+    else
+        suffix="; _rsd_rc=\$?; exit \$_rsd_rc"
+    fi
+
+    ssh "${ssh_opts[@]}" "$connection_target" "${remote_cmd}${suffix}" \
         2> >(tee "$_stderr_cap" >&2)
     local exit_status=$?
 

@@ -202,7 +202,7 @@ function rsd::l::mysql::verify_connection() {
 #
 # @stdout Database names, one per line.
 function rsd::l::mysql::list_databases() {
-    rsd::l::mysql::query "SHOW DATABASES;" | grep -Ev "(Database|information_schema|performance_schema|mysql|sys)"
+    rsd::l::mysql::query "SHOW DATABASES" | grep -Ev "(Database|information_schema|performance_schema|mysql|sys)"
 }
 
 # Check if a database exists
@@ -211,7 +211,7 @@ function rsd::l::mysql::list_databases() {
 # @return int 0 if database exists, 1 otherwise.
 function rsd::l::mysql::database_exists() {
     local db_name="$1"
-    rsd::l::mysql::query "SHOW DATABASES LIKE '$db_name';" | grep -q "$db_name"
+    rsd::l::mysql::query "SHOW DATABASES LIKE '$db_name'" | grep -q "$db_name"
     return $?
 }
 
@@ -221,7 +221,7 @@ function rsd::l::mysql::database_exists() {
 # @stdout Table names, one per line.
 function rsd::l::mysql::list_tables() {
     local db_name="$1"
-    rsd::l::mysql::query "SHOW TABLES;" "$db_name"
+    rsd::l::mysql::query "SHOW TABLES" "$db_name"
 }
 
 # Check if a table exists
@@ -232,6 +232,6 @@ function rsd::l::mysql::list_tables() {
 function rsd::l::mysql::table_exists() {
     local db_name="$1"
     local table_name="$2"
-    rsd::l::mysql::query "SHOW TABLES LIKE '$table_name';" "$db_name" | grep -q "$table_name"
+    rsd::l::mysql::query "SHOW TABLES LIKE '$table_name'" "$db_name" | grep -q "$table_name"
     return $?
 }
