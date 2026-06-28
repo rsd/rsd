@@ -296,3 +296,37 @@ setup() {
     [[ "$output" != *";; _rsd_rc="* ]]
 }
 
+@test "rsd::l::protocol::ssh::run masks password/secret variables in debug logging" {
+    ssh() { return 0; }
+    export RSD_VAULT_MODE="never"
+    export RSD_KPX_LIB=0
+
+    # Capture debug messages
+    local debug_log
+    debug_log=$(mktemp)
+
+    rsd::debug() {
+        echo "$1" >> "$debug_log"
+    }
+
+    run rsd::l::protocol::ssh::run "" "server1" "" "env" "MYSQL_PWD=supersecret" "RSD_SUDO_PASS_INJECT=secret" "pass=mysecret" "passphrase=xyz" "hostname"
+
+    [ "$status" -eq 0 ]
+    [ -s "$debug_log" ]
+
+    local debug_content
+    debug_content=$(cat "$debug_log")
+    rm -f "$debug_log"
+
+    # Assert that actual passwords/secrets are masked and NOT present in the debug logs
+    [[ "$debug_content" != *"supersecret"* ]]
+    [[ "$debug_content" != *"secret"* ]]
+    [[ "$debug_content" != *"mysecret"* ]]
+    
+    # Assert that variables themselves are printed with masked placeholder
+    [[ "$debug_content" == *"MYSQL_PWD=***"* ]]
+    [[ "$debug_content" == *"RSD_SUDO_PASS_INJECT=***"* ]]
+    [[ "$debug_content" == *"pass=***"* ]]
+}
+
+

@@ -10,7 +10,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_PROTOCOL_LIB=1
-RSD_PROTOCOL_LIB_VERSION="0.2.0"
+RSD_PROTOCOL_LIB_VERSION="0.2.1"
 
 # Unified Protocol Interface (UPI) Library
 # All protocol handlers are prefixed using rsd::l::protocol::<scheme>::
@@ -121,6 +121,15 @@ EOF
             _dbg_parts+=("RSD_SUDO_PASS_INJECT=***")
         elif [[ "$_el" == *'| sudo -S'* || "$_el" == *'\|\ sudo\ -S'* ]]; then
             _dbg_parts+=("<redacted-sudo-pipeline>")
+        elif [[ "$_el" == *PWD=* || "$_el" == *PASS=* || "$_el" == *PASSWORD=* || "$_el" == *pwd=* || "$_el" == *pass=* || "$_el" == *password=* ]]; then
+            local prefix=""
+            local body="$_el"
+            if [[ "$body" == *" "* ]]; then
+                _dbg_parts+=("$(echo "$body" | sed -E "s/([A-Za-z0-9_]*(PWD|PASS|PASSWORD|pwd|pass|password)=)[^ ]*/\1***/g")")
+            else
+                local var_name="${body%%=*}"
+                _dbg_parts+=("${var_name}=***")
+            fi
         else
             _dbg_parts+=("$_el")
         fi
