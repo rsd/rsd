@@ -27,9 +27,16 @@ setup() {
     }
     
     source "${BATS_TEST_DIRNAME}/../../lib/mysql.lib"
+    source "${BATS_TEST_DIRNAME}/../../command/mysql"
+    eval "$(sed -n '/^function rsd::parse_args/,/^}/p' "${BATS_TEST_DIRNAME}/../../rsd")"
 
     # Capture fd 7 (rsd::io) output on stdout for Bats assertions
     exec 7>&1
+
+    _run_io_inner() {
+        exec 7>&1
+        "$@"
+    }
 
     # Local mode default
     unset RSD_REMOTE_TARGET
@@ -77,6 +84,80 @@ setup() {
     [ "$RSD_MYSQL_PWD" = "password123" ]
     [ "$RSD_MYSQL_PORT" = "3307" ]
     [ "$RSD_MYSQL_SOCKET" = "/tmp/mysql.sock" ]
+}
+
+@test "mysql::resolve retrieves password from KeePass vault if empty in config" {
+    R_INI_mysql["prod-db.connection_mode"]="direct"
+    R_INI_mysql["prod-db.host"]="db.example.com"
+    R_INI_mysql["prod-db.user"]="backup_user"
+    R_INI_mysql["prod-db.pwd"]="" # Empty to trigger vault lookup
+
+    # Stub kpx.lib structures
+    export RSD_KPX_LIB=1
+    
+    # Mock vault files existence
+    local mock_vault_dir
+    mock_vault_dir=$(mktemp -d)
+    touch "$mock_vault_dir/vault.key.gpg"
+    touch "$mock_vault_dir/vault.kdbx"
+    export RSD_CONFIG_DIR="$mock_vault_dir"
+
+    # Stub vault_dir
+    rsd::l::kpx::vault_dir() {
+        echo "$RSD_CONFIG_DIR"
+    }
+
+    # Mock get_password to return vault secret
+    rsd::l::kpx::get_password() {
+        local entry="$1"
+        declare -n _out="$2"
+        [ "$entry" = "Databases/mysql/prod-db" ] || return 2
+        _out="vault-secret-abc"
+        return 0
+    }
+
+    rsd::l::mysql::resolve "prod-db"
+
+    [ "$RSD_MYSQL_RESOLVED" -eq 1 ]
+    [ "$RSD_MYSQL_PWD" = "vault-secret-abc" ]
+
+    rm -rf "$mock_vault_dir"
+}
+
+@test "mysql::resolve prefers config password over vault if both exist" {
+    R_INI_mysql["prod-db.connection_mode"]="direct"
+    R_INI_mysql["prod-db.host"]="db.example.com"
+    R_INI_mysql["prod-db.user"]="backup_user"
+    R_INI_mysql["prod-db.pwd"]="config-secret-123" # Config has priority
+
+    # Stub kpx.lib structures
+    export RSD_KPX_LIB=1
+    
+    # Mock vault files existence
+    local mock_vault_dir
+    mock_vault_dir=$(mktemp -d)
+    touch "$mock_vault_dir/vault.key.gpg"
+    touch "$mock_vault_dir/vault.kdbx"
+    export RSD_CONFIG_DIR="$mock_vault_dir"
+
+    # Stub vault_dir
+    rsd::l::kpx::vault_dir() {
+        echo "$RSD_CONFIG_DIR"
+    }
+
+    # Mock get_password (should not be called, but return different value just in case)
+    rsd::l::kpx::get_password() {
+        declare -n _out="$2"
+        _out="vault-secret-abc"
+        return 0
+    }
+
+    rsd::l::mysql::resolve "prod-db"
+
+    [ "$RSD_MYSQL_RESOLVED" -eq 1 ]
+    [ "$RSD_MYSQL_PWD" = "config-secret-123" ]
+
+    rm -rf "$mock_vault_dir"
 }
 
 # ==============================================================================
@@ -197,4 +278,105 @@ setup() {
 
     run rsd::l::mysql::database_exists "missing_db"
     [ "$status" -ne 0 ]
+}
+
+# ==============================================================================
+# Configure Action & Vault Integrations
+# ==============================================================================
+
+@test "mysql::configure successfully saves password in vault when vault is active" {
+    # Mock RSD config command dependency
+    rsd::c::config::set() {
+        return 0
+    }
+
+    # Mock vault presence
+    export RSD_KPX_LIB=1
+    local mock_vault_dir
+    mock_vault_dir=$(mktemp -d)
+    touch "$mock_vault_dir/vault.key.gpg"
+    touch "$mock_vault_dir/vault.kdbx"
+    export RSD_CONFIG_DIR="$mock_vault_dir"
+
+    rsd::l::kpx::vault_dir() {
+        echo "$RSD_CONFIG_DIR"
+    }
+
+    # Mock add_password using file marker for subshell propagation
+    local add_called_file
+    add_called_file=$(mktemp)
+    rsd::l::kpx::add_password() {
+        local entry="$1"
+        local user="$2"
+        local pwd="$3"
+        [ "$entry" = "Databases/mysql/dev-test" ] || return 2
+        [ "$user" = "test_user" ] || return 2
+        [ "$pwd" = "test_pass" ] || return 2
+        echo "yes" > "$add_called_file"
+        return 0
+    }
+
+    # Run configure action directly
+    run _run_io_inner rsd::c::mysql::configure "@dev-test" --mode remote --host localhost --user test_user --pwd test_pass --port 3306
+
+    [ "$status" -eq 0 ]
+    [ -s "$add_called_file" ]
+
+    rm -rf "$mock_vault_dir"
+    rm -f "$add_called_file"
+}
+
+@test "mysql::configure aborts when vault is not active/initialized" {
+    # Mock RSD config command dependency
+    rsd::c::config::set() {
+        return 0
+    }
+
+    # Vault not active by pointing RSD_CONFIG_DIR to empty dir
+    export RSD_KPX_LIB=1
+    local mock_vault_dir
+    mock_vault_dir=$(mktemp -d)
+    export RSD_CONFIG_DIR="$mock_vault_dir"
+
+    rsd::l::kpx::vault_dir() {
+        echo "$RSD_CONFIG_DIR"
+    }
+
+    run _run_io_inner rsd::c::mysql::configure "@dev-test" --mode remote --host localhost --user test_user --pwd test_pass --port 3306
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"KeePass vault is not initialized"* ]]
+
+    rm -rf "$mock_vault_dir"
+}
+
+@test "mysql::configure aborts when vault is active but add_password fails" {
+    # Mock RSD config command dependency
+    rsd::c::config::set() {
+        return 0
+    }
+
+    # Mock vault presence
+    export RSD_KPX_LIB=1
+    local mock_vault_dir
+    mock_vault_dir=$(mktemp -d)
+    touch "$mock_vault_dir/vault.key.gpg"
+    touch "$mock_vault_dir/vault.kdbx"
+    export RSD_CONFIG_DIR="$mock_vault_dir"
+
+    rsd::l::kpx::vault_dir() {
+        echo "$RSD_CONFIG_DIR"
+    }
+
+    # Mock add_password failing
+    rsd::l::kpx::add_password() {
+        return 2
+    }
+
+    run _run_io_inner rsd::c::mysql::configure "@dev-test" --mode remote --host localhost --user test_user --pwd test_pass --port 3306
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Failed to save password in vault"* ]]
+
+    rm -rf "$mock_vault_dir"
 }

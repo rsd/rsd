@@ -20,6 +20,7 @@ setup() {
     # Source core libraries and our new files
     source "${BATS_TEST_DIRNAME}/../../lib/rsd.lib"
     source "${BATS_TEST_DIRNAME}/../../lib/config.lib"
+    source "${BATS_TEST_DIRNAME}/../../lib/io.lib"
     source "${BATS_TEST_DIRNAME}/../../command/config"
 }
 
@@ -132,4 +133,32 @@ setup() {
     [[ "$output" == *"RSD_CUSTOM_VAR2=val2"* ]]
     [[ "$output" == *"mock.sec1.key1=value1"* ]]
     [[ "$output" == *"mock.sec1.key2=value2"* ]]
+}
+
+@test "rsd::c::config::set masks secret values in log output" {
+    export RSD_CONFIG_DIR="${BATS_TEST_TMPDIR}/mask_config"
+    mkdir -p "$RSD_CONFIG_DIR"
+
+    # Define _run_io_inner in local test scope to capture fd 7
+    _run_io_inner() {
+        exec 7>&1
+        "$@"
+    }
+
+    # 1. Set global GPG user ID (not a secret keyword, should show value)
+    run _run_io_inner rsd::c::config::set "RSD_GPG_USER_ID" "test_id"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Successfully set 'RSD_GPG_USER_ID' to 'test_id'"* ]]
+
+    # 2. Set global secret variable (secret, should show masked)
+    run _run_io_inner rsd::c::config::set "RSD_MY_PASSWORD" "my_super_secret"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Successfully set 'RSD_MY_PASSWORD' to '********'"* ]]
+    [[ "$output" != *"my_super_secret"* ]]
+
+    # 3. Set modular INI config secret (secret, should show masked)
+    run _run_io_inner rsd::c::config::set "mysql.chronos.pwd" "secret_pass"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Successfully set 'chronos.pwd' to '********'"* ]]
+    [[ "$output" != *"secret_pass"* ]]
 }

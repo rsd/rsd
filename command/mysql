@@ -20,7 +20,7 @@ fi
 [[ "$RSD_CONFIGLIB_VERSION" == "" ]] && source "$(rsd::get_libdir_file lib/config.lib)"
 
 RSD_C_MYSQL_SHORT_DESC="MySQL Database Integration"
-RSD_C_MYSQL_VERSION="0.1.0"
+RSD_C_MYSQL_VERSION="0.1.1"
 
 # Command is remote-aware (Mode A — local orchestration)
 RSD_C_MYSQL_REMOTE_AWARE=1
@@ -187,7 +187,51 @@ function rsd::c::mysql::configure() {
     [[ -n "$user" ]]   && rsd::c::config::set "mysql.${profile}.user" "$user"
     [[ -n "$port" ]]   && rsd::c::config::set "mysql.${profile}.port" "$port"
     [[ -n "$socket" ]] && rsd::c::config::set "mysql.${profile}.socket" "$socket"
-    [[ -n "$pwd" ]]    && rsd::c::config::set "mysql.${profile}.pwd" "$pwd"
+    # Secure Password Handling (Vault only, no config fallback)
+    if [[ -n "$pwd" ]]; then
+        local use_vault=0
+        local vault_key=""
+        local vault_db=""
+        
+        # Load vault library if not loaded yet
+        if [[ "$RSD_KPX_LIB" != "1" ]]; then
+            local kpx_lib
+            kpx_lib=$(rsd::get_libdir_file lib/kpx.lib 2>/dev/null || echo "")
+            [[ -n "$kpx_lib" && -f "$kpx_lib" ]] && source "$kpx_lib" 2>/dev/null
+        fi
+
+        if [[ "$RSD_KPX_LIB" == "1" ]]; then
+            vault_key="$(rsd::l::kpx::vault_dir)/vault.key.gpg"
+            vault_db="$(rsd::l::kpx::vault_dir)/vault.kdbx"
+            if [[ -f "$vault_key" && -f "$vault_db" ]]; then
+                use_vault=1
+            fi
+        fi
+
+        if [[ $use_vault -eq 1 ]]; then
+            rsd::io::status "Saving database password securely in KeePass vault..."
+            if rsd::l::kpx::add_password "Databases/mysql/${profile}" "${user:-root}" "$pwd"; then
+                rsd::io::ok "Successfully saved database password in vault under Databases/mysql/${profile}."
+                
+                # Clear any pre-existing plaintext password from mysql.ini
+                local user_config_dir="${RSD_CONFIG_DIR:-$HOME/.config/rsd}"
+                local ini_file="$user_config_dir/mysql.ini"
+                
+                rsd::l::mysql::load_config
+                if [[ -v R_INI_mysql["${profile}.pwd"] ]]; then
+                    unset R_INI_mysql["${profile}.pwd"]
+                    rsd::config::write_ini "$ini_file" "R_INI_mysql"
+                fi
+            else
+                rsd::io::error "Failed to save password in vault. Plaintext fallback is disabled for security."
+                return 1
+            fi
+        else
+            rsd::io::error "KeePass vault is not initialized. Database passwords must be stored in the vault."
+            rsd::io::info "Hint: run 'rsd kpx init' to initialize the secure KeePass vault first."
+            return 1
+        fi
+    fi
 
     return 0
 }

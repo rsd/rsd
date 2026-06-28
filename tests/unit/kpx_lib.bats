@@ -31,6 +31,7 @@ setup() {
     
     # Source core framework, library, and command module
     source "${BATS_TEST_DIRNAME}/../../lib/rsd.lib"
+    source "${BATS_TEST_DIRNAME}/../../lib/io.lib"
     source "${BATS_TEST_DIRNAME}/../../lib/kpx.lib"
     source "${BATS_TEST_DIRNAME}/../../command/kpx"
 }

@@ -10,7 +10,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_KPX_LIB=1
-RSD_KPX_LIB_VERSION="0.2.3"
+RSD_KPX_LIB_VERSION="0.2.4"
 
 # Using the `keepassxc-cli` to interact with the keepassxc database
 # Note that are other options for it like:
@@ -269,8 +269,20 @@ function rsd::l::kpx::add_password() {
     # Extract the group portion of the entry path (e.g. "Sudo" from "Sudo/bi").
     local _group="${entry_path%/*}"
     if [[ "$_group" != "$entry_path" && -n "$_group" ]]; then
-        # mkdir is idempotent — silently succeeds if group already exists
-        printf "%s\n" "$master_key" | keepassxc-cli mkdir "$vault_db" "$_group" 2>/dev/null
+        # Recursively create parent groups as keepassxc-cli mkdir does not support -p
+        local -a path_parts
+        IFS='/' read -r -a path_parts <<< "$_group"
+        local current_path=""
+        local part
+        for part in "${path_parts[@]}"; do
+            [[ -z "$part" ]] && continue
+            if [[ -z "$current_path" ]]; then
+                current_path="$part"
+            else
+                current_path="$current_path/$part"
+            fi
+            printf "%s\n" "$master_key" | keepassxc-cli mkdir "$vault_db" "$current_path" 2>/dev/null
+        done
     fi
 
     # Write entry programmatically via stdin piping:

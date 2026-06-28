@@ -9,7 +9,7 @@ fi
 [[ "$RSD_CONFIGLIB_VERSION" == "" ]] && $(rsd::source_lib_or_die lib/config.lib)
 
 RSD_C_CONFIG_SHORT_DESC="Configuration Management Subsystem"
-RSD_C_CONFIG_VERSION="0.1.0"
+RSD_C_CONFIG_VERSION="0.1.1"
 
 # Help and usage action
 function rsd::c::config::help() {
@@ -81,8 +81,12 @@ function rsd::c::config::set() {
     if [[ "$key" =~ ^RSD_ ]]; then
         # Writing to rsd.conf
         local rsd_conf="$user_config_dir/rsd.conf"
+        local display_value="$value"
+        if [[ "${key,,}" == *pwd* || "${key,,}" == *pass* || "${key,,}" == *secret* || "${key,,}" == *token* || "${key,,}" == *key* ]]; then
+            display_value="********"
+        fi
         rsd::l::config::set_conf_value "$rsd_conf" "$key" "$value" || return $?
-        rsd::io::ok "Successfully set '$key' to '$value' in '$rsd_conf'."
+        rsd::io::ok "Successfully set '$key' to '$display_value' in '$rsd_conf'."
         return 0
     elif [[ "$key" =~ \. ]]; then
         # Writing to module.ini
@@ -110,8 +114,12 @@ function rsd::c::config::set() {
         config_ref["$subkey"]="$value"
 
         # 4. Write back to INI file
+        local display_value="$value"
+        if [[ "${subkey,,}" == *pwd* || "${subkey,,}" == *pass* || "${subkey,,}" == *secret* || "${subkey,,}" == *token* || "${subkey,,}" == *key* ]]; then
+            display_value="********"
+        fi
         rsd::config::write_ini "$ini_file" "$array_name" || return 13
-        rsd::io::ok "Successfully set '$subkey' to '$value' in '$ini_file'."
+        rsd::io::ok "Successfully set '$subkey' to '$display_value' in '$ini_file'."
         return 0
     else
         rsd::io::error "Invalid key format. Use 'RSD_VAR' or 'module.section.key'."

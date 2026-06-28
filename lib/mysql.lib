@@ -22,7 +22,7 @@ if [[ "$RSD_MYSQL_LIB" == "1" ]]; then
     return 0
 fi
 RSD_MYSQL_LIB=1
-RSD_MYSQL_LIB_VERSION="0.1.0"
+RSD_MYSQL_LIB_VERSION="0.1.1"
 
 # Load dependencies
 [[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
@@ -85,6 +85,32 @@ function rsd::l::mysql::resolve() {
     local pwd="${R_INI_mysql[${profile}.pwd]:-}"
     local port="${R_INI_mysql[${profile}.port]:-3306}"
     local socket="${R_INI_mysql[${profile}.socket]:-}"
+
+    # Sourced vault password lookup if empty in mysql.ini
+    if [[ -z "$pwd" ]]; then
+        local vault_key=""
+        local vault_db=""
+        if [[ "$RSD_KPX_LIB" != "1" ]]; then
+            # Probe vault dir path
+            local vdir="${RSD_CONFIG_DIR:-$HOME/.config/rsd}"
+            vault_key="$vdir/vault.key.gpg"
+            vault_db="$vdir/vault.kdbx"
+        else
+            vault_key="$(rsd::l::kpx::vault_dir)/vault.key.gpg"
+            vault_db="$(rsd::l::kpx::vault_dir)/vault.kdbx"
+        fi
+
+        if [[ -f "$vault_key" && -f "$vault_db" ]]; then
+            [[ "$RSD_KPX_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/kpx.lib)" 2>/dev/null
+            if [[ "$RSD_KPX_LIB" == "1" ]]; then
+                local vault_pass=""
+                if rsd::l::kpx::get_password "Databases/mysql/${profile}" vault_pass 2>/dev/null; then
+                    pwd="$vault_pass"
+                    rsd::debug "mysql::resolve: loaded password from vault for profile '$profile'" 12
+                fi
+            fi
+        fi
+    fi
 
     # 3. Apply profile configurations to globals
     RSD_MYSQL_METHOD="$connection_mode"
