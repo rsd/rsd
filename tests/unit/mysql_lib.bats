@@ -380,3 +380,96 @@ setup() {
 
     rm -rf "$mock_vault_dir"
 }
+
+# ==============================================================================
+# Export Users Action
+# ==============================================================================
+
+@test "mysql::export_users excludes root and system accounts by default" {
+    RSD_MYSQL_RESOLVED=1
+
+    local query_log
+    query_log=$(mktemp)
+
+    rsd::l::mysql::query() {
+        echo "$1" >> "$query_log"
+        if [[ $(wc -l < "$query_log") -eq 1 ]]; then
+            # Return list of bulk queries representing show commands
+            echo "SHOW CREATE USER 'test_user'@'localhost'; SHOW GRANTS FOR 'test_user'@'localhost';"
+            return 0
+        else
+            # Return show output mock
+            echo "CREATE USER 'test_user'@'localhost' IDENTIFIED WITH 'mysql_native_password'"
+            echo "GRANT USAGE ON *.* TO 'test_user'@'localhost'"
+            return 0
+        fi
+    }
+
+    run rsd::l::mysql::export_users "dev-test" 0
+
+    [ "$status" -eq 0 ]
+    
+    local first_query_arg
+    first_query_arg=$(sed -n '1p' "$query_log")
+    local second_query_arg
+    second_query_arg=$(sed -n '2p' "$query_log")
+    rm -f "$query_log"
+
+    # Assert generator SQL excludes root and system users
+    [[ "$first_query_arg" == *"WHERE user NOT IN ('mysql.infoschema','mysql.session','mysql.sys','mysql.router','mariadb.sys','root')"* ]]
+    
+    # Assert second query executed the bulk statements
+    [ "$second_query_arg" = "SHOW CREATE USER 'test_user'@'localhost'; SHOW GRANTS FOR 'test_user'@'localhost';" ]
+
+    # Assert output formatting (semicolons appended)
+    [[ "${lines[0]}" == "CREATE USER 'test_user'@'localhost' IDENTIFIED WITH 'mysql_native_password';" ]]
+    [[ "${lines[1]}" == "GRANT USAGE ON *.* TO 'test_user'@'localhost';" ]]
+    [[ "${lines[2]}" == "FLUSH PRIVILEGES;" ]]
+}
+
+@test "mysql::export_users includes root when include_root is true" {
+    RSD_MYSQL_RESOLVED=1
+
+    local query_log
+    query_log=$(mktemp)
+
+    rsd::l::mysql::query() {
+        echo "$1" >> "$query_log"
+        # Return empty list to stop early for test simplicity
+        echo ""
+        return 0
+    }
+
+    run rsd::l::mysql::export_users "dev-test" 1
+
+    [ "$status" -eq 0 ]
+
+    local first_query_arg
+    first_query_arg=$(cat "$query_log")
+    rm -f "$query_log"
+
+    # Assert generator SQL does NOT exclude root
+    [[ "$first_query_arg" == *"WHERE user NOT IN ('mysql.infoschema','mysql.session','mysql.sys','mysql.router','mariadb.sys')"* ]]
+    [[ "$first_query_arg" != *"'root'"* ]]
+    
+    [[ "${lines[0]}" == "FLUSH PRIVILEGES;" ]]
+}
+
+@test "mysql::export_users command action parses options and executes library function" {
+    local call_log
+    call_log=$(mktemp)
+
+    rsd::l::mysql::export_users() {
+        echo "$1:$2" > "$call_log"
+        return 0
+    }
+
+    run rsd::c::mysql::export-users "@prod-db" --include-root
+
+    [ "$status" -eq 0 ]
+    [ -s "$call_log" ]
+    [ "$(cat "$call_log")" = "prod-db:1" ]
+    rm -f "$call_log"
+}
+
+

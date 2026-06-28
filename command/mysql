@@ -20,7 +20,7 @@ fi
 [[ "$RSD_CONFIGLIB_VERSION" == "" ]] && source "$(rsd::get_libdir_file lib/config.lib)"
 
 RSD_C_MYSQL_SHORT_DESC="MySQL Database Integration"
-RSD_C_MYSQL_VERSION="0.1.1"
+RSD_C_MYSQL_VERSION="0.2.0"
 
 # Command is remote-aware (Mode A — local orchestration)
 RSD_C_MYSQL_REMOTE_AWARE=1
@@ -37,6 +37,10 @@ declare -g -A RSD_C_MYSQL_CONFIGURE_ARGS_PARAM=(
     ["socket"]=1
 )
 
+declare -g -A RSD_C_MYSQL_EXPORT_USERS_ARGS_PARAM=(
+    ["include-root"]=0
+)
+
 # ==============================================================================
 # Help
 # ==============================================================================
@@ -49,6 +53,7 @@ function rsd::c::mysql::help() {
     echo -e "\t\t\tlist-databases [@server]       Lists available databases"
     echo -e "\t\t\tlist-tables <db> [@server]     Lists tables in a database"
     echo -e "\t\t\tquery <sql> [db] [@server]     Executes a query"
+    echo -e "\t\t\texport-users [@server]         Exports user accounts and privileges"
     echo -e "\n\t\tConfigure Options:"
     echo -e "\t\t\t-i, --interactive              Prompt for inputs interactively"
     echo -e "\t\t\t--mode <remote|direct>         Connection mode"
@@ -57,6 +62,8 @@ function rsd::c::mysql::help() {
     echo -e "\t\t\t--pwd <password>               Database password"
     echo -e "\t\t\t--port <port>                  Database TCP port"
     echo -e "\t\t\t--socket <socket>              Unix socket path"
+    echo -e "\n\t\tExport Users Options:"
+    echo -e "\t\t\t--include-root                 Include administrative 'root' user"
 }
 
 # ==============================================================================
@@ -296,5 +303,33 @@ function rsd::c::mysql::query() {
 
     rsd::l::mysql::resolve "$profile" || return 1
     rsd::l::mysql::query "$sql" "$db"
+    return $?
+}
+
+# Export users action
+function rsd::c::mysql::export-users() {
+    local -A opt_args
+    local -a opt_unprocessed
+
+    # Disable stop-on-command temporarily so options after target are parsed
+    local old_stop="${RSD_PARSE_CONFIG[stop-on-command]:-1}"
+    RSD_PARSE_CONFIG[stop-on-command]=0
+    rsd::parse_args "RSD_C_MYSQL_EXPORT_USERS_ARGS_PARAM" opt_args opt_unprocessed "$@"
+    RSD_PARSE_CONFIG[stop-on-command]="$old_stop"
+
+    local -a all_args=()
+    [[ -n "${opt_args[command]:-}" ]] && all_args+=("${opt_args[command]}")
+    all_args+=("${opt_unprocessed[@]}")
+
+    local profile=""
+    local -a remaining
+    rsd::c::mysql::_parse_profile_args profile remaining "${all_args[@]}"
+
+    local include_root=0
+    if [[ -v opt_args[include-root] ]]; then
+        include_root=1
+    fi
+
+    rsd::l::mysql::export_users "$profile" "$include_root"
     return $?
 }

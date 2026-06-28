@@ -22,7 +22,7 @@ if [[ "$RSD_MYSQL_LIB" == "1" ]]; then
     return 0
 fi
 RSD_MYSQL_LIB=1
-RSD_MYSQL_LIB_VERSION="0.1.3"
+RSD_MYSQL_LIB_VERSION="0.2.0"
 
 # Load dependencies
 [[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
@@ -305,4 +305,57 @@ function rsd::l::mysql::table_exists() {
     local table_name="$2"
     rsd::l::mysql::query "SHOW TABLES LIKE '$table_name'" "$db_name" | grep -q "$table_name"
     return $?
+}
+
+# Export all database user definitions and grant privileges.
+#
+# @param string $1 Optional database profile alias from mysql.ini.
+# @param int $2 Optional: 1 to include root user, 0 to exclude.
+# @return int 0 on success, 1 on query failure.
+function rsd::l::mysql::export_users() {
+    local profile="${1:-}"
+    local include_root="${2:-0}"
+
+    if [[ "$RSD_MYSQL_RESOLVED" -ne 1 ]]; then
+        rsd::l::mysql::resolve "$profile" || return 1
+    fi
+
+    # Exclude system schemas and optionally root
+    local -a excluded_users=("'mysql.infoschema'" "'mysql.session'" "'mysql.sys'" "'mysql.router'" "'mariadb.sys'")
+    if [[ "$include_root" -ne 1 ]]; then
+        excluded_users+=("'root'")
+    fi
+
+    # Join the array with commas
+    local IFS=","
+    local exclude_list="${excluded_users[*]}"
+    unset IFS
+
+    # Build SQL to generate query strings
+    local generator_sql="SELECT CONCAT('SHOW CREATE USER \`', user, '\`@\`', host, '\`; SHOW GRANTS FOR \`', user, '\`@\`', host, '\`;') FROM mysql.user WHERE user NOT IN (${exclude_list})"
+
+    # 1. Fetch the bulk SHOW queries from the database
+    local bulk_queries
+    bulk_queries=$(rsd::l::mysql::query "$generator_sql") || return 1
+
+    # If there are no users to export
+    if [[ -z "$bulk_queries" ]]; then
+        printf 'FLUSH PRIVILEGES;\n'
+        return 0
+    fi
+
+    # 2. Execute all SHOW CREATE USER and SHOW GRANTS queries in a single session
+    local raw_output
+    raw_output=$(rsd::l::mysql::query "$bulk_queries") || return 1
+
+    # 3. Read output line-by-line, cleaning up whitespace and appending a semicolon
+    while IFS= read -r line; do
+        # Strip potential leading/trailing whitespace
+        bash::trim line
+        [[ -z "$line" ]] && continue
+        printf '%s;\n' "$line"
+    done <<< "$raw_output"
+
+    printf 'FLUSH PRIVILEGES;\n'
+    return 0
 }
