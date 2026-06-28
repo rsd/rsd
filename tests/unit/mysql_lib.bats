@@ -472,4 +472,92 @@ setup() {
     rm -f "$call_log"
 }
 
+# ==============================================================================
+# Expanded Query Input Actions
+# ==============================================================================
+
+@test "mysql::query direct mode skips -e flag when use_stdin is 1" {
+    RSD_MYSQL_RESOLVED=1
+    RSD_MYSQL_METHOD="direct"
+    RSD_MYSQL_HOST="localhost"
+    RSD_MYSQL_USER="test"
+    RSD_MYSQL_PORT="3306"
+    
+    rsd::check_binary() { return 0; }
+
+    local call_log
+    call_log=$(mktemp)
+
+    rsd::l::target::exec() {
+        echo "$*" > "$call_log"
+        return 0
+    }
+
+    run rsd::l::mysql::query "" "mydb" 1
+
+    [ "$status" -eq 0 ]
+    local call_args
+    call_args=$(cat "$call_log")
+    rm -f "$call_log"
+
+    # Assert -e is NOT in the execution arguments
+    [[ "$call_args" == "mysql -sN -h localhost -P 3306 -u test mydb" ]]
+    [[ "$call_args" != *"-e"* ]]
+}
+
+@test "mysql::query remote mode skips -e flag when use_stdin is 1" {
+    RSD_MYSQL_RESOLVED=1
+    RSD_MYSQL_METHOD="remote"
+    RSD_MYSQL_HOST="10.0.0.5"
+    RSD_MYSQL_USER="remote_user"
+    RSD_MYSQL_PORT="3306"
+
+    export RSD_REMOTE_TARGET="@remote-host"
+    rsd::l::target::has_bin() { return 0; }
+
+    local call_log
+    call_log=$(mktemp)
+
+    rsd::l::target::exec() {
+        echo "$*" > "$call_log"
+        return 0
+    }
+
+    run rsd::l::mysql::query "" "mydb" 1
+
+    [ "$status" -eq 0 ]
+    local call_args
+    call_args=$(cat "$call_log")
+    rm -f "$call_log"
+
+    # Assert -e is NOT in the execution arguments
+    [[ "$call_args" == *"mysql -sN -h '10.0.0.5' -P 3306 -u 'remote_user' 'mydb'"* ]]
+    [[ "$call_args" != *"-e"* ]]
+}
+
+@test "mysql::query command action processes file parameter correctly" {
+    local call_log
+    call_log=$(mktemp)
+
+    rsd::l::mysql::query() {
+        # Arguments: sql, db, use_stdin
+        echo "$1:$2:$3" > "$call_log"
+        return 0
+    }
+
+    local mock_sql_file
+    mock_sql_file=$(mktemp)
+    echo "SELECT 1;" > "$mock_sql_file"
+
+    run rsd::c::mysql::query --file "$mock_sql_file" "mydb" "@prod"
+
+    [ "$status" -eq 0 ]
+    [ -s "$call_log" ]
+    # Stdin mode is used, sql arg is empty
+    [ "$(cat "$call_log")" = ":mydb:1" ]
+
+    rm -f "$call_log" "$mock_sql_file"
+}
+
+
 

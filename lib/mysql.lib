@@ -22,7 +22,7 @@ if [[ "$RSD_MYSQL_LIB" == "1" ]]; then
     return 0
 fi
 RSD_MYSQL_LIB=1
-RSD_MYSQL_LIB_VERSION="0.2.0"
+RSD_MYSQL_LIB_VERSION="0.3.0"
 
 # Load dependencies
 [[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
@@ -133,10 +133,12 @@ function rsd::l::mysql::resolve() {
 #
 # @param string $1 SQL statement to execute.
 # @param string $2 Optional: default database name to USE.
+# @param int $3 Optional: 1 to read SQL from stdin, 0 to use $1.
 # @return int mysql exit code. Stdout contains query results.
 function rsd::l::mysql::query() {
     local sql="$1"
     local db="${2:-}"
+    local use_stdin="${3:-0}"
 
     if [[ "$RSD_MYSQL_RESOLVED" -ne 1 ]]; then
         rsd::l::mysql::resolve || return 1
@@ -174,7 +176,11 @@ function rsd::l::mysql::query() {
         unset RSD_REMOTE_TARGET
         
         # Execute locally
-        _output=$(MYSQL_PWD="$RSD_MYSQL_PWD" rsd::l::target::exec mysql -sN "${conn_args[@]}" -e "$sql" 2>"$_err_file")
+        if [[ "$use_stdin" -eq 1 ]]; then
+            _output=$(MYSQL_PWD="$RSD_MYSQL_PWD" rsd::l::target::exec mysql -sN "${conn_args[@]}" 2>"$_err_file")
+        else
+            _output=$(MYSQL_PWD="$RSD_MYSQL_PWD" rsd::l::target::exec mysql -sN "${conn_args[@]}" -e "$sql" 2>"$_err_file")
+        fi
         _exit=$?
 
         # Restore target if there was one
@@ -213,9 +219,11 @@ function rsd::l::mysql::query() {
             remote_payload+=("'${escaped_db}'")
         fi
         
-        local escaped_sql
-        escaped_sql=$(printf '%s' "$sql" | sed "s/'/'\\\\''/g")
-        remote_payload+=("-e" "'${escaped_sql}'")
+        if [[ "$use_stdin" -ne 1 ]]; then
+            local escaped_sql
+            escaped_sql=$(printf '%s' "$sql" | sed "s/'/'\\\\''/g")
+            remote_payload+=("-e" "'${escaped_sql}'")
+        fi
 
         _output=$(rsd::l::target::exec "${remote_payload[@]}" 2>"$_err_file")
         _exit=$?

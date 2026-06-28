@@ -120,8 +120,16 @@ Lists all database schemas on the server, excluding default system schemas.
 ### `list-tables <database> [@profile]`
 Lists all tables in a specified database.
 
-### `query "<sql>" [database] [@profile]`
-Executes a SQL query string. Standard output contains query results only; all logs and debug lines are sent to standard error.
+### `query [sql] [database] [@profile]`
+Executes a SQL query string, file, or standard input content. Standard output contains query results only; all logs and debug lines are sent to standard error.
+
+* **Usage Modes**:
+  1. **Inline string**: `rsd mysql query "SELECT 1;" mydb @prod`
+  2. **File execution**: `rsd mysql query --file script.sql mydb @prod`
+  3. **Stdin piping**: `cat script.sql | rsd mysql query - mydb @prod` (or just omit `sql` argument when redirecting stdin: `rsd mysql query mydb @prod < script.sql`).
+* **Options**:
+  - `-f, --file <file_path>`: Path to a SQL file to execute.
+
 
 ### `export-users [@profile] [--include-root]`
 Generates and prints a list of `CREATE USER` and `GRANT` DDL statements to recreate the user accounts and permissions, ending with `FLUSH PRIVILEGES;`.

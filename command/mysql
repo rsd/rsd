@@ -20,7 +20,7 @@ fi
 [[ "$RSD_CONFIGLIB_VERSION" == "" ]] && source "$(rsd::get_libdir_file lib/config.lib)"
 
 RSD_C_MYSQL_SHORT_DESC="MySQL Database Integration"
-RSD_C_MYSQL_VERSION="0.2.0"
+RSD_C_MYSQL_VERSION="0.3.0"
 
 # Command is remote-aware (Mode A — local orchestration)
 RSD_C_MYSQL_REMOTE_AWARE=1
@@ -41,6 +41,11 @@ declare -g -A RSD_C_MYSQL_EXPORT_USERS_ARGS_PARAM=(
     ["include-root"]=0
 )
 
+declare -g -A RSD_C_MYSQL_QUERY_ARGS_PARAM=(
+    ["file"]=1
+    ["f"]=1
+)
+
 # ==============================================================================
 # Help
 # ==============================================================================
@@ -52,7 +57,7 @@ function rsd::c::mysql::help() {
     echo -e "\t\t\tping [@server]                 Verifies database connection"
     echo -e "\t\t\tlist-databases [@server]       Lists available databases"
     echo -e "\t\t\tlist-tables <db> [@server]     Lists tables in a database"
-    echo -e "\t\t\tquery <sql> [db] [@server]     Executes a query"
+    echo -e "\t\t\tquery [sql] [db] [@server]     Executes a query"
     echo -e "\t\t\texport-users [@server]         Exports user accounts and privileges"
     echo -e "\n\t\tConfigure Options:"
     echo -e "\t\t\t-i, --interactive              Prompt for inputs interactively"
@@ -64,6 +69,8 @@ function rsd::c::mysql::help() {
     echo -e "\t\t\t--socket <socket>              Unix socket path"
     echo -e "\n\t\tExport Users Options:"
     echo -e "\t\t\t--include-root                 Include administrative 'root' user"
+    echo -e "\n\t\tQuery Options:"
+    echo -e "\t\t\t-f, --file <file_path>         Execute SQL from a file"
 }
 
 # ==============================================================================
@@ -289,21 +296,64 @@ function rsd::c::mysql::list-tables() {
 
 # Query action
 function rsd::c::mysql::query() {
+    local -A opt_args
+    local -a opt_unprocessed
+
+    # Disable stop-on-command temporarily so options after target are parsed
+    local old_stop="${RSD_PARSE_CONFIG[stop-on-command]:-1}"
+    RSD_PARSE_CONFIG[stop-on-command]=0
+    rsd::parse_args "RSD_C_MYSQL_QUERY_ARGS_PARAM" opt_args opt_unprocessed "$@"
+    RSD_PARSE_CONFIG[stop-on-command]="$old_stop"
+
+    local -a all_args=()
+    [[ -n "${opt_args[command]:-}" ]] && all_args+=("${opt_args[command]}")
+    all_args+=("${opt_unprocessed[@]}")
+
     local profile=""
     local -a remaining
-    rsd::c::mysql::_parse_profile_args profile remaining "$@"
+    rsd::c::mysql::_parse_profile_args profile remaining "${all_args[@]}"
 
-    local sql="${remaining[0]:-}"
-    local db="${remaining[1]:-}"
+    local file_path="${opt_args[file]:-${opt_args[f]:-}}"
+    local sql=""
+    local db=""
 
-    if [[ -z "$sql" ]]; then
-        rsd::io::error "SQL query string is required: rsd mysql query \"<sql>\" [db] [@server]"
-        return 2
+    if [[ -n "$file_path" ]]; then
+        db="${remaining[0]:-}"
+    elif [[ "${remaining[0]:-}" == "-" ]]; then
+        sql="-"
+        db="${remaining[1]:-}"
+    else
+        sql="${remaining[0]:-}"
+        db="${remaining[1]:-}"
     fi
 
+    # Resolve connection
     rsd::l::mysql::resolve "$profile" || return 1
-    rsd::l::mysql::query "$sql" "$db"
-    return $?
+
+    # Determine input source
+    if [[ -n "$file_path" ]]; then
+        if [[ ! -f "$file_path" ]]; then
+            rsd::io::error "SQL file not found: $file_path"
+            return 1
+        fi
+        # Route query from file content
+        rsd::l::mysql::query "" "$db" 1 < "$file_path"
+        return $?
+    elif [[ -z "$sql" || "$sql" == "-" ]]; then
+        # Read from stdin. Verify stdin is not a terminal TTY
+        if [[ -t 0 ]]; then
+            rsd::io::error "SQL query string is required: rsd mysql query \"<sql>\" [db] [@server]"
+            rsd::io::info "Alternatively, pass a file: --file <file_path>, or pipe SQL to stdin."
+            return 2
+        fi
+        # Route query from stdin
+        rsd::l::mysql::query "" "$db" 1
+        return $?
+    else
+        # Route query from string argument
+        rsd::l::mysql::query "$sql" "$db" 0
+        return $?
+    fi
 }
 
 # Export users action
