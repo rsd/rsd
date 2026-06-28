@@ -234,17 +234,17 @@ setup() {
         # Assert target routing remains active
         [ "$RSD_REMOTE_TARGET" = "@remote-host" ]
         [ "$1" = "env" ]
-        [ "$2" = "MYSQL_PWD=pass" ]
+        [ "$2" = "MYSQL_PWD='pass'" ]
         [ "$3" = "mysql" ]
         [ "$4" = "-sN" ]
         [ "$5" = "-h" ]
-        [ "$6" = "localhost" ]
+        [ "$6" = "'localhost'" ]
         [ "$7" = "-P" ]
         [ "$8" = "3306" ]
         [ "$9" = "-u" ]
-        [ "${10}" = "root" ]
+        [ "${10}" = "'root'" ]
         [ "${11}" = "-e" ]
-        [ "${12}" = "SELECT 2" ]
+        [ "${12}" = "'SELECT 2'" ]
         echo -e "result\r" # SSH transport adds carriage returns
     }
 

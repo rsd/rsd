@@ -22,7 +22,7 @@ if [[ "$RSD_MYSQL_LIB" == "1" ]]; then
     return 0
 fi
 RSD_MYSQL_LIB=1
-RSD_MYSQL_LIB_VERSION="0.1.1"
+RSD_MYSQL_LIB_VERSION="0.1.2"
 
 # Load dependencies
 [[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
@@ -165,25 +165,68 @@ function rsd::l::mysql::query() {
     [[ -n "$RSD_MYSQL_SOCKET" ]] && conn_args+=("--socket=$RSD_MYSQL_SOCKET")
     [[ -n "$db" ]] && conn_args+=("$db")
 
+    local _err_file
+    _err_file=$(mktemp)
+
     if [[ "$RSD_MYSQL_METHOD" == "direct" ]]; then
         # Unset target to route execution locally
         local old_target="${RSD_REMOTE_TARGET:-}"
         unset RSD_REMOTE_TARGET
         
         # Execute locally
-        _output=$(MYSQL_PWD="$RSD_MYSQL_PWD" rsd::l::target::exec mysql -sN "${conn_args[@]}" -e "$sql" 2>/dev/null)
+        _output=$(MYSQL_PWD="$RSD_MYSQL_PWD" rsd::l::target::exec mysql -sN "${conn_args[@]}" -e "$sql" 2>"$_err_file")
         _exit=$?
 
         # Restore target if there was one
         [[ -n "$old_target" ]] && export RSD_REMOTE_TARGET="$old_target"
     else
-        # Route query to remote target via SSH
+        # Route query to remote target via SSH safely using single-quotes to protect from remote shell
+        local -a remote_payload=()
         local -a env_args=()
-        [[ -n "$RSD_MYSQL_PWD" ]] && env_args+=("MYSQL_PWD=$RSD_MYSQL_PWD")
+        if [[ -n "$RSD_MYSQL_PWD" ]]; then
+            local escaped_pwd
+            escaped_pwd=$(printf '%s' "$RSD_MYSQL_PWD" | sed "s/'/'\\\\''/g")
+            env_args+=("MYSQL_PWD='${escaped_pwd}'")
+        fi
+        
+        remote_payload+=("env" "${env_args[@]}" "mysql" "-sN")
+        
+        local escaped_host
+        escaped_host=$(printf '%s' "$RSD_MYSQL_HOST" | sed "s/'/'\\\\''/g")
+        remote_payload+=("-h" "'${escaped_host}'")
+        
+        remote_payload+=("-P" "$RSD_MYSQL_PORT")
+        
+        local escaped_user
+        escaped_user=$(printf '%s' "$RSD_MYSQL_USER" | sed "s/'/'\\\\''/g")
+        remote_payload+=("-u" "'${escaped_user}'")
+        
+        if [[ -n "$RSD_MYSQL_SOCKET" ]]; then
+            local escaped_socket
+            escaped_socket=$(printf '%s' "$RSD_MYSQL_SOCKET" | sed "s/'/'\\\\''/g")
+            remote_payload+=("--socket='${escaped_socket}'")
+        fi
+        
+        if [[ -n "$db" ]]; then
+            local escaped_db
+            escaped_db=$(printf '%s' "$db" | sed "s/'/'\\\\''/g")
+            remote_payload+=("'${escaped_db}'")
+        fi
+        
+        local escaped_sql
+        escaped_sql=$(printf '%s' "$sql" | sed "s/'/'\\\\''/g")
+        remote_payload+=("-e" "'${escaped_sql}'")
 
-        _output=$(rsd::l::target::exec env "${env_args[@]}" mysql -sN "${conn_args[@]}" -e "$sql" 2>/dev/null)
+        _output=$(rsd::l::target::exec "${remote_payload[@]}" 2>"$_err_file")
         _exit=$?
     fi
+
+    if [[ $_exit -ne 0 && -s "$_err_file" ]]; then
+        local _err_msg
+        _err_msg=$(cat "$_err_file")
+        rsd::debug "MySQL Query Error: $_err_msg" 10
+    fi
+    rm -f "$_err_file"
 
     # Clean transport artifacts (SSH \r and extra blanks)
     _output="${_output//$'\r'/}"
