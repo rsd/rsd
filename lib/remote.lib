@@ -10,7 +10,7 @@ if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
 fi
 
 RSD_REMOTE_LIB=1
-RSD_REMOTE_LIB_VERSION="0.1.5"
+RSD_REMOTE_LIB_VERSION="0.1.6"
 
 # Load structured IO messaging
 [[ "$RSD_IO_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/io.lib)"
@@ -416,13 +416,13 @@ function rsd::l::remote::bootstrap_check() {
     # 1. Probe for framework presence
     local remote_ver=""
     rsd::debug "Probing remote framework on '$remote_spec' via raw 'rsd --version'..." 15
-    remote_ver=$(rsd::l::remote::execute "$remote_spec" "rsd" "--version" 2>/dev/null)
+    remote_ver=$(rsd::l::remote::execute "$remote_spec" "rsd" "--version" < /dev/null 2>/dev/null)
     local probe_status=$?
     
     if [[ $probe_status -ne 0 ]]; then
         # Try local user-space path fallback
         rsd::debug "Raw probe failed. Probing via '\$HOME/.local/bin/rsd'..." 15
-        remote_ver=$(rsd::l::remote::execute "$remote_spec" "\$HOME/.local/bin/rsd" "--version" 2>/dev/null)
+        remote_ver=$(rsd::l::remote::execute "$remote_spec" "\$HOME/.local/bin/rsd" "--version" < /dev/null 2>/dev/null)
         probe_status=$?
         if [[ $probe_status -eq 0 ]]; then
             _r_bin="\$HOME/.local/bin/rsd"
@@ -455,7 +455,7 @@ function rsd::l::remote::bootstrap_check() {
             fi
             
             # Re-verify and set resolved binary
-            remote_ver=$(rsd::l::remote::execute "$remote_spec" "\$HOME/.local/bin/rsd" "--version" 2>/dev/null)
+            remote_ver=$(rsd::l::remote::execute "$remote_spec" "\$HOME/.local/bin/rsd" "--version" < /dev/null 2>/dev/null)
             if [[ $? -eq 0 ]]; then
                 _r_bin="\$HOME/.local/bin/rsd"
             else

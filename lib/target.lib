@@ -16,7 +16,7 @@ if [[ "$RSD_TARGET_LIB" == "1" ]]; then
     return 0
 fi
 RSD_TARGET_LIB=1
-RSD_TARGET_LIB_VERSION="0.6.0"
+RSD_TARGET_LIB_VERSION="0.6.1"
 
 # Lazy-load remote.lib — exec and exec_sudo delegate to rsd::l::remote::execute
 [[ "$RSD_REMOTE_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/remote.lib)"
@@ -77,7 +77,7 @@ function rsd::l::target::exec_sudo() {
 # @param string $1 The binary name (e.g., "zsh", "cargo").
 # @return int 0 if found, 1 if missing.
 function rsd::l::target::has_bin() {
-    rsd::l::target::exec which "$1" &>/dev/null
+    rsd::l::target::exec which "$1" < /dev/null &>/dev/null
 }
 
 # Check if a directory exists on the target host.
@@ -85,7 +85,7 @@ function rsd::l::target::has_bin() {
 # @param string $1 The directory path (supports remote shell expansions like \$HOME).
 # @return int 0 if exists, 1 if missing.
 function rsd::l::target::dir_exists() {
-    rsd::l::target::exec test -d "$1"
+    rsd::l::target::exec test -d "$1" < /dev/null
 }
 
 # Check if a file exists on the target host.
@@ -93,7 +93,7 @@ function rsd::l::target::dir_exists() {
 # @param string $1 The file path (supports remote shell expansions).
 # @return int 0 if exists, 1 if missing.
 function rsd::l::target::file_exists() {
-    rsd::l::target::exec test -f "$1"
+    rsd::l::target::exec test -f "$1" < /dev/null
 }
 
 # Check if a file contains a matching pattern on the target host.
@@ -102,7 +102,7 @@ function rsd::l::target::file_exists() {
 # @param string $2 The file path.
 # @return int 0 if matched, 1 if no match.
 function rsd::l::target::file_contains() {
-    rsd::l::target::exec grep -q "$1" "$2"
+    rsd::l::target::exec grep -q "$1" "$2" < /dev/null
 }
 
 # Run an in-place sed substitution on a target file.

@@ -59,6 +59,18 @@ _run_io() {
     [ "$status" -ne 0 ]
 }
 
+@test "rsd::l::target::has_bin does not drain standard input" {
+    local test_data="preservation-test-data"
+    local output_data
+    output_data=$(echo "$test_data" | {
+        rsd::l::target::has_bin bash
+        read -r line
+        echo "$line"
+    })
+    [ "$output_data" = "$test_data" ]
+}
+
+
 # ==============================================================================
 # rsd::l::target::dir_exists
 # ==============================================================================
