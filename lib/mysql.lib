@@ -22,7 +22,7 @@ if [[ "$RSD_MYSQL_LIB" == "1" ]]; then
     return 0
 fi
 RSD_MYSQL_LIB=1
-RSD_MYSQL_LIB_VERSION="0.1.2"
+RSD_MYSQL_LIB_VERSION="0.1.3"
 
 # Load dependencies
 [[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
@@ -267,11 +267,13 @@ function rsd::l::mysql::verify_connection() {
     fi
 }
 
-# List all user databases (excluding mysql, sys, information_schema, performance_schema)
-#
-# @stdout Database names, one per line.
 function rsd::l::mysql::list_databases() {
     rsd::l::mysql::query "SHOW DATABASES" | grep -Ev "(Database|information_schema|performance_schema|mysql|sys)"
+    local -a pipe_status=("${PIPESTATUS[@]}")
+    if [[ "${pipe_status[0]}" -ne 0 ]]; then
+        return "${pipe_status[0]}"
+    fi
+    return 0
 }
 
 # Check if a database exists

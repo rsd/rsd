@@ -81,7 +81,7 @@
 
 shopt -s extglob
 
-RSD_VERSION='1.28.2'
+RSD_VERSION='1.28.4'
 VERSION=$RSD_VERSION
 
 RSD_ON=1
@@ -1002,9 +1002,17 @@ if [[ "${RSD_ARGS[command]}" ]]; then
                 _remote_host="${_remote_host##*@}"
                 local _origin_chain="${RSD_IO_ORIGIN:+${RSD_IO_ORIGIN}→}${_remote_host}"
 
+                local -a escaped_args=()
+                local arg
+                for arg in "${RSD_ARGS_UNPROCESSED[@]}"; do
+                    local escaped_arg
+                    escaped_arg=$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")
+                    escaped_args+=("'${escaped_arg}'")
+                done
+
                 rsd::l::remote::execute "$RSD_REMOTE_TARGET" \
                     "env" "RSD_IO_ORIGIN=${_origin_chain}" \
-                    "$rsd_bin" "--delegated" "$RSD_COMMAND" "${RSD_ARGS_UNPROCESSED[@]}"
+                    "$rsd_bin" "--delegated" "$RSD_COMMAND" "${escaped_args[@]}"
                 exit $?
             fi
         else
