@@ -57,6 +57,8 @@ function rsd::r::conda_install::register() {
 
     rsd::r::register_task "conda_install::validate_env"
     rsd::r::register_task "conda_install::install"
+    rsd::r::register_task "conda_install::initialize_shell"
+    rsd::r::register_task "conda_install::configure"
 }
 
 # ==============================================================================
@@ -142,4 +144,76 @@ function rsd::r::conda_install::install() {
     fi
 
     rsd::io::ok "${RSD_CONDA_DISTRIBUTION} successfully installed."
+}
+
+# ==============================================================================
+# Task: initialize_shell
+# ==============================================================================
+
+function rsd::r::conda_install::initialize_shell::pre_check() {
+    local shell_path=""
+    shell_path=$(rsd::l::target::exec printenv SHELL)
+    bash::trim shell_path
+
+    local shell_name="${shell_path##*/}"
+
+    local config_file=""
+    if [[ "$shell_name" == "bash" ]]; then
+        config_file="\$HOME/.bashrc"
+    elif [[ "$shell_name" == "zsh" ]]; then
+        config_file="\$HOME/.zshrc"
+    elif [[ "$shell_name" == "fish" ]]; then
+        config_file="\$HOME/.config/fish/config.fish"
+    else
+        # If unsupported or unknown shell, skip or return true to prevent failure
+        return 0
+    fi
+
+    # Check if the shell config file contains the conda initialize block
+    rsd::l::target::file_contains "# >>> conda initialize >>>" "$config_file"
+}
+
+function rsd::r::conda_install::initialize_shell() {
+    local shell_path=""
+    shell_path=$(rsd::l::target::exec printenv SHELL)
+    bash::trim shell_path
+
+    local shell_name="${shell_path##*/}"
+
+    # Validate that we support this shell
+    if [[ "$shell_name" != "bash" && "$shell_name" != "zsh" && "$shell_name" != "fish" ]]; then
+        rsd::io::warn "Skipping conda shell initialization: unsupported shell '${shell_name}'."
+        return 0
+    fi
+
+    rsd::io::status "Initializing conda for ${shell_name}..."
+    if ! rsd::l::target::exec "${RSD_CONDA_PREFIX}/bin/conda" "init" "$shell_name"; then
+        rsd::io::error "Failed to initialize conda for ${shell_name}."
+        return 1
+    fi
+
+    rsd::io::ok "Conda initialized successfully for ${shell_name}."
+}
+
+# ==============================================================================
+# Task: configure
+# ==============================================================================
+
+function rsd::r::conda_install::configure::pre_check() {
+    local home_dir=""
+    home_dir=$(rsd::l::target::exec printenv HOME)
+    bash::trim home_dir
+
+    rsd::l::target::file_contains "auto_activate_base: false" "${home_dir}/.condarc"
+}
+
+function rsd::r::conda_install::configure() {
+    rsd::io::status "Disabling conda base auto-activation..."
+    if ! rsd::l::target::exec "${RSD_CONDA_PREFIX}/bin/conda" "config" "--set" "auto_activate_base" "false"; then
+        rsd::io::error "Failed to set auto_activate_base to false."
+        return 1
+    fi
+
+    rsd::io::ok "Conda base auto-activation disabled successfully."
+    rsd::io::ok "Please run 'conda deactivate' or restart your shell if the base environment is currently active."
 }

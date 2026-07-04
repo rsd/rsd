@@ -44,15 +44,17 @@ _run_io() {
 # Registration
 # ==============================================================================
 
-@test "conda_install::register registers both tasks" {
+@test "conda_install::register registers all four tasks" {
     RSD_REGISTERED_TASKS=()
     declare -g -A RSD_TASKS_RECOVERY
 
     rsd::r::conda_install::register
 
-    [ "${#RSD_REGISTERED_TASKS[@]}" -eq 2 ]
+    [ "${#RSD_REGISTERED_TASKS[@]}" -eq 4 ]
     [ "${RSD_REGISTERED_TASKS[0]}" = "conda_install::validate_env" ]
     [ "${RSD_REGISTERED_TASKS[1]}" = "conda_install::install" ]
+    [ "${RSD_REGISTERED_TASKS[2]}" = "conda_install::initialize_shell" ]
+    [ "${RSD_REGISTERED_TASKS[3]}" = "conda_install::configure" ]
 }
 
 @test "conda_install::register defaults distribution to miniforge" {
@@ -199,4 +201,140 @@ _run_io() {
 
     run rsd::r::conda_install::install::pre_check
     [ "$status" -ne 0 ]
+}
+
+# ==============================================================================
+# initialize_shell
+# ==============================================================================
+
+@test "initialize_shell::pre_check returns 0 when shell config already contains conda init block" {
+    # Stub target commands
+    rsd::l::target::exec() {
+        if [[ "$1" == "printenv" && "$2" == "SHELL" ]]; then
+            echo "/bin/bash"
+            return 0
+        fi
+        "$@"
+    }
+
+    # Stub file_contains to return true
+    rsd::l::target::file_contains() {
+        [[ "$1" == "# >>> conda initialize >>>" && "$2" == "\$HOME/.bashrc" ]] && return 0
+        return 1
+    }
+
+    run rsd::r::conda_install::initialize_shell::pre_check
+    [ "$status" -eq 0 ]
+}
+
+@test "initialize_shell::pre_check returns 1 when shell config lacks conda init block" {
+    # Stub target commands
+    rsd::l::target::exec() {
+        if [[ "$1" == "printenv" && "$2" == "SHELL" ]]; then
+            echo "/bin/zsh"
+            return 0
+        fi
+        "$@"
+    }
+
+    # Stub file_contains to return false
+    rsd::l::target::file_contains() {
+        return 1
+    }
+
+    run rsd::r::conda_install::initialize_shell::pre_check
+    [ "$status" -ne 0 ]
+}
+
+@test "initialize_shell task succeeds for supported shell" {
+    RSD_CONDA_PREFIX="/tmp/mock-conda"
+
+    # Stub target commands
+    rsd::l::target::exec() {
+        if [[ "$1" == "printenv" && "$2" == "SHELL" ]]; then
+            echo "/usr/bin/zsh"
+            return 0
+        elif [[ "$1" == "/tmp/mock-conda/bin/conda" && "$2" == "init" && "$3" == "zsh" ]]; then
+            return 0
+        fi
+        "$@"
+    }
+
+    _run_io rsd::r::conda_install::initialize_shell
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Conda initialized successfully for zsh"* ]]
+}
+
+@test "initialize_shell task warns and skips for unsupported shell" {
+    # Stub target commands
+    rsd::l::target::exec() {
+        if [[ "$1" == "printenv" && "$2" == "SHELL" ]]; then
+            echo "/bin/tcsh"
+            return 0
+        fi
+        "$@"
+    }
+
+    _run_io rsd::r::conda_install::initialize_shell
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Skipping conda shell initialization: unsupported shell 'tcsh'"* ]]
+}
+
+# ==============================================================================
+# configure
+# ==============================================================================
+
+@test "configure::pre_check returns 0 when condarc already disables base activation" {
+    # Stub target commands
+    rsd::l::target::exec() {
+        if [[ "$1" == "printenv" && "$2" == "HOME" ]]; then
+            echo "/home/mockuser"
+            return 0
+        fi
+        "$@"
+    }
+
+    # Stub file_contains to return true
+    rsd::l::target::file_contains() {
+        [[ "$1" == "auto_activate_base: false" && "$2" == "/home/mockuser/.condarc" ]] && return 0
+        return 1
+    }
+
+    run rsd::r::conda_install::configure::pre_check
+    [ "$status" -eq 0 ]
+}
+
+@test "configure::pre_check returns 1 when condarc lacks disabling flag" {
+    # Stub target commands
+    rsd::l::target::exec() {
+        if [[ "$1" == "printenv" && "$2" == "HOME" ]]; then
+            echo "/home/mockuser"
+            return 0
+        fi
+        "$@"
+    }
+
+    # Stub file_contains to return false
+    rsd::l::target::file_contains() {
+        return 1
+    }
+
+    run rsd::r::conda_install::configure::pre_check
+    [ "$status" -ne 0 ]
+}
+
+@test "configure task executes conda config set successfully" {
+    RSD_CONDA_PREFIX="/tmp/mock-conda"
+
+    # Stub target commands
+    rsd::l::target::exec() {
+        if [[ "$1" == "/tmp/mock-conda/bin/conda" && "$2" == "config" && "$3" == "--set" && "$4" == "auto_activate_base" && "$5" == "false" ]]; then
+            return 0
+        fi
+        "$@"
+    }
+
+    _run_io rsd::r::conda_install::configure
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Conda base auto-activation disabled successfully"* ]]
 }
