@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+
+# ==============================================================================
+# Conda / Miniconda / Miniforge Installation Recipe
+# ==============================================================================
+#
+# PURPOSE
+# -------
+# Installs conda Python distributions (defaults to Miniforge, with option
+# to install official Miniconda) to a target path.
+#
+# IDEMPOTENCY
+# -----------
+# Safe to run multiple times. If the conda binary exists at the target prefix,
+# the installation task is skipped.
+#
+# Usage:
+#   rsd recipe run conda/install
+#   rsd recipe run conda/install --distribution miniconda
+#   rsd recipe run conda/install --prefix /custom/path/conda
+#
+# @see docs/recipes.md
+# @see AGENTS.md
+
+if [[ ! -v RSD_ON || $RSD_ON -ne 1 ]]; then
+    echo "This is a RSD library file. It should not be executed directly."
+    echo "Please call 'rsd' to use it."
+    exit 12
+fi
+
+# Load dependencies
+[[ "$RSD_TARGET_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/target.lib)"
+
+# Recipe-specific CLI options
+declare -g -A RSD_RECIPE_OPTIONS=(
+    ["distribution"]=1
+    ["prefix"]=1
+)
+
+# ==============================================================================
+# Globals
+# ==============================================================================
+
+declare -g RSD_CONDA_DISTRIBUTION="miniforge"
+declare -g RSD_CONDA_PREFIX=""
+
+# ==============================================================================
+# Recipe Registration
+# ==============================================================================
+
+function rsd::r::conda_install::register() {
+    RSD_CONDA_DISTRIBUTION="${RSD_COMMAND_ARGS[distribution]:-miniforge}"
+    RSD_CONDA_PREFIX="${RSD_COMMAND_ARGS[prefix]:-}"
+
+    # Normalize distribution name to lowercase
+    RSD_CONDA_DISTRIBUTION="${RSD_CONDA_DISTRIBUTION,,}"
+
+    rsd::r::register_task "conda_install::validate_env"
+    rsd::r::register_task "conda_install::install"
+}
+
+# ==============================================================================
+# Task: validate_env
+# ==============================================================================
+
+function rsd::r::conda_install::validate_env() {
+    rsd::io::status "Validating installation parameters..."
+
+    # Validate distribution selection
+    if [[ "$RSD_CONDA_DISTRIBUTION" != "miniforge" && "$RSD_CONDA_DISTRIBUTION" != "miniconda" ]]; then
+        rsd::io::error "Invalid distribution: '${RSD_CONDA_DISTRIBUTION}'. Supported: miniforge, miniconda."
+        return 1
+    fi
+
+    # Target binary validation
+    if ! rsd::l::target::has_bin curl; then
+        rsd::io::error "Required binary 'curl' is missing on the target host."
+        return 3
+    fi
+
+    # Retrieve CPU architecture on target
+    local arch=""
+    arch=$(rsd::l::target::exec uname -m)
+    bash::trim arch
+
+    if [[ "$arch" != "x86_64" && "$arch" != "aarch64" ]]; then
+        rsd::io::error "Unsupported architecture: ${arch}. Only x86_64 and aarch64 are supported."
+        return 1
+    fi
+
+    # Resolve target's home directory dynamically to handle local vs remote paths correctly
+    local home_dir=""
+    home_dir=$(rsd::l::target::exec sh -c 'echo $HOME')
+    bash::trim home_dir
+
+    if [[ -z "$home_dir" ]]; then
+        rsd::io::error "Failed to resolve \$HOME on the target host."
+        return 1
+    fi
+
+    # Resolve relative or placeholder prefixes
+    if [[ -z "$RSD_CONDA_PREFIX" ]]; then
+        RSD_CONDA_PREFIX="${home_dir}/${RSD_CONDA_DISTRIBUTION}3"
+    elif [[ "$RSD_CONDA_PREFIX" == "~/"* ]]; then
+        RSD_CONDA_PREFIX="${home_dir}/${RSD_CONDA_PREFIX#\~/}"
+    elif [[ "$RSD_CONDA_PREFIX" == "\$HOME/"* || "$RSD_CONDA_PREFIX" == '$HOME/'* ]]; then
+        RSD_CONDA_PREFIX="${home_dir}/${RSD_CONDA_PREFIX#\$HOME/}"
+    fi
+
+    rsd::io::ok "Validated configuration: distribution=${RSD_CONDA_DISTRIBUTION}, prefix=${RSD_CONDA_PREFIX}, arch=${arch}."
+}
+
+# ==============================================================================
+# Task: install
+# ==============================================================================
+
+function rsd::r::conda_install::install::pre_check() {
+    # If the conda binary exists at the target prefix, skip installation
+    rsd::l::target::file_exists "${RSD_CONDA_PREFIX}/bin/conda"
+}
+
+function rsd::r::conda_install::install() {
+    rsd::io::status "Installing ${RSD_CONDA_DISTRIBUTION} to ${RSD_CONDA_PREFIX}..."
+
+    # Determine CPU architecture
+    local arch=""
+    arch=$(rsd::l::target::exec uname -m)
+    bash::trim arch
+
+    # Build download URL
+    local url=""
+    if [[ "$RSD_CONDA_DISTRIBUTION" == "miniforge" ]]; then
+        url="https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-${arch}.sh"
+    else
+        url="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-${arch}.sh"
+    fi
+
+    # Secure download-execute flow using fetch_and_exec
+    if ! rsd::l::target::fetch_and_exec "$url" "bash" "-b" "-p" "$RSD_CONDA_PREFIX"; then
+        rsd::io::error "Failed to install ${RSD_CONDA_DISTRIBUTION}."
+        return 1
+    fi
+
+    rsd::io::ok "${RSD_CONDA_DISTRIBUTION} successfully installed."
+}
