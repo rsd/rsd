@@ -16,7 +16,7 @@ if [[ "$RSD_TARGET_LIB" == "1" ]]; then
     return 0
 fi
 RSD_TARGET_LIB=1
-RSD_TARGET_LIB_VERSION="0.6.1"
+RSD_TARGET_LIB_VERSION="0.6.2"
 
 # Lazy-load remote.lib — exec and exec_sudo delegate to rsd::l::remote::execute
 [[ "$RSD_REMOTE_LIB" != "1" ]] && source "$(rsd::get_libdir_file lib/remote.lib)"
@@ -276,7 +276,7 @@ function rsd::l::target::fetch_and_exec() {
 
     # 1. Create secure temp file with unpredictable name and 0700 perms
     local tmpfile
-    tmpfile=$(rsd::l::target::mktemp "rsd-fetch.XXXXXX") || return 14
+    tmpfile=$(rsd::l::target::mktemp "rsd-fetch.XXXXXX.sh") || return 14
 
     # 2. Download to secure temp file
     local rc=0
