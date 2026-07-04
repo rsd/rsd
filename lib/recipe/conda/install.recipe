@@ -90,7 +90,7 @@ function rsd::r::conda_install::validate_env() {
 
     # Resolve target's home directory dynamically to handle local vs remote paths correctly
     local home_dir=""
-    home_dir=$(rsd::l::target::exec sh -c 'echo $HOME')
+    home_dir=$(rsd::l::target::exec printenv HOME)
     bash::trim home_dir
 
     if [[ -z "$home_dir" ]]; then

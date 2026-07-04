@@ -134,7 +134,7 @@ _run_io() {
         if [[ "$1" == "uname" && "$2" == "-m" ]]; then
             echo "x86_64"
             return 0
-        elif [[ "$1" == "sh" && "$3" == *"HOME"* ]]; then
+        elif [[ "$1" == "printenv" && "$2" == "HOME" ]]; then
             echo "/home/mockuser"
             return 0
         fi
@@ -156,7 +156,7 @@ _run_io() {
         if [[ "$1" == "uname" && "$2" == "-m" ]]; then
             echo "x86_64"
             return 0
-        elif [[ "$1" == "sh" && "$3" == *"HOME"* ]]; then
+        elif [[ "$1" == "printenv" && "$2" == "HOME" ]]; then
             echo "/home/mockuser"
             return 0
         fi
